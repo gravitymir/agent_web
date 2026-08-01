@@ -1,0 +1,125 @@
+<!DOCTYPE html>
+<html lang="ru" data-theme="dark">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Claude Web</title>
+  <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+  <link rel="stylesheet" href="/styles.css" />
+  <script>
+    // Apply saved theme / font size before first paint to avoid a flash.
+    (function () {
+      var t = localStorage.getItem("cwi_theme");
+      if (t) document.documentElement.dataset.theme = t;
+      var f = localStorage.getItem("cwi_fontsize");
+      if (f) document.documentElement.style.fontSize = f + "px";
+    })();
+  </script>
+</head>
+<body>
+  <div id="app">
+    <main id="main">
+      <div id="messages" class="messages">
+        <div class="empty-state">
+          <h1>Claude Web</h1>
+          <p>Веб-интерфейс к Claude Code CLI. Начните новый чат или откройте историю (список слева).</p>
+        </div>
+      </div>
+
+      <form id="composer" class="composer">
+        <textarea id="input" rows="1" placeholder="Shift+Enter — отправить, Enter — перенос строки"></textarea>
+        <button id="send" type="submit" class="btn-send" title="Отправить">▶</button>
+        <button id="stop" type="button" class="btn-stop" title="Остановить" hidden>■</button>
+      </form>
+
+      <!-- Shown instead of the composer when there are no chats yet. -->
+      <button id="big-new-chat" class="big-new-chat" hidden>＋ Создать новый чат</button>
+    </main>
+  </div>
+
+  <!-- Floating, fixed chat title; text scrolls beneath it -->
+  <div id="chat-title" class="title-capsule" title="Заголовок чата">Новый чат</div>
+
+  <!-- Chat list drawer (left) — mirror of the settings drawer on the right -->
+  <button id="sidebar-badge" class="side-badge" title="Чаты" aria-label="Список чатов">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round">
+      <line x1="4" y1="7" x2="20" y2="7" /><line x1="4" y1="12" x2="20" y2="12" /><line x1="4" y1="17" x2="20" y2="17" />
+    </svg>
+  </button>
+  <div id="sidebar-overlay" class="side-overlay" hidden></div>
+  <aside id="sidebar" class="sidebar-drawer" aria-label="Список чатов">
+    <div class="sidebar-header">
+      <button id="new-chat" class="btn-primary">＋ Новый чат</button>
+    </div>
+    <div id="chat-list" class="chat-list"></div>
+  </aside>
+
+  <!-- Connection-lost banner (top center); shown only while disconnected. -->
+  <div id="offline-banner" class="offline-banner" hidden>
+    <svg class="offline-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round">
+      <circle cx="12" cy="12" r="9" /><line x1="3" y1="12" x2="21" y2="12" />
+      <path d="M12 3a15 15 0 0 1 0 18a15 15 0 0 1 0-18" />
+      <line x1="4" y1="4" x2="20" y2="20" />
+    </svg>
+    <span class="offline-text">Переподключение</span>
+    <span class="offline-spinner" aria-hidden="true"></span>
+  </div>
+
+  <!-- Settings drawer -->
+  <button id="settings-badge" class="settings-badge" title="Настройки" aria-label="Настройки">⚙</button>
+  <div id="settings-overlay" class="settings-overlay" hidden></div>
+  <aside id="settings-panel" class="settings-panel" aria-label="Настройки">
+    <div class="settings-header"><h2>Настройки</h2></div>
+    <div class="settings-body">
+      <section class="setting-group">
+        <div class="setting-label">Модель</div>
+        <select id="model-select" class="setting-select" title="Модель">
+          <option value="">по умолчанию</option>
+          <option value="opus">Opus 5</option>
+          <option value="sonnet">Sonnet 5</option>
+          <option value="haiku">Haiku 4.5</option>
+        </select>
+      </section>
+      <section class="setting-group">
+        <div class="setting-label">Тема</div>
+        <div class="seg" id="theme-seg">
+          <button type="button" class="seg-btn" data-theme="dark">Тёмная</button>
+          <button type="button" class="seg-btn" data-theme="light">Светлая</button>
+        </div>
+      </section>
+      <section class="setting-group">
+        <div class="setting-label">Размер шрифта</div>
+        <div class="seg seg-fill" id="fontsize-seg">
+          <button type="button" class="seg-btn" data-size="12">1</button>
+          <button type="button" class="seg-btn" data-size="13">2</button>
+          <button type="button" class="seg-btn" data-size="14">3</button>
+          <button type="button" class="seg-btn" data-size="15">4</button>
+          <button type="button" class="seg-btn" data-size="17">5</button>
+          <button type="button" class="seg-btn" data-size="19">6</button>
+          <button type="button" class="seg-btn" data-size="22">7</button>
+        </div>
+      </section>
+    </div>
+  </aside>
+
+  <!-- New chat modal -->
+  <div id="modal-overlay" class="modal-overlay" hidden>
+    <div class="modal" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+      <h2 id="modal-title" class="modal-title">Новый чат</h2>
+
+      <div id="icon-grid" class="icon-grid"></div>
+
+      <label class="field-label" for="chat-name">Название</label>
+      <input id="chat-name" class="modal-input" type="text"
+             placeholder="Например: Рефакторинг API" maxlength="80" autocomplete="off" />
+
+      <div class="modal-actions">
+        <button id="modal-cancel" class="btn-ghost" type="button">Отмена</button>
+        <button id="modal-create" class="btn-primary" type="button" disabled>Создать</button>
+      </div>
+    </div>
+  </div>
+
+  <script src="/app.js"></script>
+</body>
+</html>

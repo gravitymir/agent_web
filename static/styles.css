@@ -1,0 +1,435 @@
+:root, :root[data-theme="dark"] {
+  --bg: #1a1a19;
+  --bg-elev: #262624;
+  --bg-input: #2f2f2d;
+  --sidebar: #1e1e1d;
+  --border: #3a3a37;
+  --text: #ececec;
+  --text-dim: #a0a0a0;
+  --accent: #d97757;
+  --accent-hover: #c26647;
+  --user-bubble: #2f2f2d;
+  --code-bg: #141413;
+  --code-text: #e6e6e6;
+  --thinking-bg: #201f1e;
+  --thinking-text: #9a9a95;
+  --shadow: rgba(0, 0, 0, 0.4);
+  --radius: 10px;
+  font-family: ui-sans-serif, system-ui, -apple-system, "Segoe UI", sans-serif;
+}
+
+:root[data-theme="light"] {
+  --bg: #f7f7f5;
+  --bg-elev: #ffffff;
+  --bg-input: #ffffff;
+  --sidebar: #f0f0ee;
+  --border: #e2e2dd;
+  --text: #1a1a19;
+  --text-dim: #6b6b68;
+  --accent: #c9603f;
+  --accent-hover: #b5502f;
+  --user-bubble: #eeeeec;
+  --code-bg: #f2f2ef;
+  --code-text: #1a1a19;
+  --thinking-bg: #f0efeb;
+  --thinking-text: #6b6b66;
+  --shadow: rgba(0, 0, 0, 0.15);
+}
+
+* { box-sizing: border-box; }
+
+html {
+  /* Root size; the "Размер шрифта" setting overrides this inline (app.js).
+     Everything else is sized in rem, so the whole page scales with it. */
+  font-size: 15px;
+}
+html, body {
+  margin: 0;
+  height: 100%;
+  background: var(--bg);
+  color: var(--text);
+}
+body { font-size: 1rem; }
+
+#app { height: 100vh; }
+
+/* ---------- Chat list drawer (left) — mirror of the settings drawer ---------- */
+.sidebar-drawer {
+  position: fixed; top: 0; left: 0; height: 100%; width: 260px; z-index: 58;
+  background: var(--sidebar);
+  border-right: 1px solid var(--border);
+  box-shadow: 4px 0 24px var(--shadow);
+  transform: translateX(-100%); transition: transform .28s ease;
+  display: flex; flex-direction: column;
+}
+.sidebar-drawer.open { transform: translateX(0); }
+.side-overlay { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, 0.25); }
+
+/* List badge — mirrors the settings gear on the right, same level & style. */
+.side-badge {
+  position: fixed; bottom: 20vh; left: 0; z-index: 60;
+  width: 40px; height: 42px;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 0 10px 10px 0; cursor: pointer;
+  box-shadow: 2px 2px 10px var(--shadow);
+  transition: left .28s ease, background .15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.side-badge:hover { background: var(--accent-hover); }
+.side-badge.open { left: 260px; }
+.side-badge svg { width: 20px; height: 20px; display: block; }
+
+.sidebar-header { padding: 12px; }
+.btn-primary {
+  width: 100%;
+  padding: 10px 12px;
+  background: var(--accent);
+  color: #fff;
+  border: none;
+  border-radius: var(--radius);
+  font-size: 0.933rem;
+  font-weight: 600;
+  cursor: pointer;
+}
+.btn-primary:hover { background: var(--accent-hover); }
+
+.chat-list { flex: 1; overflow-y: auto; padding: 4px 8px; }
+.chat-item {
+  padding: 9px 10px;
+  border-radius: 8px;
+  cursor: pointer;
+  color: var(--text-dim);
+  font-size: 0.9rem;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  margin-bottom: 2px;
+}
+.chat-item:hover { background: var(--bg-elev); color: var(--text); }
+/* The ONLY marker: the active (selected) chat. */
+.chat-item.active {
+  background: color-mix(in srgb, var(--accent) 24%, var(--bg-elev));
+  color: var(--text);
+  box-shadow: inset 3px 0 0 var(--accent);
+}
+.chat-item.active:hover { background: color-mix(in srgb, var(--accent) 30%, var(--bg-elev)); }
+
+.chat-title-row { display: flex; align-items: center; gap: 7px; }
+/* Icon dimmed (grayscale, 50%) for inactive chats; full colour when active or hovered. */
+.chat-icon {
+  flex-shrink: 0; font-size: 1rem; line-height: 1;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+  filter: grayscale(1); opacity: 0.5; transition: filter .15s ease, opacity .15s ease;
+}
+.chat-item:hover .chat-icon,
+.chat-item.active .chat-icon { filter: none; opacity: 1; }
+.chat-title-text {
+  flex: 1; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+}
+
+.sidebar-footer { padding: 10px 14px; border-top: 1px solid var(--border); font-size: 0.8rem; }
+.conn.online { color: #5db97a; }
+.conn.offline { color: #b95d5d; }
+
+/* ---------- Main ---------- */
+#main { height: 100vh; display: flex; flex-direction: column; min-width: 0; }
+
+/* Floating, fixed chat title; content scrolls beneath it. Narrow with ellipsis;
+   on hover it expands to show the full title on up to 3 lines. */
+.title-capsule {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 40; max-width: min(440px, 58vw);
+  padding: 8px 16px; border-radius: 20px;
+  background: color-mix(in srgb, var(--bg-elev) 30%, transparent);
+  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
+  border: 1px solid var(--border);
+  box-shadow: 0 2px 12px var(--shadow);
+  font-size: 0.933rem; font-weight: 600; color: var(--text); line-height: 1.35;
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+  cursor: default;
+  transition: max-width .2s ease, background .2s ease;
+}
+/* Hover: keep the same width, just grow downward to reveal the full title. */
+.title-capsule:hover {
+  white-space: normal; text-overflow: clip;
+  display: -webkit-box; -webkit-line-clamp: 3; -webkit-box-orient: vertical;
+  background: color-mix(in srgb, var(--bg-elev) 55%, transparent);
+}
+
+/* Big "create" button — shown instead of the composer when there are no chats. */
+.big-new-chat {
+  display: block; margin: 0 auto 32px;
+  padding: 15px 30px; font-size: 1.05rem; font-weight: 600;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 14px; cursor: pointer; font-family: inherit;
+  box-shadow: 0 4px 16px var(--shadow);
+}
+.big-new-chat:hover { background: var(--accent-hover); }
+.big-new-chat[hidden] { display: none; }
+
+/* Connection-lost banner (top center); spinner conveys the reconnect attempt. */
+.offline-banner {
+  position: fixed; top: 12px; left: 50%; transform: translateX(-50%);
+  z-index: 45; display: flex; align-items: center; gap: 9px;
+  padding: 8px 16px; border-radius: 20px;
+  background: #b95d5d; color: #fff;
+  font-size: 0.86rem; font-weight: 500;
+  box-shadow: 0 4px 16px var(--shadow);
+  animation: banner-in .28s ease;
+}
+.offline-banner[hidden] { display: none; }
+.offline-icon { width: 32px; height: 32px; display: block; flex-shrink: 0; }
+.offline-text { flex: 1; text-align: center; }
+.offline-spinner {
+  width: 14px; height: 14px; flex-shrink: 0; border-radius: 50%;
+  border: 2px solid rgba(255, 255, 255, 0.4); border-top-color: #fff;
+  animation: spin .8s linear infinite;
+}
+@keyframes spin { to { transform: rotate(360deg); } }
+@keyframes banner-in {
+  from { transform: translate(-50%, -16px); opacity: 0; }
+  to { transform: translate(-50%, 0); opacity: 1; }
+}
+.setting-select {
+  width: 100%;
+  background: var(--bg-input);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 9px 11px;
+  font-size: 0.933rem;
+  font-family: inherit;
+  cursor: pointer;
+}
+.setting-select:focus { outline: none; border-color: var(--accent); }
+
+/* ---------- Messages ---------- */
+.messages { flex: 1; overflow-y: auto; padding: 64px 0 120px; }
+.empty-state { text-align: center; color: var(--text-dim); margin-top: 15vh; }
+.empty-state h1 { color: var(--text); font-weight: 600; }
+
+/* Message block ~80% of the page width, centered. */
+.msg { max-width: 80%; margin: 0 auto 22px; padding: 0 20px; display: flex; gap: 14px; }
+.msg .avatar {
+  width: 28px; height: 28px; border-radius: 6px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.867rem; font-weight: 700;
+}
+.msg.user .avatar { background: #4a4a47; color: #fff; }
+.msg.assistant .avatar { background: var(--accent); color: #fff; }
+.msg .body { min-width: 0; flex: 1; }
+.msg .role { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
+.msg .content { line-height: 1.6; word-wrap: break-word; overflow-wrap: anywhere; font-size: 1rem; }
+.msg.user .content { white-space: pre-wrap; }
+
+/* Markdown */
+.content p { margin: 0 0 10px; }
+.content h1, .content h2, .content h3 { margin: 16px 0 8px; line-height: 1.3; }
+.content ul, .content ol { margin: 0 0 10px; padding-left: 22px; }
+.content li { margin: 3px 0; }
+.content a { color: var(--accent); }
+.content code.inline {
+  background: var(--code-bg); padding: 1px 5px; border-radius: 4px;
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace; font-size: 0.9em;
+}
+.content pre {
+  background: var(--code-bg); border: 1px solid var(--border);
+  border-radius: 8px; padding: 12px 14px; overflow-x: auto; margin: 0 0 12px;
+  position: relative;
+}
+.content pre code {
+  font-family: ui-monospace, "Cascadia Code", Consolas, monospace;
+  font-size: 0.87em; color: var(--code-text);
+}
+.copy-btn {
+  position: absolute; top: 6px; right: 6px;
+  background: var(--bg-elev); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 6px;
+  font-size: 0.733rem; padding: 3px 8px; cursor: pointer; opacity: 0;
+  transition: opacity .12s;
+}
+.content pre:hover .copy-btn { opacity: 1; }
+
+.tool-chip {
+  display: inline-flex; align-items: center; gap: 6px;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 20px; padding: 3px 11px; font-size: 0.8rem;
+  color: var(--text-dim); margin: 4px 6px 4px 0;
+}
+/* Reasoning panel: chevron top-right; collapsed shows the first ~2 lines. */
+.thinking {
+  margin: 0 0 12px;
+  background: var(--thinking-bg);
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  font-size: 0.9rem;
+  color: var(--thinking-text);
+}
+.think-head {
+  display: flex; align-items: center; justify-content: space-between; gap: 8px;
+  padding: 6px 6px 6px 12px;
+}
+.think-label { font-weight: 500; }
+.think-content {
+  padding: 0 12px 10px; line-height: 1.55; color: var(--thinking-text);
+}
+.think-content p { margin: 0 0 8px; }
+.think-note { font-style: italic; opacity: 0.85; }
+.thinking.collapsed .think-content {
+  -webkit-mask-image: linear-gradient(to top, transparent 0, #000 62%);
+  mask-image: linear-gradient(to top, transparent 0, #000 62%);
+}
+/* The answer itself: full-contrast text, clearly distinct from the muted reasoning. */
+.msg.assistant .content { color: var(--text); }
+
+.meta-line { font-size: 0.767rem; color: #6f6f6f; margin-top: 6px; }
+
+/* Collapsible content shared by long answers and the reasoning panel. */
+.foldable { position: relative; }
+.fold-content { overflow: hidden; transition: max-height .3s ease; }
+/* Answer collapsed: keep the last ~2 lines (content anchored to the bottom,
+   top edge fading out — as if the text slid up and away). */
+.foldable.answer.collapsed .fold-content {
+  display: flex; flex-direction: column; justify-content: flex-end;
+  -webkit-mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+  mask-image: linear-gradient(to bottom, transparent 0, #000 45%);
+}
+.fold-chevron {
+  padding: 0; width: 30px; height: 30px; flex-shrink: 0;
+  display: flex; align-items: center; justify-content: center;
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 8px; cursor: pointer; color: var(--text-dim);
+}
+.fold-chevron:hover { color: var(--accent); border-color: var(--accent); }
+.fold-chevron svg { width: 20px; height: 20px; display: block; transition: transform .2s ease; }
+/* Chevron points down = "expand" (collapsed); flips up = "collapse" (expanded). */
+.cfold:not(.collapsed) .fold-chevron svg { transform: rotate(180deg); }
+.foldable.answer > .fold-chevron { position: absolute; right: 4px; bottom: 4px; z-index: 2; }
+
+.cursor::after {
+  content: "▋"; color: var(--accent); animation: blink 1s steps(2) infinite;
+}
+@keyframes blink { 50% { opacity: 0; } }
+
+/* ---------- Composer ---------- */
+/* Fixed at the bottom, floating over the messages — it grows upward without
+   shifting the chat. A top gradient fades the messages out behind it. */
+/* Standalone floating input, ~50% of the page width, centered at the bottom.
+   Messages scroll behind and beside it. */
+.composer {
+  position: fixed; bottom: 0; left: 50%; transform: translateX(-50%);
+  width: 50%; min-width: 320px; z-index: 30;
+  display: flex; align-items: flex-end; gap: 8px;
+  padding: 12px 0 20px;
+}
+#input {
+  flex: 1; resize: none; max-height: 220px;
+  /* Slightly translucent so scrolling text behind stays faintly visible. */
+  background: color-mix(in srgb, var(--bg-input) 90%, transparent); color: var(--text);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+  border: 1px solid var(--border); border-radius: var(--radius);
+  padding: 0.75em 0.9em; font-size: 1rem; line-height: 1.5; /* sized from the text */
+  font-family: inherit; outline: none;
+  overflow-y: auto; scrollbar-width: none;   /* hide the scrollbar */
+  transition: height .15s ease;              /* smooth upward growth */
+}
+#input::-webkit-scrollbar { display: none; }
+#input:focus { border-color: var(--accent); }
+.btn-send, .btn-stop {
+  /* Same height as a single line of the input (line 1.5em + padding 1.5em),
+     so both scale together with the font-size setting; the button stays this
+     height even as the input grows to multiple lines. */
+  height: 3em; width: 3em;
+  border: none; border-radius: var(--radius);
+  cursor: pointer; font-size: 1rem; flex-shrink: 0;
+}
+.btn-send { background: var(--accent); color: #fff; }
+.btn-send:hover { background: var(--accent-hover); }
+.btn-send:disabled { opacity: .5; cursor: default; }
+.btn-stop { background: #b95d5d; color: #fff; }
+.btn-ghost {
+  background: transparent; color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 8px;
+  padding: 9px 16px; font-size: 0.933rem; cursor: pointer;
+}
+.btn-ghost:hover { color: var(--text); border-color: var(--text-dim); }
+
+/* ---------- Settings drawer ---------- */
+.settings-badge {
+  position: fixed; bottom: 20vh; right: 0; z-index: 60;
+  width: 40px; height: 42px;
+  background: var(--accent); color: #fff; border: none;
+  border-radius: 10px 0 0 10px; cursor: pointer; font-size: 1.267rem;
+  box-shadow: -2px 2px 10px var(--shadow);
+  transition: right .28s ease, background .15s;
+  display: flex; align-items: center; justify-content: center;
+}
+.settings-badge:hover { background: var(--accent-hover); }
+.settings-badge.open { right: 320px; }
+
+.settings-overlay { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, 0.25); }
+
+.settings-panel {
+  position: fixed; top: 0; right: 0; height: 100%; width: 320px; z-index: 58;
+  background: var(--bg-elev); border-left: 1px solid var(--border);
+  box-shadow: -4px 0 24px var(--shadow);
+  transform: translateX(100%); transition: transform .28s ease;
+  display: flex; flex-direction: column;
+}
+.settings-panel.open { transform: translateX(0); }
+.settings-header { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.settings-header h2 { margin: 0; font-size: 1.067rem; }
+.settings-body { padding: 18px 20px; overflow-y: auto; }
+.setting-group { margin-bottom: 22px; }
+.setting-label { font-size: 0.867rem; color: var(--text-dim); margin-bottom: 8px; }
+
+.seg { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
+.seg-btn {
+  background: transparent; color: var(--text-dim); border: none;
+  padding: 8px 16px; font-size: 0.9rem; cursor: pointer; font-family: inherit;
+  border-right: 1px solid var(--border);
+}
+.seg-btn:last-child { border-right: none; }
+.seg-btn:hover { background: var(--bg-input); color: var(--text); }
+.seg-btn.active { background: var(--accent); color: #fff; }
+/* Full-width segmented control with equal cells (e.g. the 7 font sizes). */
+.seg-fill { display: flex; width: 100%; }
+.seg-fill .seg-btn { flex: 1; padding: 8px 4px; text-align: center; }
+
+/* ---------- Modal ---------- */
+.modal-overlay {
+  position: fixed; inset: 0; z-index: 100;
+  background: rgba(0, 0, 0, 0.5);
+  display: flex; align-items: center; justify-content: center;
+}
+/* `hidden` must win over the flex display above, or the modal never closes. */
+.modal-overlay[hidden] { display: none; }
+.modal {
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 14px; padding: 22px; width: 420px; max-width: 92vw;
+  box-shadow: 0 12px 40px var(--shadow);
+}
+.modal-title { margin: 0 0 16px; font-size: 1.2rem; }
+.field-label { font-size: 0.867rem; color: var(--text-dim); margin: 14px 0 8px; }
+.field-label:first-of-type { margin-top: 0; }
+.modal-input {
+  width: 100%; background: var(--bg-input); color: var(--text);
+  border: 1px solid var(--border); border-radius: 9px;
+  padding: 11px 13px; font-size: 1rem; font-family: inherit; outline: none;
+}
+.modal-input:focus { border-color: var(--accent); }
+.modal-actions { display: flex; justify-content: flex-end; gap: 10px; margin-top: 20px; }
+.modal-actions .btn-primary { width: auto; padding: 9px 20px; }
+
+.icon-grid {
+  display: grid; grid-template-columns: repeat(8, 1fr); gap: 6px;
+}
+.icon-cell {
+  aspect-ratio: 1; display: flex; align-items: center; justify-content: center;
+  font-size: 1.267rem; background: var(--bg-input); border: 1px solid transparent;
+  border-radius: 8px; cursor: pointer; user-select: none;
+  font-family: "Segoe UI Emoji", "Apple Color Emoji", "Noto Color Emoji", sans-serif;
+}
+.icon-cell:hover { border-color: var(--text-dim); }
+.icon-cell.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 18%, var(--bg-input)); }
+.icon-cell.none { font-size: 0.867rem; color: var(--text-dim); }
