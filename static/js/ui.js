@@ -1,0 +1,1117 @@
+import { state, el, ICONS, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
+import { iIcon } from './ios-icons.js';
+import { connect, sendWs, sendWsOrQueue } from './ws.js';
+import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage } from './render.js';
+import { setFaviconState } from '../favicon.js';
+// ---------------------------------------------------------------------------
+// Composer
+// ---------------------------------------------------------------------------
+el.composer.addEventListener("submit", (e) => {
+  e.preventDefault();
+  submit();
+});
+
+el.input.addEventListener("keydown", (e) => {
+  if (e.key !== "Enter") return;
+
+  // While dictating, Enter is the "finish" gesture: stop recording and send
+  // (send happens once recognition ends, so the final words make it in).
+  if (dictation.active) {
+    e.preventDefault();
+    dictation.forceSend = true;
+    stopDictation();
+    return;
+  }
+  // Standard chat behaviour: Shift+Enter inserts a newline, plain Enter sends.
+  if (e.shiftKey) return; // let the default newline through
+  e.preventDefault();
+  submit();
+});
+
+el.input.addEventListener("input", autoGrow);
+export function autoGrow() {
+  // When empty, fall back to the CSS one-row height. Chromium counts the (long,
+  // wrapping) placeholder in scrollHeight for an empty textarea, which would
+  // otherwise make the field 2-3 lines tall until the first character is typed.
+  if (el.input.value === "") {
+    el.input.style.height = "";
+    updateSendButton();
+    return;
+  }
+  // Both writes happen in one tick, so only the final px value is painted —
+  // the CSS `transition: height` animates the upward growth smoothly.
+  el.input.style.height = "auto";
+  el.input.style.height = Math.min(el.input.scrollHeight, 220) + "px";
+  updateSendButton();
+}
+
+export function submit() {
+  const typed = el.input.value.trim();
+  const images = state.pendingImages;
+  const files = state.pendingFiles;
+  if ((!typed && !images.length && !files.length) || state.streaming) return;
+  if (chatFrozen(state.sessionId)) {
+    showSystem("Чат только для чтения — создан другим движком. Переключите CWI_ENGINE, чтобы продолжить.");
+    return;
+  }
+
+  // Inline attached text files as fenced blocks ahead of the typed message, so
+  // the model sees their contents (works for CLI and native engines alike).
+  const text = filesToPrompt(files) + typed;
+
+  // The user bubble is rendered from the keeper's echo ({cwi:"user"}), so it
+  // shows consistently across every attached viewer and on replay.
+  const payload = {
+    type: "send",
+    session_id: state.sessionId,
+    text,
+    model: el.model.value || null,
+    provider: settings.provider || null,
+    new_chat: state.isNew,
+    images: images.map((i) => ({ media_type: i.media_type, data: i.data })),
+    caps: currentCaps(),
+  };
+  const sent = sendWs(payload);
+  if (!sent) {
+    // Queue the message so it is sent automatically once the socket recovers.
+    sendWsOrQueue(payload);
+    showSystem("Соединение потеряно — сообщение будет отправлено после восстановления.");
+  }
+
+  // After the first message of a brand-new chat the backend has created the
+  // real session file. Refresh the sidebar so the chat stays visible after a
+  // page reload.
+  if (state.isNew) {
+    loadChatList();
+  }
+  state.isNew = false; // subsequent turns reuse the live process
+
+  // Clear the composer and lock it until the turn completes (this also applies
+  // to queued messages that will go out as soon as the socket reconnects).
+  el.input.value = "";
+  state.pendingImages = [];
+  state.pendingFiles = [];
+  renderAttachPreview();
+  autoGrow();
+  state.streaming = true;
+  setStreamingUI(true);
+  updateSendButton(); // toggle send → stop immediately
+
+  // Scroll to the bottom so the outgoing message is visible while we wait for
+  // the keeper's echo and the assistant response.
+  scrollToBottom();
+}
+
+// Turn attached text files into a prompt preamble. Uses a fence long enough to
+// never collide with backticks in the file's own content.
+export function filesToPrompt(files) {
+  if (!files || !files.length) return "";
+  let out = "";
+  for (const f of files) {
+    const fence = "```";
+    const ext = (f.name.match(/\.([a-z0-9]+)$/i) || [, ""])[1].toLowerCase();
+    out += `Файл \`${f.name}\`:\n${fence}${ext}\n${f.text}\n${fence}\n`;
+    if (f.truncated) out += `_(файл обрезан до лимита)_\n`;
+    out += "\n";
+  }
+  return out;
+}
+
+el.stop.addEventListener("click", () => {
+  sendWs({ type: "interrupt" });
+});
+
+// ---------------------------------------------------------------------------
+// Tools / permissions panel (native engine): which tool groups are enabled.
+// Persisted in localStorage; sent with every message as `caps`.
+// ---------------------------------------------------------------------------
+export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run"];
+
+export function loadCaps() {
+  let saved = {};
+  try {
+    saved = JSON.parse(localStorage.getItem("cwi_caps") || "{}");
+  } catch (e) {
+    saved = {};
+  }
+  for (const k of CAP_KEYS) {
+    const box = document.getElementById("cap-" + k);
+    if (box) box.checked = saved[k] !== false; // default enabled
+  }
+}
+
+export function currentCaps() {
+  const caps = {};
+  for (const k of CAP_KEYS) {
+    const box = document.getElementById("cap-" + k);
+    caps[k] = box ? box.checked : true;
+  }
+  return caps;
+}
+
+export function saveCaps() {
+  localStorage.setItem("cwi_caps", JSON.stringify(currentCaps()));
+}
+
+for (const k of CAP_KEYS) {
+  const box = document.getElementById("cap-" + k);
+  if (box) box.addEventListener("change", saveCaps);
+}
+
+let toolsModalCloseTimer = null;
+
+export function setToolsModal(open) {
+  if (open && !state.sessionId) return; // nothing to configure without a chat
+  const modal = el.toolsModal;
+  if (toolsModalCloseTimer) {
+    clearTimeout(toolsModalCloseTimer);
+    toolsModalCloseTimer = null;
+  }
+
+  if (open) {
+    // Move before unhiding so the first animation frame already uses viewport
+    // coordinates; otherwise the panel visibly jumps out of the composer.
+    if (modal.parentElement !== document.body) document.body.appendChild(modal);
+    modal.hidden = false;
+    requestAnimationFrame(() => modal.classList.add("is-open"));
+    return;
+  }
+
+  if (modal.hidden) return;
+  modal.classList.remove("is-open");
+  // Keep the element mounted until the exit transition is finished.
+  toolsModalCloseTimer = setTimeout(() => {
+    modal.hidden = true;
+    if (modal.parentElement === document.body) el.composer.appendChild(modal);
+    toolsModalCloseTimer = null;
+  }, 200);
+}
+// The tools button lives inside the fixed composer. Some browsers let clicks on
+// the SVG bubble correctly, others don't, and pointer-events fixes above should
+// cover it. As a robust fallback, also listen on the document for clicks whose
+// target is the button itself or its child SVG.
+document.addEventListener("click", (e) => {
+  const btn = e.target.closest ? e.target.closest("#tools-btn") : null;
+  if (btn) {
+    e.preventDefault();
+    e.stopPropagation();
+    setToolsModal(el.toolsModal.hidden);
+  }
+});
+el.toolsBtn.addEventListener("click", (e) => {
+  e.preventDefault();
+  e.stopPropagation();
+  setToolsModal(el.toolsModal.hidden);
+});
+el.toolsClose.addEventListener("click", () => setToolsModal(false));
+// Click outside the tools panel (on the composer backdrop) closes it.
+// The panel itself is inside the composer form, so a click on the input/buttons
+// lands inside the panel and does not close it.
+el.composer.addEventListener("click", (e) => {
+  if (!el.toolsModal.hidden && e.target !== el.toolsModal && !el.toolsModal.contains(e.target)) {
+    setToolsModal(false);
+  }
+});
+// Escape closes the tools panel (when no higher modal is open).
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.toolsModal.hidden) setToolsModal(false);
+});
+
+// ---------------------------------------------------------------------------
+// Dictation (speech-to-text via the browser's Web Speech API)
+// Claude has no audio input, so — like the desktop app — we transcribe locally
+// and drop the recognized text into the input; the user reviews and sends.
+// ---------------------------------------------------------------------------
+export const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
+export const dictation = { rec: null, active: false, interim: "", forceSend: false };
+
+// Insert text at the current caret (replacing any selection), gluing on a space
+// if it would butt against a word. Returns exactly what was inserted.
+export function dictInsert(text) {
+  if (!text) return "";
+  const v = el.input.value;
+  const s = el.input.selectionStart, e = el.input.selectionEnd;
+  const needSpace = s > 0 && !/\s$/.test(v.slice(0, s)) && !/^\s/.test(text);
+  const ins = (needSpace ? " " : "") + text;
+  el.input.value = v.slice(0, s) + ins + v.slice(e);
+  const caret = s + ins.length;
+  el.input.selectionStart = el.input.selectionEnd = caret;
+  return ins;
+}
+
+// Pull the last interim string back out — but only if it still sits untouched
+// right before the caret. If the user edited or moved away, we leave their text
+// alone (and just forget the stale interim), so nothing is ever "restored".
+export function removeInterim() {
+  const s = dictation.interim;
+  if (!s) return;
+  const v = el.input.value;
+  const caret = el.input.selectionStart;
+  const start = caret - s.length;
+  if (start >= 0 && v.slice(start, caret) === s) {
+    el.input.value = v.slice(0, start) + v.slice(caret);
+    el.input.selectionStart = el.input.selectionEnd = start;
+  }
+  dictation.interim = "";
+}
+
+if (SpeechRec) {
+  el.mic.hidden = false; // reveal the button only where recognition is supported
+  el.mic.addEventListener("click", () =>
+    dictation.active ? stopDictation() : startDictation()
+  );
+}
+
+export function startDictation() {
+  if (!SpeechRec || dictation.active) return;
+  const rec = new SpeechRec();
+  rec.lang = "ru-RU";
+  rec.interimResults = true;
+  rec.continuous = true;
+
+  dictation.interim = "";
+  dictation.forceSend = false;
+  el.input.focus(); // make the caret live so inserts land where it sits
+
+  rec.onresult = (e) => {
+    // Take out the previously shown interim, then re-insert this event's words
+    // at the *current* caret: final words commit permanently, interim is the
+    // replaceable tail we'll remove next time.
+    removeInterim();
+    let finalChunk = "", interim = "";
+    for (let i = e.resultIndex; i < e.results.length; i++) {
+      const t = e.results[i][0].transcript;
+      if (e.results[i].isFinal) finalChunk += t;
+      else interim += t;
+    }
+    if (finalChunk) dictInsert(finalChunk);
+    if (interim) dictation.interim = dictInsert(interim);
+    autoGrow();
+  };
+  rec.onend = () => endDictationUI(true);
+  rec.onerror = () => endDictationUI(false);
+
+  try {
+    rec.start();
+  } catch (_) {
+    return; // e.g. already started
+  }
+  dictation.rec = rec;
+  dictation.active = true;
+  el.mic.classList.add("recording");
+  el.mic.title = "Остановить диктовку";
+}
+
+export function stopDictation() {
+  if (dictation.rec) dictation.rec.stop();
+}
+
+export function endDictationUI(ok) {
+  const force = dictation.forceSend; // Enter was pressed to finish
+  dictation.active = false;
+  dictation.rec = null;
+  dictation.forceSend = false;
+  dictation.interim = ""; // any tail left in the field stays as real text
+  el.mic.classList.remove("recording");
+  el.mic.title = "Диктовка (голосовой ввод)";
+  // Send if recognition ended cleanly and either auto-send is on or the user
+  // pressed Enter to finish.
+  if (ok && (settings.autoSend || force) && el.input.value.trim()) {
+    submit();
+    return;
+  }
+  el.input.focus();
+}
+
+// ---------------------------------------------------------------------------
+// Quick-prompt templates (shown in a new chat's empty state).
+// ---------------------------------------------------------------------------
+export const QUICK_PROMPTS = [
+  { icon: "book", label: "Объясни код", text: "Объясни, что делает этот код и как он устроен:\n\n" },
+  { icon: "bug", label: "Найди баги", text: "Просмотри код на предмет багов и потенциальных проблем." },
+  { icon: "recycle", label: "Рефакторинг", text: "Предложи рефакторинг этого кода, сохранив поведение:\n\n" },
+  { icon: "flask", label: "Напиши тесты", text: "Напиши тесты для этого кода." },
+];
+
+export function buildQuickPrompts() {
+  const wrap = document.createElement("div");
+  wrap.className = "quick-prompts";
+  for (const q of QUICK_PROMPTS) {
+    const btn = document.createElement("button");
+    btn.type = "button";
+    btn.className = "quick-prompt";
+    btn.innerHTML = `${iIcon(q.icon, 16, 'inline')} ${q.label}`;
+    btn.addEventListener("click", () => insertPrompt(q.text));
+    wrap.appendChild(btn);
+  }
+  return wrap;
+}
+
+export function insertPrompt(text) {
+  el.input.value = text;
+  autoGrow();
+  el.input.focus();
+  // Place the caret at the end so the user types right where the template leaves off.
+  el.input.selectionStart = el.input.selectionEnd = el.input.value.length;
+}
+
+// ---------------------------------------------------------------------------
+// Current-chat controls (export MD / JSON, delete) — bottom-right of the chat.
+// ---------------------------------------------------------------------------
+function currentChat() {
+  const active = document.querySelector(".chat-item.active");
+  if (active) {
+    return { id: active.dataset.id, title: active.dataset.title, icon: active.dataset.icon || null };
+  }
+  // Brand-new chat not yet in the list: fall back to the open session/title.
+  return { id: state.sessionId, title: (el.title.textContent || "").trim(), icon: null };
+}
+document.getElementById("cc-export-md").addEventListener("click", () => {
+  const c = currentChat();
+  if (c.id) confirmChatAction({
+    title: "Экспорт в Markdown",
+    message: `Скачать историю чата «${c.title}» в формате Markdown?`,
+    confirmLabel: "Скачать",
+  }).then((confirmed) => { if (confirmed) exportChat(c.id, c.title, c.icon); });
+});
+document.getElementById("cc-export-json").addEventListener("click", () => {
+  const c = currentChat();
+  if (c.id) confirmChatAction({
+    title: "Экспорт в JSON",
+    message: `Скачать историю чата «${c.title}» в формате JSON?`,
+    confirmLabel: "Скачать",
+  }).then((confirmed) => { if (confirmed) exportChatJson(c.id, c.title); });
+});
+document.getElementById("cc-delete").addEventListener("click", () => {
+  const c = currentChat();
+  if (c.id) deleteChat(c.id, c.title, null);
+});
+
+let pendingChatAction = null;
+
+function confirmChatAction({ title, message, confirmLabel, danger = false }) {
+  if (pendingChatAction) return Promise.resolve(false);
+  el.actionModalTitle.textContent = title;
+  el.actionModalMessage.textContent = message;
+  el.actionModalConfirm.textContent = confirmLabel;
+  el.actionModalConfirm.classList.toggle("btn-danger", danger);
+  el.actionModalOverlay.hidden = false;
+  const trigger = document.activeElement;
+  el.actionModalCancel.focus();
+  return new Promise((resolve) => { pendingChatAction = { resolve, trigger }; });
+}
+
+function closeChatActionConfirmation(confirmed) {
+  if (!pendingChatAction) return;
+  const { resolve, trigger } = pendingChatAction;
+  pendingChatAction = null;
+  el.actionModalOverlay.hidden = true;
+  if (trigger instanceof HTMLElement) trigger.focus();
+  resolve(confirmed);
+}
+
+el.actionModalConfirm.addEventListener("click", () => closeChatActionConfirmation(true));
+el.actionModalCancel.addEventListener("click", () => closeChatActionConfirmation(false));
+el.actionModalOverlay.addEventListener("click", (e) => {
+  if (e.target === el.actionModalOverlay) closeChatActionConfirmation(false);
+});
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.actionModalOverlay.hidden) closeChatActionConfirmation(false);
+});
+
+el.newChat.addEventListener("click", () => openNewChatModal());
+
+// ---------------------------------------------------------------------------
+// New chat modal (name + icon chosen up front)
+// ---------------------------------------------------------------------------
+export let modalIcon = null;
+
+export function buildIconGrid() {
+  el.iconGrid.innerHTML = "";
+  const none = document.createElement("div");
+  none.className = "icon-cell none selected";
+  none.textContent = "без";
+  none.title = "Без иконки";
+  none.addEventListener("click", () => selectIcon(none, null));
+  el.iconGrid.appendChild(none);
+
+  for (const ic of ICONS) {
+    const cell = document.createElement("div");
+    cell.className = "icon-cell";
+    cell.innerHTML = iIcon(ic, 22);
+    cell.dataset.icon = ic;
+    cell.addEventListener("click", () => selectIcon(cell, ic));
+    el.iconGrid.appendChild(cell);
+  }
+}
+
+export function selectIcon(cell, icon) {
+  modalIcon = icon;
+  el.iconGrid.querySelectorAll(".icon-cell.selected").forEach((n) => n.classList.remove("selected"));
+  cell.classList.add("selected");
+}
+
+export function openNewChatModal() {
+  setSidebar(false); // close the drawer behind the modal
+  buildIconGrid();
+  modalIcon = null;
+  el.chatName.value = "";
+  el.modalCreate.disabled = true;
+  el.modalOverlay.hidden = false;
+  el.chatName.focus();
+}
+
+export function closeNewChatModal() {
+  el.modalOverlay.hidden = true;
+}
+
+el.chatName.addEventListener("input", () => {
+  el.modalCreate.disabled = el.chatName.value.trim().length === 0;
+});
+el.chatName.addEventListener("keydown", (e) => {
+  if (e.key === "Enter" && el.chatName.value.trim()) {
+    e.preventDefault();
+    createChat();
+  } else if (e.key === "Escape") {
+    closeNewChatModal();
+  }
+});
+el.modalCreate.addEventListener("click", createChat);
+el.modalCancel.addEventListener("click", closeNewChatModal);
+el.modalOverlay.addEventListener("click", (e) => {
+  if (e.target === el.modalOverlay) closeNewChatModal();
+});
+// Escape closes the modal regardless of where focus is.
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape" && !el.modalOverlay.hidden) closeNewChatModal();
+});
+
+export async function createChat() {
+  const title = el.chatName.value.trim();
+  if (!title) return;
+
+  // Pre-assign a session id so the metadata can be saved before the first turn.
+  const id = crypto.randomUUID();
+  await saveMeta(id, title, modalIcon);
+
+  // Open the new (empty) chat and focus the composer.
+  state.sessionId = id;
+  // Remember the newly created chat so it reopens after a page reload.
+  try {
+    localStorage.setItem("cwi_last_chat", id);
+    localStorage.setItem("cwi_live_session", JSON.stringify({ id, ts: Date.now() }));
+  } catch (e) {}
+  state.isNew = true;
+  state.current = null;
+  state.streaming = false;
+  setStreamingUI(false);
+  setFaviconState("idle");
+  el.title.innerHTML = (modalIcon ? iIcon(modalIcon, 18, "inline") + "  " : "") + escapeHtml(title);
+  el.messages.innerHTML = "";
+  const empty = document.createElement("div");
+  empty.className = "empty-state";
+  const h = document.createElement("h1");
+  h.innerHTML = (modalIcon ? iIcon(modalIcon, 24, "inline") + " " : "") + escapeHtml(title);
+  const p = document.createElement("p");
+  p.textContent = "Новый чат создан. Напишите первое сообщение или начните с шаблона:";
+  empty.appendChild(h);
+  empty.appendChild(p);
+  empty.appendChild(buildQuickPrompts());
+  el.messages.appendChild(empty);
+  document.querySelectorAll(".chat-item.active").forEach((n) => n.classList.remove("active"));
+
+  closeNewChatModal();
+  setSidebar(false);
+  refreshComposerState();
+  el.input.focus();
+  loadChatList();
+}
+
+export async function saveMeta(id, title, icon) {
+  try {
+    await fetch(`/api/chats/${encodeURIComponent(id)}/meta`, {
+      method: "PUT",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ title, icon }),
+    });
+  } catch (e) {
+    // ignore; UI already reflects the choice
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Settings drawer (font size, model, voice)
+// ---------------------------------------------------------------------------
+export const settings = {
+  fontSize: localStorage.getItem("cwi_fontsize") || "15",
+  model: localStorage.getItem("cwi_model") || "",
+  provider: localStorage.getItem("cwi_provider") || "",
+  // Voice: auto-send after dictation. Off by default.
+  autoSend: localStorage.getItem("cwi_autosend") === "1",
+};
+
+export function applySettings() {
+  // Root font-size — the whole page is sized in rem, so it all scales.
+  document.documentElement.style.fontSize = settings.fontSize + "px";
+  el.model.value = settings.model;
+  el.autosend.checked = settings.autoSend;
+  markActive(el.fontSeg, "size", settings.fontSize);
+  autoGrow(); // recompute the input height for the new font size
+}
+
+el.autosend.addEventListener("change", () => {
+  settings.autoSend = el.autosend.checked;
+  localStorage.setItem("cwi_autosend", settings.autoSend ? "1" : "0");
+});
+
+el.model.addEventListener("change", () => {
+  settings.model = el.model.value;
+  localStorage.setItem("cwi_model", settings.model);
+});
+
+// Populate the model dropdown from the Anthropic Models API (served by the
+// backend, cached ~daily). Falls back to the static aliases if the request fails.
+export async function loadModels() {
+  try {
+    const res = await fetch("/api/models");
+    const data = await res.json();
+    if (data.models && data.models.length) populateModels(data.models);
+  } catch (e) {
+    // keep the static fallback options
+  }
+}
+export function populateModels(list) {
+  const current = el.model.value || settings.model;
+  el.model.innerHTML =
+    '<option value="">по умолчанию</option>' +
+    list
+      .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.display_name || m.id)}</option>`)
+      .join("");
+  if ([...el.model.options].some((o) => o.value === current)) el.model.value = current;
+}
+
+// Native engine: pick a provider first, then a model of that provider.
+export async function loadProviders() {
+  let data;
+  try {
+    data = await (await fetch("/api/providers")).json();
+  } catch (e) {
+    loadModels();
+    return;
+  }
+  // Now that we know the active engine, mark cross-engine chats as frozen.
+  state.engineNative = !!data.native;
+  redecorateChatList();
+  refreshComposerState();
+  if (!data.native) {
+    el.providerSection.hidden = true;
+    loadModels(); // CLI mode: Claude models via the OAuth-backed endpoint
+    return;
+  }
+  el.providerSection.hidden = false;
+  state.providers = data.providers || [];
+  populateProviders();
+}
+
+export function populateProviders() {
+  const list = state.providers;
+  el.provider.innerHTML = list
+    .map(
+      (p) =>
+        `<option value="${escapeHtml(p.id)}"${p.has_key ? "" : " disabled"}>${escapeHtml(p.name)}${p.has_key ? "" : " (нет ключа)"}</option>`
+    )
+    .join("");
+  const savedOk = list.find((p) => p.id === settings.provider && p.has_key);
+  const firstKeyed = list.find((p) => p.has_key);
+  settings.provider = savedOk
+    ? settings.provider
+    : firstKeyed
+    ? firstKeyed.id
+    : (list[0] && list[0].id) || "";
+  el.provider.value = settings.provider;
+  populateProviderModels();
+}
+
+export function populateProviderModels() {
+  const p = state.providers.find((x) => x.id === settings.provider);
+  const models = (p && p.models) || [];
+  el.model.innerHTML = models
+    .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.display_name || m.id)}</option>`)
+    .join("");
+  if ([...el.model.options].some((o) => o.value === settings.model)) {
+    el.model.value = settings.model;
+  } else if (el.model.options.length) {
+    el.model.value = el.model.options[0].value;
+    settings.model = el.model.value;
+    localStorage.setItem("cwi_model", settings.model);
+  }
+}
+
+el.provider.addEventListener("change", () => {
+  settings.provider = el.provider.value;
+  localStorage.setItem("cwi_provider", settings.provider);
+  settings.model = ""; // reset → pick the new provider's first model
+  populateProviderModels();
+});
+
+export function markActive(seg, attr, value) {
+  seg.querySelectorAll(".seg-btn").forEach((b) => {
+    b.classList.toggle("active", b.dataset[attr] === value);
+  });
+}
+
+el.fontSeg.addEventListener("click", (e) => {
+  const btn = e.target.closest(".seg-btn");
+  if (!btn) return;
+  settings.fontSize = btn.dataset.size;
+  localStorage.setItem("cwi_fontsize", settings.fontSize);
+  applySettings();
+});
+
+// While a drawer is open its badge is hidden (immediately); on close, the badge
+// fades back in shortly after the panel has slid away.
+export function hideBadge(badge) {
+  badge.style.transition = "none";
+  badge.style.opacity = "0";
+  badge.style.pointerEvents = "none";
+}
+export function showBadgeSoon(badge) {
+  setTimeout(() => {
+    badge.style.transition = "opacity .3s ease";
+    badge.style.opacity = "1";
+    badge.style.pointerEvents = "";
+  }, 500);
+}
+
+// Settings drawer (right) — open via the gear, close by clicking outside.
+export function setSettings(open) {
+  el.settingsPanel.classList.toggle("open", open);
+  el.settingsOverlay.hidden = !open;
+  if (open) { hideBadge(el.settingsBadge); hideBadge(el.usageBadge); }
+  else { showBadgeSoon(el.settingsBadge); showBadgeSoon(el.usageBadge); }
+}
+el.settingsBadge.addEventListener("click", () => setSettings(true));
+el.settingsOverlay.addEventListener("click", () => setSettings(false));
+
+// Token badge → detailed per-chat usage drawer.
+el.usageBadge.addEventListener("click", () => setUsage(true));
+el.usageOverlay.addEventListener("click", () => setUsage(false));
+
+// Chat list drawer (left) — mirrors the settings drawer.
+export function setSidebar(open) {
+  el.sidebar.classList.toggle("open", open);
+  el.sidebarOverlay.hidden = !open;
+  if (open) { hideBadge(el.sidebarBadge); hideBadge(el.usageBadge); }
+  else { showBadgeSoon(el.sidebarBadge); showBadgeSoon(el.usageBadge); }
+}
+el.sidebarBadge.addEventListener("click", () => setSidebar(true));
+el.sidebarOverlay.addEventListener("click", () => setSidebar(false));
+
+// Composer + title show only when a chat is open. With no chat open, reveal the
+// list; if there are no chats at all, offer a big "create" button instead.
+export function refreshComposerState() {
+  const open = !!state.sessionId;
+  const chatsExist = el.chatList.children.length > 0;
+  el.composer.style.display = open ? "" : "none";
+  el.title.style.display = open ? "" : "none";
+  el.chatControls.hidden = !open; // current-chat controls only while a chat is open
+  el.bigNewChat.hidden = open || chatsExist;
+
+  // Frozen chat (created by the other engine): read-only until CWI_ENGINE flips.
+  // Hide the whole input row (textarea + left buttons + send); leave the banner.
+  const frozen = open && chatFrozen(state.sessionId);
+  el.composer.classList.toggle("readonly", frozen);
+  el.input.disabled = frozen;
+  el.input.placeholder = frozen
+    ? "Только чтение — этот чат создан другим движком"
+    : "Enter: send,  Shift+Enter: new line";
+  if (el.frozenBanner) {
+    const owner = state.chatEngine[state.sessionId];
+    const other = owner === "native" ? "native (/v1/messages)" : "Claude Code CLI";
+    el.frozenBanner.hidden = !frozen;
+    el.frozenBanner.innerHTML = frozen
+      ? iIcon("lock", 15, "frozen-lock") +
+        `<span>Чат создан движком «${escapeHtml(other)}». Доступен только для чтения — переключите CWI_ENGINE на него и перезапустите, чтобы продолжить.</span>`
+      : "";
+  }
+  updateSendButton();
+}
+el.bigNewChat.addEventListener("click", openNewChatModal);
+
+// ---------------------------------------------------------------------------
+// Chat list / history
+// ---------------------------------------------------------------------------
+export async function loadChatList() {
+  try {
+    const res = await fetch("/api/chats");
+    const chats = await res.json();
+    renderChatList(chats);
+  } catch (e) {
+    // ignore
+  }
+}
+
+export function renderChatList(chats) {
+  el.chatList.innerHTML = "";
+  state.chatUsage = {};
+  for (const c of chats) {
+    state.chatUsage[c.id] = {
+      tokens: c.tokens || 0,
+      input_tokens: c.input_tokens || 0,
+      cache_read: c.cache_read || 0,
+      cache_creation: c.cache_creation || 0,
+      turns: c.turns || 0,
+    };
+    state.chatEngine[c.id] = c.engine || "cli";
+    const item = document.createElement("div");
+    item.className = "chat-item";
+    item.dataset.id = c.id;
+    item.dataset.title = c.title;
+    item.dataset.icon = c.icon || "";
+    item.dataset.engine = c.engine || "cli";
+
+    const row = document.createElement("div");
+    row.className = "chat-title-row";
+
+    if (c.icon) {
+      const icon = document.createElement("span");
+      icon.className = "chat-icon";
+      icon.innerHTML = iIcon(c.icon, 18, "inline");
+      row.appendChild(icon);
+    }
+
+    const title = document.createElement("div");
+    title.className = "chat-title-text";
+    title.textContent = c.title;
+    row.appendChild(title);
+
+    if (c.id === state.sessionId) item.classList.add("active");
+    item.appendChild(row);
+    item.addEventListener("click", () => openChat(c.id, item.dataset.title, item.dataset.icon, item));
+    el.chatList.appendChild(item);
+  }
+  redecorateChatList();
+  refreshComposerState();
+  updateUsageBadge();
+  filterChats(); // re-apply any active search filter after a refresh
+}
+
+// Mark chats whose owning engine differs from the active one as frozen
+// (dimmed + 🔒). Called after the list renders and again once the active engine
+// resolves via /api/providers (which may land after the first render).
+export function redecorateChatList() {
+  const active =
+    state.engineNative == null ? null : state.engineNative ? "native" : "cli";
+  for (const item of el.chatList.children) {
+    const owner = item.dataset.engine || "cli";
+    const frozen = active != null && owner !== active;
+    item.classList.toggle("frozen", frozen);
+    let lock = item.querySelector(".chat-lock");
+    if (frozen && !lock) {
+      lock = document.createElement("span");
+      lock.className = "chat-lock";
+      lock.innerHTML = iIcon("lock", 14, "");
+      lock.title = "Только чтение — чат создан другим движком";
+      const row = item.querySelector(".chat-title-row");
+      if (row) row.appendChild(lock);
+    } else if (!frozen && lock) {
+      lock.remove();
+    }
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Chat search — client-side filter over the already-rendered list by title.
+// ---------------------------------------------------------------------------
+export function filterChats() {
+  const q = (el.chatSearch && el.chatSearch.value.trim().toLowerCase()) || "";
+  for (const item of el.chatList.children) {
+    const title = (item.dataset.title || "").toLowerCase();
+    item.style.display = !q || title.includes(q) ? "" : "none";
+  }
+}
+if (el.chatSearch) el.chatSearch.addEventListener("input", filterChats);
+
+// ---------------------------------------------------------------------------
+// Delete a chat (kills the live keeper + removes files server-side).
+// ---------------------------------------------------------------------------
+export async function deleteChat(id, title, item) {
+  const confirmed = await confirmChatAction({
+    title: "Удалить чат?",
+    message: `Чат «${title}» и его история будут удалены без возможности восстановления.`,
+    confirmLabel: "Удалить",
+    danger: true,
+  });
+  if (!confirmed) return;
+  try {
+    const res = await fetch(`/api/chats/${encodeURIComponent(id)}`, { method: "DELETE" });
+    if (!res.ok && res.status !== 204) throw new Error(res.status);
+  } catch (e) {
+    showSystem("Не удалось удалить чат.");
+    return;
+  }
+  if (item) item.remove();
+  else loadChatList(); // no DOM node passed (deleted from the chat view) → refresh list
+  delete state.chatUsage[id];
+  // If the open chat was the one deleted, clear the view and persisted state.
+  if (state.sessionId === id) {
+    state.sessionId = null;
+    state.isNew = true;
+    state.current = null;
+    el.title.textContent = "";
+    resetMessages();
+    el.messages.innerHTML =
+      '<div class="empty-state"><h1>Agent Web</h1><p>Чат удалён. Выберите другой или создайте новый.</p></div>';
+    setSidebar(true);
+    try {
+      localStorage.removeItem("cwi_last_chat");
+      localStorage.removeItem("cwi_live_session");
+    } catch (e) {}
+  }
+  refreshComposerState();
+  updateUsageBadge();
+}
+
+// ---------------------------------------------------------------------------
+// Export a chat's transcript as a Markdown file (built client-side).
+// ---------------------------------------------------------------------------
+export async function exportChat(id, title, icon) {
+  let msgs;
+  try {
+    msgs = await (await fetch(`/api/chats/${encodeURIComponent(id)}`)).json();
+  } catch (e) {
+    showSystem("Не удалось загрузить чат для экспорта.");
+    return;
+  }
+  downloadFile(transcriptToMarkdown(msgs, title, icon), safeFilename(title || id) + ".md", "text/markdown");
+}
+
+// Export a chat's full transcript as pretty-printed JSON (roles, text, tools).
+export async function exportChatJson(id, title) {
+  let msgs;
+  try {
+    msgs = await (await fetch(`/api/chats/${encodeURIComponent(id)}`)).json();
+  } catch (e) {
+    showSystem("Не удалось загрузить чат для экспорта.");
+    return;
+  }
+  const doc = { id, title, exported_at: new Date().toISOString(), messages: msgs };
+  downloadFile(JSON.stringify(doc, null, 2), safeFilename(title || id) + ".json", "application/json");
+}
+
+// Trigger a client-side download of `text` as a file.
+function downloadFile(text, filename, mime) {
+  const blob = new Blob([text], { type: `${mime};charset=utf-8` });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement("a");
+  a.href = url;
+  a.download = filename;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+// Build a Markdown document from a loaded transcript. Tool calls are rendered
+// as fenced blocks so the export is self-contained and readable.
+export function transcriptToMarkdown(msgs, title, icon) {
+  const lines = [`# ${title || "Чат"}`, ""];
+  for (const m of msgs) {
+    if (m.role === "user") {
+      lines.push("## Пользователь", "");
+      if (m.text) lines.push(m.text, "");
+    } else {
+      lines.push("## Ассистент", "");
+      if (m.text) lines.push(m.text, "");
+      for (const t of m.tools || []) {
+        lines.push(`**Инструмент: ${t.name}**`, "", "```json", JSON.stringify(t.input || {}, null, 2), "```", "");
+      }
+    }
+  }
+  return lines.join("\n");
+}
+
+function safeFilename(s) {
+  return s.replace(/[\\/:*?"<>|]+/g, "_").replace(/\s+/g, "_").slice(0, 80) || "chat";
+}
+
+// Re-trigger the input-row entrance animation (remove class, force reflow, re-add).
+function playComposerIn() {
+  const row = el.composerRow;
+  if (!row) return;
+  row.classList.remove("slide-in");
+  void row.offsetWidth; // reflow so the animation restarts on every open
+  row.classList.add("slide-in");
+}
+
+export async function openChat(id, title, icon, item) {
+  if (state.streaming) return;
+  setSidebar(false); // close the drawer once a chat is picked
+  state.sessionId = id;
+  // Remember this chat so it reopens automatically after a page reload.
+  try {
+    localStorage.setItem("cwi_last_chat", id);
+    localStorage.setItem("cwi_live_session", JSON.stringify({ id, ts: Date.now() }));
+  } catch (e) {}
+  state.isNew = false; // existing chat -> resume on next turn
+  state.current = null;
+  setFaviconState("idle");
+  el.title.innerHTML = (icon ? iIcon(icon, 18, "inline") + "  " : "") + escapeHtml(title);
+  document.querySelectorAll(".chat-item.active").forEach((n) => n.classList.remove("active"));
+  if (item) item.classList.add("active");
+  updateUsageBadge(); // reflect the newly-opened chat's token total
+
+  // Decide read-only vs active BEFORE the async transcript load, so the composer
+  // never flashes the input row on a frozen chat (chatFrozen is synchronous).
+  // For an active chat, slide the input row in smoothly.
+  refreshComposerState();
+  if (!chatFrozen(id)) playComposerIn();
+
+  el.messages.innerHTML = "";
+  state.transcript = null;
+  try {
+    const res = await fetch(`/api/chats/${encodeURIComponent(id)}`);
+    const msgs = await res.json();
+    if (!msgs.length) {
+      showSystem("В этом чате пока нет сообщений.");
+    }
+    // Windowed render: only the last MAX_RENDERED messages are in the DOM; a
+    // "load earlier" button reveals older ones. Bounds the DOM for huge chats.
+    const start = Math.max(0, msgs.length - MAX_RENDERED);
+    state.transcript = { msgs, start };
+    const frag = document.createDocumentFragment();
+    renderMsgRange(msgs, start, msgs.length, frag);
+    el.messages.appendChild(frag);
+    updateEarlierButton();
+    scrollToBottom();
+  } catch (e) {
+    showSystem("Не удалось загрузить историю чата.");
+  }
+
+  refreshComposerState();
+  el.input.focus(); // ready to type right after picking a chat
+
+  // If this session is still running live, attach to it: the keeper will send a
+  // {cwi:"session", replay:true} and rebuild the view from its live scrollback.
+  sendWs({ type: "attach", session_id: id });
+}
+
+const MAX_RENDERED = 60; // messages rendered initially when opening a chat
+const LOAD_CHUNK = 40; // older messages revealed per "load earlier" click
+
+export function updateEarlierButton() {
+  let btn = document.getElementById("load-earlier");
+  const start = state.transcript ? state.transcript.start : 0;
+  if (!state.transcript || start <= 0) {
+    if (btn) btn.remove();
+    return;
+  }
+  if (!btn) {
+    btn = document.createElement("button");
+    btn.id = "load-earlier";
+    btn.className = "load-earlier";
+    btn.type = "button";
+    btn.addEventListener("click", loadEarlier);
+  }
+  btn.textContent = `↑ Показать более ранние (${start})`;
+  el.messages.insertBefore(btn, el.messages.firstChild); // keep at the very top
+}
+
+export function loadEarlier() {
+  const t = state.transcript;
+  if (!t || t.start <= 0) return;
+  const newStart = Math.max(0, t.start - LOAD_CHUNK);
+  const before = el.messages.scrollHeight;
+  const prevTop = el.messages.scrollTop;
+  const frag = document.createDocumentFragment();
+  renderMsgRange(t.msgs, newStart, t.start, frag);
+  const btn = document.getElementById("load-earlier");
+  const anchor = btn ? btn.nextSibling : el.messages.firstChild;
+  el.messages.insertBefore(frag, anchor);
+  t.start = newStart;
+  updateEarlierButton();
+  // Keep the viewport steady: prepended content shifts everything down.
+  el.messages.scrollTop = prevTop + (el.messages.scrollHeight - before);
+}
+
+export function fmtDate(iso) {
+  try {
+    const d = new Date(iso);
+    return d.toLocaleDateString() + " " + d.toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" });
+  } catch {
+    return "";
+  }
+}
+
+// ---------------------------------------------------------------------------
+// Init — called by main.js after all modules have loaded.
+// ---------------------------------------------------------------------------
+// Fade out the boot overlay and reveal the UI. Idempotent — the first caller
+// wins (either the normal boot path or the safety timeout).
+let revealed = false;
+function reveal() {
+  if (revealed) return;
+  revealed = true;
+  document.body.classList.add("booted"); // triggers the staggered CSS reveal
+  const boot = document.getElementById("boot");
+  if (boot) {
+    boot.classList.add("hide");
+    setTimeout(() => boot.remove(), 450);
+  }
+}
+
+export async function init() {
+  applySettings();
+  loadCaps();
+  connect();
+  updateScrollbar();
+  updateScrollToBottomButton();
+  // Persist the open chat before the page is frozen/reloaded so we can re-attach
+  // to its live session when the app comes back up.
+  window.addEventListener("pagehide", saveLiveSession);
+  window.addEventListener("beforeunload", saveLiveSession);
+  // Safety net: never leave the app hidden behind the boot overlay if a fetch hangs.
+  setTimeout(reveal, 6000);
+
+  // Resolve EVERYTHING behind the boot overlay — chat list, active engine, and
+  // the last-open chat's transcript — then reveal the finished UI in one pass, so
+  // it never flashes the empty "+ new chat" page or switches mid-load.
+  try {
+    await Promise.all([loadChatList(), loadProviders()]);
+    await restoreLastChat();
+  } catch (e) {}
+  refreshComposerState();
+  if (!state.sessionId) setSidebar(true); // no chat restored → reveal the list
+  reveal();
+  loadUsage(); // subscription limits for the badge + sidebar (refreshed rarely)
+  el.input.focus();
+  // The chat list is loaded on page load and refreshed when a chat is created
+  // (see createNewChat) — no periodic polling.
+}
+
+function saveLiveSession() {
+  if (!state.sessionId) return;
+  try {
+    localStorage.setItem("cwi_last_chat", state.sessionId);
+    localStorage.setItem("cwi_live_session", JSON.stringify({ id: state.sessionId, ts: Date.now() }));
+  } catch (e) {}
+}
+
+// If the user had a chat open during the previous session, reopen it once the
+// sidebar has loaded so it is visible and correctly marked active.
+export function restoreLastChat() {
+  let lastId = null;
+  try { lastId = localStorage.getItem("cwi_last_chat"); } catch (e) {}
+  if (!lastId) return;
+  const item = el.chatList.querySelector(`.chat-item[data-id="${CSS.escape(lastId)}"]`);
+  if (item) {
+    // Return the promise so boot can await the transcript before revealing the UI.
+    return openChat(item.dataset.id, item.dataset.title, item.dataset.icon || null, item);
+  } else {
+    // The remembered chat no longer exists; clear stale persistence keys.
+    try {
+      localStorage.removeItem("cwi_last_chat");
+      localStorage.removeItem("cwi_live_session");
+    } catch (e) {}
+  }
+}

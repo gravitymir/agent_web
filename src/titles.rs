@@ -60,6 +60,14 @@ impl MetaStore {
         self.save()
     }
 
+    /// Remove any stored metadata for a chat (used when the chat is deleted).
+    pub fn remove(&mut self, id: &str) -> Result<()> {
+        if self.map.remove(id).is_some() {
+            self.save()?;
+        }
+        Ok(())
+    }
+
     fn save(&self) -> Result<()> {
         if let Some(parent) = self.path.parent() {
             std::fs::create_dir_all(parent)?;

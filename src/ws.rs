@@ -16,7 +16,9 @@
 //!   { "cwi": "no_session" }              nothing live to attach to
 //!   { "cwi": "error", "message": "..." }
 
+use std::collections::VecDeque;
 use std::sync::Arc;
+use std::time::{Duration, Instant};
 
 use axum::extract::ws::{Message, Utf8Bytes, WebSocket};
 use futures_util::stream::SplitSink;
@@ -25,10 +27,42 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use crate::session::{AttachGuard, SessionKeeper};
+use crate::session::{AttachGuard, ImageData, SessionKeeper};
 use crate::AppState;
 
 type WsSink = SplitSink<WebSocket, Message>;
+
+/// Sliding-window rate limiter for a single connection. Generous enough never to
+/// bite normal use (the composer already locks during a turn), but caps a client
+/// that floods `send`/`interrupt` frames.
+struct RateLimiter {
+    hits: VecDeque<Instant>,
+    max: usize,
+    window: Duration,
+}
+
+impl RateLimiter {
+    fn new() -> Self {
+        Self { hits: VecDeque::new(), max: 30, window: Duration::from_secs(10) }
+    }
+
+    /// Record a request; return `false` if it exceeds the window budget.
+    fn allow(&mut self) -> bool {
+        let now = Instant::now();
+        while let Some(&front) = self.hits.front() {
+            if now.duration_since(front) > self.window {
+                self.hits.pop_front();
+            } else {
+                break;
+            }
+        }
+        if self.hits.len() >= self.max {
+            return false;
+        }
+        self.hits.push_back(now);
+        true
+    }
+}
 
 #[derive(Debug, Deserialize)]
 #[serde(tag = "type", rename_all = "snake_case")]
@@ -39,13 +73,22 @@ enum ClientMsg {
         text: String,
         #[serde(default)]
         model: Option<String>,
+        /// Native engine only: which provider to use (anthropic|kimi|glm).
+        #[serde(default)]
+        provider: Option<String>,
         #[serde(default)]
         new_chat: bool,
+        #[serde(default)]
+        images: Vec<ImageData>,
+        /// Native engine: which tool groups are enabled (defaults to all).
+        #[serde(default)]
+        caps: crate::agent::tools::Caps,
     },
     Attach {
         session_id: String,
     },
     Interrupt,
+    Ping,
 }
 
 pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
@@ -54,6 +97,7 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
     let mut keeper: Option<Arc<SessionKeeper>> = None;
     let mut guard: Option<AttachGuard> = None;
     let mut rx: Option<broadcast::Receiver<String>> = None;
+    let mut rl = RateLimiter::new();
 
     loop {
         // Once attached, multiplex keeper events and client messages; before
@@ -72,7 +116,7 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 msg = ws_rx.next() => {
                     match msg {
                         Some(Ok(m)) => {
-                            if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx).await {
+                            if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
                                 break;
                             }
                         }
@@ -83,7 +127,7 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         } else {
             match ws_rx.next().await {
                 Some(Ok(m)) => {
-                    if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx).await {
+                    if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
                         break;
                     }
                 }
@@ -105,12 +149,19 @@ async fn handle_client(
     keeper: &mut Option<Arc<SessionKeeper>>,
     guard: &mut Option<AttachGuard>,
     rx: &mut Option<broadcast::Receiver<String>>,
+    rl: &mut RateLimiter,
 ) -> bool {
     let text = match msg {
         Message::Text(t) => t.to_string(),
         Message::Close(_) => return false,
         _ => return true, // ignore ping/pong/binary
     };
+
+    // Cap how fast a client can drive the socket (protects the keeper/process).
+    if !rl.allow() {
+        let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "Rate limit exceeded — slow down." })).await;
+        return true;
+    }
 
     let client_msg: ClientMsg = match serde_json::from_str(&text) {
         Ok(m) => m,
@@ -121,27 +172,45 @@ async fn handle_client(
     };
 
     match client_msg {
-        ClientMsg::Send { session_id, text, model, new_chat } => {
+        ClientMsg::Send { session_id, text, model, provider, new_chat, images, caps } => {
+            let sid = session_id.clone();
+            // Freeze guard: a chat that lives only in the *other* engine's store is
+            // read-only until the user switches CWI_ENGINE. Viewing is a separate
+            // GET; here we refuse to drive a turn on it.
+            if let Some(id) = session_id.as_ref() {
+                if !new_chat && chat_is_frozen(state, id) {
+                    let _ = send_control(ws_tx, json!({ "cwi": "error",
+                        "message": "Этот чат создан другим движком — только чтение. Переключите CWI_ENGINE, чтобы продолжить." })).await;
+                    return true;
+                }
+            }
             if keeper.is_none() {
                 let resume = session_id.is_some() && !new_chat;
-                match state.sessions.get_or_spawn(session_id, resume, model) {
-                    Ok(k) => attach(ws_tx, k, keeper, guard, rx).await,
+                match state.sessions.get_or_spawn(session_id, resume, model, provider) {
+                    Ok(k) => {
+                        tracing::info!(session = %k.session_id, "user sent request");
+                        attach(ws_tx, k, keeper, guard, rx).await;
+                    }
                     Err(e) => {
+                        tracing::error!(session = ?sid, "failed to start session: {e}");
                         let _ = send_control(ws_tx, json!({ "cwi": "error", "message": format!("failed to start claude: {e}") })).await;
                         return true;
                     }
                 }
             }
             if let Some(k) = keeper.as_ref() {
-                k.send_user_message(text).await;
+                tracing::info!(session = %k.session_id, "agent thinking");
+                k.send_user_message(text, images, caps).await;
             }
         }
 
         ClientMsg::Attach { session_id } => {
             if keeper.is_none() {
+                tracing::info!(session = %session_id, "client attaching to session");
                 match state.sessions.get(&session_id) {
                     Some(k) => attach(ws_tx, k, keeper, guard, rx).await,
                     None => {
+                        tracing::warn!(session = %session_id, "no live session to attach to");
                         let _ = send_control(ws_tx, json!({ "cwi": "no_session" })).await;
                     }
                 }
@@ -150,8 +219,13 @@ async fn handle_client(
 
         ClientMsg::Interrupt => {
             if let Some(k) = keeper.as_ref() {
+                tracing::info!(session = %k.session_id, "user interrupted");
                 k.interrupt().await;
             }
+        }
+
+        ClientMsg::Ping => {
+            // Keep-alive from the browser; no response needed.
         }
     }
 
@@ -182,9 +256,30 @@ async fn attach(
         }
     }
 
+    // Mark the end of the replayed scrollback so the client can fall back to
+    // the on-disk history if the live scrollback is shorter.
+    let _ = send_control(ws_tx, json!({ "cwi": "replay_end" })).await;
+
     *guard = Some(k.attach());
     *rx = Some(receiver);
     *keeper = Some(k);
+}
+
+/// A chat is "frozen" when it exists only in the store of the engine that is NOT
+/// currently active: readable, but a turn can't be driven until the user flips
+/// `CWI_ENGINE`. A chat present in both stores (or the active one) is never frozen.
+fn chat_is_frozen(state: &AppState, id: &str) -> bool {
+    let native_exists = crate::agent::store::path(id).exists();
+    let cli_exists = state
+        .config
+        .session_dir()
+        .join(format!("{id}.jsonl"))
+        .exists();
+    if state.config.native_engine {
+        cli_exists && !native_exists
+    } else {
+        native_exists && !cli_exists
+    }
 }
 
 async fn send_control(ws_tx: &mut WsSink, value: serde_json::Value) -> Result<(), ()> {

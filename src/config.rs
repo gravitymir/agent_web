@@ -16,8 +16,15 @@ pub struct Config {
     /// mode there is no human to answer prompts, so a non-blocking mode is
     /// required for tools to run. Defaults to `acceptEdits`.
     pub permission_mode: String,
-    /// Root of Claude Code's on-disk sessions (`~/.claude/projects`).
+    /// Root of Claude Code's on-disk sessions (`<claude-config-dir>/projects`).
+    /// The config dir honors `CLAUDE_CONFIG_DIR`, so the web app can run fully
+    /// isolated from the user's desktop/terminal Claude (see [`claude_config_dir`]).
     pub projects_root: PathBuf,
+    /// Use the native `/v1/messages` agent engine instead of the Claude Code CLI.
+    /// Enabled with `CWI_ENGINE=native`.
+    pub native_engine: bool,
+    /// Directory served for the frontend (`CWI_STATIC_DIR`, default `static`).
+    pub static_dir: String,
 }
 
 impl Config {
@@ -36,10 +43,13 @@ impl Config {
         let permission_mode =
             std::env::var("CWI_PERMISSION_MODE").unwrap_or_else(|_| "acceptEdits".to_string());
 
-        let projects_root = dirs::home_dir()
-            .unwrap_or_else(|| PathBuf::from("."))
-            .join(".claude")
-            .join("projects");
+        let projects_root = claude_config_dir().join("projects");
+
+        let native_engine = std::env::var("CWI_ENGINE")
+            .map(|v| v.eq_ignore_ascii_case("native"))
+            .unwrap_or(false);
+
+        let static_dir = std::env::var("CWI_STATIC_DIR").unwrap_or_else(|_| "static".to_string());
 
         Self {
             bind_addr,
@@ -47,6 +57,8 @@ impl Config {
             claude_bin,
             permission_mode,
             projects_root,
+            native_engine,
+            static_dir,
         }
     }
 
@@ -64,6 +76,24 @@ impl Config {
     }
 }
 
+/// The Claude Code config/state directory, holding sessions, credentials, and
+/// this app's own metadata. Honors `CLAUDE_CONFIG_DIR` — the same variable the
+/// `claude` CLI itself reads — so pointing the web app (and the `claude`
+/// subprocess it spawns, which inherits the env) at a dedicated directory gives
+/// it its own chats and history, never mixing with the user's desktop/terminal
+/// Claude. Falls back to `~/.claude`.
+pub fn claude_config_dir() -> PathBuf {
+    if let Ok(dir) = std::env::var("CLAUDE_CONFIG_DIR") {
+        let dir = dir.trim();
+        if !dir.is_empty() {
+            return PathBuf::from(dir);
+        }
+    }
+    dirs::home_dir()
+        .unwrap_or_else(|| PathBuf::from("."))
+        .join(".claude")
+}
+
 /// Claude Code encodes a project's absolute path into a directory name by
 /// replacing every non-alphanumeric character with `-`.
 ///
@@ -76,4 +106,24 @@ pub fn encode_project_dir(path: &std::path::Path) -> String {
     s.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::encode_project_dir;
+    use std::path::Path;
+
+    #[test]
+    fn encodes_non_alnum_to_dash() {
+        assert_eq!(
+            encode_project_dir(Path::new(r"C:\Users\gravi\claude_web_interface")),
+            "C--Users-gravi-claude-web-interface"
+        );
+        assert_eq!(encode_project_dir(Path::new("/home/u/my proj")), "-home-u-my-proj");
+    }
+
+    #[test]
+    fn strips_verbatim_prefix() {
+        assert_eq!(encode_project_dir(Path::new(r"\\?\C:\a")), "C--a");
+    }
 }

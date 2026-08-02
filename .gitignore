@@ -1,2 +1,4 @@
 /target
 .claude/settings.local.json
+# Local secrets: native-engine provider keys (commit `.env.example` instead).
+.env

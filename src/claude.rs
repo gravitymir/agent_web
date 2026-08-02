@@ -8,6 +8,7 @@
 use std::process::Stdio;
 
 use anyhow::{Context, Result};
+use tokio::io::{AsyncBufReadExt, BufReader};
 use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::config::Config;
@@ -66,11 +67,24 @@ pub fn spawn_claude(
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())
-        .stderr(Stdio::null());
+        .stderr(Stdio::piped());
 
     let mut child = cmd.spawn().context("failed to spawn claude process")?;
     let stdin = child.stdin.take().context("missing child stdin")?;
     let stdout = child.stdout.take().context("missing child stdout")?;
+
+    // Drain stderr to the log so diagnostics aren't lost.
+    if let Some(stderr) = child.stderr.take() {
+        let sid = id.clone();
+        tokio::spawn(async move {
+            let mut lines = BufReader::new(stderr).lines();
+            while let Ok(Some(line)) = lines.next_line().await {
+                if !line.trim().is_empty() {
+                    tracing::warn!(session = %sid, "claude stderr: {line}");
+                }
+            }
+        });
+    }
 
     Ok(Spawned {
         child,

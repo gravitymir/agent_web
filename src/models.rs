@@ -12,7 +12,7 @@
 use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{Context, Result};
+use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -38,7 +38,7 @@ fn now_secs() -> u64 {
 }
 
 fn cache_path() -> Option<PathBuf> {
-    dirs::home_dir().map(|h| h.join(".claude").join("cwi_models.json"))
+    Some(crate::config::claude_config_dir().join("cwi_models.json"))
 }
 
 fn read_cache() -> Option<Cache> {
@@ -52,8 +52,15 @@ fn write_cache(models: &[ModelInfo]) {
         fetched_at: now_secs(),
         models: models.to_vec(),
     };
-    if let Ok(json) = serde_json::to_string_pretty(&cache) {
-        let _ = std::fs::write(path, json);
+    let json = match serde_json::to_string_pretty(&cache) {
+        Ok(j) => j,
+        Err(e) => {
+            tracing::warn!("models cache: serialize failed: {e}");
+            return;
+        }
+    };
+    if let Err(e) = std::fs::write(&path, json) {
+        tracing::warn!("models cache: write {} failed: {e}", path.display());
     }
 }
 
@@ -81,12 +88,17 @@ pub async fn models_for_api() -> (Vec<ModelInfo>, Option<String>) {
     }
 }
 
-/// Read Claude Code's OAuth access token from its local credentials file.
+/// Read Claude Code's OAuth access token: prefer `CLAUDE_CODE_OAUTH_TOKEN` (the
+/// long-lived subscription token used when running against an isolated
+/// `CLAUDE_CONFIG_DIR`), falling back to the credentials file in that config dir.
 fn read_oauth_token() -> Result<String> {
-    let path = dirs::home_dir()
-        .context("no home directory")?
-        .join(".claude")
-        .join(".credentials.json");
+    if let Ok(tok) = std::env::var("CLAUDE_CODE_OAUTH_TOKEN") {
+        let tok = tok.trim();
+        if !tok.is_empty() {
+            return Ok(tok.to_string());
+        }
+    }
+    let path = crate::config::claude_config_dir().join(".credentials.json");
     let content = std::fs::read_to_string(&path)
         .with_context(|| format!("reading {}", path.display()))?;
     let v: Value = serde_json::from_str(&content)?;
@@ -96,22 +108,10 @@ fn read_oauth_token() -> Result<String> {
         .context("no claudeAiOauth.accessToken in credentials")
 }
 
-/// Query the Anthropic Models API and return `{ id, display_name }` for each.
-async fn fetch_models() -> Result<Vec<ModelInfo>> {
-    let token = read_oauth_token()?;
-    let client = reqwest::Client::new();
-    let resp = client
-        .get("https://api.anthropic.com/v1/models?limit=100")
-        .bearer_auth(token)
-        .header("anthropic-version", "2023-06-01")
-        // Subscription OAuth tokens require this beta header to reach the API.
-        .header("anthropic-beta", "oauth-2025-04-20")
-        .send()
-        .await?
-        .error_for_status()?;
-
-    let v: Value = resp.json().await?;
-    let models = v["data"]
+/// Parse a Models endpoint's `data[]` array into `{ id, display_name }`.
+/// Shared with the native-engine provider registry.
+pub fn parse_models(v: &Value) -> Vec<ModelInfo> {
+    v["data"]
         .as_array()
         .map(|arr| {
             arr.iter()
@@ -122,6 +122,55 @@ async fn fetch_models() -> Result<Vec<ModelInfo>> {
                 })
                 .collect()
         })
-        .unwrap_or_default();
-    Ok(models)
+        .unwrap_or_default()
+}
+
+/// GET a `/models` endpoint with the given headers and parse its model list.
+/// Retries once on 429 / 503 / 529, honoring a `Retry-After` header (capped, so
+/// the `/api/models` handler never blocks for long — a stale cache is served if
+/// this ultimately fails).
+pub async fn fetch_model_list(url: &str, headers: &[(&str, String)]) -> Result<Vec<ModelInfo>> {
+    const MAX_RETRY_WAIT_SECS: u64 = 5;
+    let client = reqwest::Client::new();
+    let mut attempt = 0u32;
+    loop {
+        attempt += 1;
+        let mut req = client.get(url);
+        for (name, value) in headers {
+            req = req.header(*name, value.clone());
+        }
+        let resp = req.send().await?;
+        let status = resp.status();
+        if status.is_success() {
+            return Ok(parse_models(&resp.json().await?));
+        }
+        if matches!(status.as_u16(), 429 | 503 | 529) && attempt < 2 {
+            let wait = resp
+                .headers()
+                .get(reqwest::header::RETRY_AFTER)
+                .and_then(|v| v.to_str().ok())
+                .and_then(|s| s.trim().parse::<u64>().ok())
+                .unwrap_or(1)
+                .min(MAX_RETRY_WAIT_SECS);
+            tokio::time::sleep(std::time::Duration::from_secs(wait)).await;
+            continue;
+        }
+        let text = resp.text().await.unwrap_or_default();
+        return Err(anyhow!("HTTP {}: {}", status.as_u16(), text));
+    }
+}
+
+/// Query the Anthropic Models API (via Claude Code's OAuth token) for `/api/models`.
+async fn fetch_models() -> Result<Vec<ModelInfo>> {
+    let token = read_oauth_token()?;
+    fetch_model_list(
+        "https://api.anthropic.com/v1/models?limit=100",
+        &[
+            ("authorization", format!("Bearer {token}")),
+            ("anthropic-version", "2023-06-01".to_string()),
+            // Subscription OAuth tokens require this beta header to reach the API.
+            ("anthropic-beta", "oauth-2025-04-20".to_string()),
+        ],
+    )
+    .await
 }

@@ -1,9 +1,11 @@
+mod agent;
 mod claude;
 mod config;
 mod history;
 mod models;
 mod session;
 mod titles;
+mod usage;
 mod ws;
 
 use std::sync::{Arc, Mutex};
@@ -23,6 +25,39 @@ use crate::config::Config;
 use crate::session::SessionManager;
 use crate::titles::MetaStore;
 
+/// Upper bound on a single inbound WebSocket message. Generous enough for a
+/// prompt with several base64-inlined images / attached files, but bounded so a
+/// client can't force a huge allocation. Enforced at the protocol layer.
+const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
+
+/// Content-Security-Policy served with every response — an extra layer against
+/// injected content. `'unsafe-inline'` is required because the frontend uses a
+/// few inline scripts / `onclick` handlers and inline styles; `data:` covers
+/// pasted images and the HTML-preview iframe (`frame-src`). No external origins
+/// are allowed, so an injected `<script src>` / remote fetch is blocked.
+const CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; \
+    img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; \
+    script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; \
+    frame-src 'self'; form-action 'self'";
+
+/// Attach security headers (CSP + nosniff) to every response.
+async fn add_security_headers(
+    req: axum::extract::Request,
+    next: axum::middleware::Next,
+) -> axum::response::Response {
+    let mut resp = next.run(req).await;
+    let h = resp.headers_mut();
+    h.insert(
+        axum::http::header::CONTENT_SECURITY_POLICY,
+        axum::http::HeaderValue::from_static(CSP),
+    );
+    h.insert(
+        axum::http::header::X_CONTENT_TYPE_OPTIONS,
+        axum::http::HeaderValue::from_static("nosniff"),
+    );
+    resp
+}
+
 /// Shared application state.
 pub struct AppState {
     pub config: Config,
@@ -32,8 +67,30 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
 }
 
+/// Load `KEY=VALUE` lines from an env file (default `.env`, override with
+/// `CWI_ENV_FILE`) into the process environment. Existing vars win, so the
+/// shell can still override the file.
+fn load_env_file() {
+    let path = std::env::var("CWI_ENV_FILE").unwrap_or_else(|_| ".env".to_string());
+    let Ok(content) = std::fs::read_to_string(&path) else { return };
+    for line in content.lines() {
+        let line = line.trim();
+        if line.is_empty() || line.starts_with('#') {
+            continue;
+        }
+        if let Some((k, v)) = line.split_once('=') {
+            let (k, v) = (k.trim(), v.trim().trim_matches('"'));
+            if !k.is_empty() && std::env::var(k).is_err() {
+                std::env::set_var(k, v);
+            }
+        }
+    }
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
+    load_env_file();
+
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())
@@ -49,32 +106,99 @@ async fn main() -> anyhow::Result<()> {
         .parent()
         .unwrap_or(&config.projects_root)
         .join("cwi_titles.json");
+    // Connect MCP servers only in native-engine mode (they'd be unused by the CLI).
+    let mcp = if config.native_engine {
+        let client = agent::mcp::McpClient::init().await;
+        if !client.is_empty() {
+            tracing::info!("mcp: connected");
+        }
+        Some(std::sync::Arc::new(client))
+    } else {
+        None
+    };
+
     let state = Arc::new(AppState {
         config: config.clone(),
         meta: Mutex::new(MetaStore::load(meta_path)),
-        sessions: SessionManager::new(config.clone()),
+        sessions: SessionManager::new(config.clone(), mcp),
     });
 
-    let static_dir = std::env::var("CWI_STATIC_DIR").unwrap_or_else(|_| "static".to_string());
+    let static_dir = config.static_dir.clone();
+    let sessions = state.sessions.clone(); // for graceful shutdown cleanup
 
     let app = Router::new()
         .route("/api/chats", get(list_chats))
-        .route("/api/chats/{id}", get(load_chat))
+        .route("/api/chats/{id}", get(load_chat).delete(delete_chat))
         .route("/api/chats/{id}/meta", put(set_meta))
         .route("/api/models", get(list_models))
+        .route("/api/providers", get(list_providers))
+        .route("/api/usage", get(get_usage))
+        .route("/api/health", get(health))
+        .route("/metrics", get(metrics))
         .route("/ws", get(ws_upgrade))
         .fallback_service(ServeDir::new(static_dir))
+        .layer(axum::middleware::from_fn(add_security_headers))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     tracing::info!("listening on http://{}", config.bind_addr);
-    axum::serve(listener, app).await?;
+    axum::serve(listener, app)
+        .with_graceful_shutdown(shutdown_signal())
+        .await?;
+
+    // Stop accepting → kill live keepers (their processes) before exiting.
+    tracing::info!("shutting down; cleaning up sessions");
+    sessions.shutdown_all().await;
     Ok(())
 }
 
+/// Resolve when the process is asked to stop (Ctrl-C, or SIGTERM on unix).
+async fn shutdown_signal() {
+    let ctrl_c = async {
+        let _ = tokio::signal::ctrl_c().await;
+    };
+    #[cfg(unix)]
+    let terminate = async {
+        if let Ok(mut s) =
+            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        {
+            s.recv().await;
+        }
+    };
+    #[cfg(not(unix))]
+    let terminate = std::future::pending::<()>();
+
+    tokio::select! {
+        _ = ctrl_c => {},
+        _ = terminate => {},
+    }
+}
+
+/// Liveness/version endpoint.
+async fn health() -> impl IntoResponse {
+    Json(serde_json::json!({
+        "status": "ok",
+        "version": env!("CARGO_PKG_VERSION"),
+    }))
+}
+
+/// Prometheus-style metrics.
+async fn metrics(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let sessions = state.sessions.session_count();
+    format!(
+        "# HELP cwi_sessions Live session keepers\n\
+         # TYPE cwi_sessions gauge\n\
+         cwi_sessions {sessions}\n"
+    )
+}
+
 async fn list_chats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
-    let mut chats = history::list_chats(&state.config.session_dir());
+    // Always list BOTH stores regardless of the active engine, so the sidebar is
+    // stable across a CWI_ENGINE switch. Chats from the inactive engine are shown
+    // read-only ("frozen") in the frontend, keyed off `ChatSummary::engine`.
+    let native_dir = agent::store::dir();
+    let mut chats = history::list_chats(&state.config.session_dir(), Some(&native_dir));
     // Overlay user-assigned titles and icons.
     if let Ok(meta) = state.meta.lock() {
         for chat in &mut chats {
@@ -98,16 +222,41 @@ struct SetMeta {
     icon: Option<String>,
 }
 
+/// Ensure a chat record exists on disk so a brand-new named chat shows up in
+/// the sidebar before the first message is sent.
+fn ensure_chat_exists(state: &AppState, id: &str) {
+    if state.config.native_engine {
+        let path = agent::store::path(id);
+        if !path.exists() {
+            agent::store::save(id, &agent::store::Stored::default());
+        }
+    } else {
+        let path = state.config.session_dir().join(format!("{id}.jsonl"));
+        if !path.exists() {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&path,
+                serde_json::json!({"timestamp": chrono::Utc::now().to_rfc3339()}).to_string() + "\n");
+        }
+    }
+}
+
 async fn set_meta(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
     Json(body): Json<SetMeta>,
 ) -> impl IntoResponse {
     match state.meta.lock() {
-        Ok(mut meta) => match meta.set(id, body.title, body.icon) {
-            Ok(()) => StatusCode::NO_CONTENT,
-            Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
-        },
+        Ok(mut meta) => {
+            // Creating a new chat from the frontend saves its title/icon before
+            // any message is sent. Make sure the chat appears in the list.
+            ensure_chat_exists(&state, &id);
+            match meta.set(id, body.title, body.icon) {
+                Ok(()) => StatusCode::NO_CONTENT,
+                Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
+            }
+        }
         Err(_) => StatusCode::INTERNAL_SERVER_ERROR,
     }
 }
@@ -116,15 +265,63 @@ async fn load_chat(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    let messages = history::load_chat(&state.config.session_dir(), &id);
+    // Load from whichever store holds the chat, regardless of active engine —
+    // frozen chats are still fully readable.
+    let native_dir = agent::store::dir();
+    let messages = history::load_chat(
+        &state.config.session_dir(), Some(&native_dir), &id);
     Json(messages)
+}
+
+/// Delete a chat: kill any live keeper, then remove its transcript
+/// (`<id>.jsonl`), the native store (`cwi_native/<id>.json`), and any custom
+/// title/icon metadata. Best-effort — a missing file is not an error.
+async fn delete_chat(
+    State(state): State<Arc<AppState>>,
+    Path(id): Path<String>,
+) -> impl IntoResponse {
+    // Guard against path traversal — a chat id is a bare session id, never a path.
+    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+        return StatusCode::BAD_REQUEST;
+    }
+
+    // Stop the running process (if any) before touching files on disk.
+    state.sessions.remove(&id).await;
+
+    let jsonl = state.config.session_dir().join(format!("{id}.jsonl"));
+    remove_if_present(&jsonl, &id);
+    remove_if_present(&agent::store::path(&id), &id);
+    match state.meta.lock() {
+        Ok(mut meta) => {
+            if let Err(e) = meta.remove(&id) {
+                tracing::warn!(session = %id, "delete_chat: meta remove failed: {e}");
+            }
+        }
+        Err(e) => tracing::warn!(session = %id, "delete_chat: meta lock poisoned: {e}"),
+    }
+
+    StatusCode::NO_CONTENT
+}
+
+/// Remove a file for chat deletion. A missing file is the expected best-effort
+/// case (silent); any other error (e.g. the file is locked by another process)
+/// is logged so a failed delete isn't invisible.
+fn remove_if_present(path: &std::path::Path, id: &str) {
+    match std::fs::remove_file(path) {
+        Ok(()) => {}
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+        Err(e) => tracing::warn!(session = %id, "delete_chat: remove {} failed: {e}", path.display()),
+    }
 }
 
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
     State(state): State<Arc<AppState>>,
 ) -> impl IntoResponse {
-    ws.on_upgrade(move |socket| ws::handle_socket(socket, state))
+    // Cap inbound frame/message size so a client can't force a huge allocation.
+    ws.max_message_size(MAX_WS_MESSAGE_BYTES)
+        .max_frame_size(MAX_WS_MESSAGE_BYTES)
+        .on_upgrade(move |socket| ws::handle_socket(socket, state))
 }
 
 /// Available models from the Anthropic Models API (via Claude Code's OAuth token).
@@ -135,4 +332,21 @@ async fn list_models() -> impl IntoResponse {
         tracing::warn!("models fetch failed: {e}");
     }
     Json(serde_json::json!({ "models": models, "error": error }))
+}
+
+/// Native-engine providers (Anthropic / Kimi / GLM) with their models, for the
+/// settings UI: pick a provider first, then a model of that provider.
+/// Subscription usage/limits (5-hour window + weekly), sourced from the CLI's
+/// own `/usage` screen. Only meaningful for the CLI engine; native returns
+/// `{available:false}`. See `src/usage.rs`.
+async fn get_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    Json(usage::usage_json(&state.config).await)
+}
+
+async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    let providers = agent::registry::providers().await;
+    Json(serde_json::json!({
+        "native": state.config.native_engine,
+        "providers": providers,
+    }))
 }
