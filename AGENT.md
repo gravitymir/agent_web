@@ -1,7 +1,9 @@
 # AGENT.md
 
-Web interface (Rust + Axum) that drives the **Claude Code CLI** as a subprocess and mirrors the
-desktop experience in a browser: live streaming chat, chat list, history, resume.
+Web interface (Rust + Axum), branded **"Agent Web"**, that drives the **Claude Code CLI** as a
+subprocess and mirrors the desktop experience in a browser: live streaming chat, chat list, history,
+resume. An alternative **native engine** (`CWI_ENGINE=native`) can drive the same UI by talking to
+`/v1/messages` directly instead of the CLI (see **Native engine** below).
 
 ## Run
 
@@ -32,7 +34,9 @@ launched via `cmd /C` (see `base_command` in `src/claude.rs`).
 - `src/history.rs` reads `<claude-config-dir>/projects/<encoded-workspace>/<id>.jsonl` for the chat
   list and transcripts. The workspace path is encoded by replacing every non-alphanumeric char with
   `-` (`src/config.rs::encode_project_dir`). The config dir defaults to `~/.claude` but is
-  overridable — see **Isolation** below.
+  overridable — see **Isolation** below. `list_chats`/`load_chat` **always read both** the CLI
+  `.jsonl` store and the native `cwi_native/*.json` store (each `ChatSummary` carries an `engine`
+  tag), so the sidebar is stable across an engine switch — see **Cross-engine chats** below.
 - `DELETE /api/chats/{id}` removes a chat: it kills any live keeper
   (`SessionManager::remove`), then deletes the `.jsonl`, the native `cwi_native/<id>.json`, and any
   custom title/icon (`MetaStore::remove`). The id is validated against path traversal.
@@ -46,9 +50,19 @@ launched via `cmd /C` (see `base_command` in `src/claude.rs`).
   `<script type="module" src="/js/main.js">`: `state.js` (state, DOM refs, helpers, self-contained
   Markdown renderer — the leaf, no imports), `render.js` (all message/thinking/tool/scrollbar view
   code), `ws.js` (WebSocket + event dispatch), `ui.js` (composer, dictation, modal, settings, chat
-  list + `init()`), `main.js` (entry: loads modules then calls `init()`). Names are unique across
-  modules; circular imports are fine (function bindings are hoisted, calls happen at runtime).
-  `static/app.js.bak` is the pre-split monolith kept for rollback.
+  list + `init()`), `ios-icons.js` (monochrome SVG icon set + `iIcon()` helper), `main.js` (entry:
+  loads modules then calls `init()`). Names are unique across modules; circular imports are fine
+  (function bindings are hoisted, calls happen at runtime). `static/app.js.bak` is the pre-split
+  monolith kept for rollback.
+- **Boot:** a full-screen `#boot` overlay (a rotating, colour-shifting rounded-square orb) hides the
+  UI while `init()` resolves the chat list, active engine, and last-open chat behind the scenes; then
+  it fades out and the UI reveals in one staggered pass (`body.booted`), so the empty state never
+  flashes. `init()` is `async` with a safety-timeout fallback so a hung fetch can't leave the app
+  hidden. **Never animate `transform` on `#sidebar`** in the reveal — it owns `translateX` for its
+  open/close slide, and a persisting `transform` jams it open.
+- **Favicon** (`static/favicon.js`) is a canvas-drawn rounded square whose colour/animation encodes
+  the chat state (idle green / thinking spins / tool pulses red / output blue); `static/favicon.svg`
+  is the matching static fallback.
 
 ## Isolation from desktop/terminal Claude (`CLAUDE_CONFIG_DIR`)
 
@@ -73,6 +87,42 @@ other's chat lists.
   (Claude Code limitation), so the token env is the clean path for subscription + isolation.
 - Leaving `CLAUDE_CONFIG_DIR` unset keeps the legacy shared behavior (`~/.claude`). Existing chats in
   the old location are not moved — they simply aren't visible from the isolated dir.
+
+## Cross-engine chats (frozen)
+
+The sidebar lists **all** chats — both CLI (`.jsonl`) and native (`cwi_native/`) — in **every** mode,
+so switching `CWI_ENGINE` never changes what you see. But each chat can only be *driven* by the
+engine that created it (different on-disk formats + auth), so a chat whose `engine` ≠ the active one
+is shown **read-only ("frozen")**:
+
+- Backend: `ChatSummary::engine` is `"cli"` or `"native"`; `list_chats`/`load_chat` read both stores
+  (`main.rs` passes `agent::store::dir()` unconditionally). `ws.rs::chat_is_frozen` refuses a `send`
+  to a chat that lives only in the *other* engine's store (defence-in-depth; viewing is a separate GET).
+- Frontend: `state.js::chatFrozen(id)` compares the chat's engine (`state.chatEngine`) to the active
+  one (`state.engineNative`, from `/api/providers`). A frozen chat gets a 🔒 lock icon in the list
+  and, when opened, the whole composer input row is hidden (`composer.readonly`) with a banner
+  explaining it's read-only until you switch `CWI_ENGINE`. `render.js::redecorateChatList` re-marks
+  the list once the active engine resolves.
+
+## Subscription usage / limits (`/api/usage`)
+
+There's no documented API for Claude subscription quota, but `claude -p "/usage" --output-format
+json` prints the same data the interactive `/usage` shows — the 5-hour ("session") window, weekly,
+and weekly-Fable percentages plus reset times — in the envelope's `result`. It **costs nothing**
+(`num_turns: 0`, zero tokens), so it's safe to poll behind a cache.
+
+- `src/usage.rs::usage_json` spawns the CLI (like the keeper: `cmd /C claude …` on Windows), parses
+  the percentages/reset lines from `result`, and adds plan/email from `claude auth status --json`.
+  Cached ~20 s. `GET /api/usage` returns it; `{available:false}` in native mode (limits reflect the
+  subscription the CLI engine uses, not a native provider).
+- **Caveat:** the isolated `CLAUDE_CONFIG_DIR` + `setup-token` auth returns only the header line of
+  `/usage` (no percentages); the primary desktop login returns the full breakdown. So `run_claude`
+  **strips** `CLAUDE_CONFIG_DIR`/`CLAUDE_CODE_OAUTH_TOKEN` from the child env for these read-only meta
+  queries and uses the default `~/.claude` login. This creates no chats there, so chat isolation holds.
+- Frontend: `render.js::loadUsage` stores `state.usage` and re-renders. Refreshed **rarely** — at
+  turn end (`finalizeTurn`), when the usage panel opens (`setUsage`), and once at startup. The token
+  badge shows four lines (session % / week % / Fable % / chat tokens); the "Использование чата" panel
+  shows the limits block + per-metric token rows with icons.
 
 ## Native engine (`src/agent/`, experimental)
 
@@ -104,9 +154,9 @@ swap providers (Anthropic / Kimi / GLM). Enabled with `CWI_ENGINE=native`.
 - Env: `CWI_ENGINE=native`, `CWI_AGENT_PROVIDER=anthropic|kimi|glm`, `CWI_AGENT_API_KEY=...`,
   optional `CWI_AGENT_MODEL`, `CWI_AGENT_BASE_URL`, `CWI_AGENT_MAX_TOKENS`, `CWI_AGENT_THINKING`.
   Anthropic first-party needs a **console API key** (subscription OAuth returns 401 on messages).
-- Not yet built (deferred): context compaction and native-session listing in the chat sidebar
-  (native chats live in `cwi_native/`, not the CLI `.jsonl` dir the sidebar reads). MCP, the web
-  tools, and retry/rate-limit handling are implemented (see above).
+- Native chats **are** listed in the sidebar now (unified cross-engine list; see **Cross-engine
+  chats**). MCP, the web tools, and retry/rate-limit handling are implemented (see above). Still
+  deferred: context compaction.
 
 ## Conventions / gotchas
 
