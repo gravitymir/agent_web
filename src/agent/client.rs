@@ -57,7 +57,7 @@ pub async fn stream(
     provider: &Provider,
     client: &reqwest::Client,
     mut body: Value,
-    mut on_event: impl FnMut(Value),
+    on_event: impl FnMut(Value),
     interrupt: &AtomicBool,
 ) -> Result<()> {
     body["stream"] = Value::Bool(true);
@@ -69,6 +69,10 @@ pub async fn stream(
     req = match provider.auth {
         Auth::XApiKey => req.header("x-api-key", &provider.api_key),
         Auth::Bearer => req.header("authorization", format!("Bearer {}", provider.api_key)),
+        // Never actually reached — Gemini providers route through `agent::gemini`,
+        // not this Anthropic-`/v1/messages` client — but handled correctly
+        // regardless, rather than panicking on a "can't happen" case.
+        Auth::GoogleApiKey => req.header("x-goog-api-key", &provider.api_key),
     };
     if let Some(beta) = &provider.anthropic_beta {
         req = req.header("anthropic-beta", beta.clone());
@@ -79,6 +83,19 @@ pub async fn stream(
         // Connection refused / DNS / TLS / timeout — no HTTP response at all.
         Err(e) => return Err(ApiError::network(e.to_string()).into()),
     };
+    response_to_sse_events(resp, on_event, interrupt).await
+}
+
+/// Turn a successful-or-error HTTP response into either an [`ApiError`] (non-2xx)
+/// or a stream of parsed SSE `data:` JSON payloads fed to `on_event` — shared by
+/// `stream` (Anthropic-shaped providers) and `agent::gemini` (which builds its
+/// own request but wants the same chunked-line SSE parsing, since Gemini's
+/// `alt=sse` streaming uses the identical `data: {...}\n\n` framing).
+pub async fn response_to_sse_events(
+    resp: reqwest::Response,
+    mut on_event: impl FnMut(Value),
+    interrupt: &AtomicBool,
+) -> Result<()> {
     let status = resp.status();
     if !status.is_success() {
         // Honor a server-provided Retry-After (integer seconds form).
@@ -93,7 +110,6 @@ pub async fn stream(
 
     // Abort the underlying HTTP body when the user hits stop. `bytes_stream()`
     // returns chunks from the response body; dropping it cancels further reads.
-    let resp = resp;
     let mut stream = resp.bytes_stream();
     let mut buf = String::new();
 

@@ -4,6 +4,7 @@
 //! existing frontend/WebSocket layer work unchanged.
 
 pub mod client;
+pub mod gemini;
 pub mod mcp;
 pub mod prompt;
 pub mod provider;
@@ -109,18 +110,24 @@ impl Engine {
         }
     }
 
-    fn build_body(&self) -> Value {
-        // Enabled built-in tools + any tools exposed by connected MCP servers.
+    /// Enabled built-in tools + any tools exposed by connected MCP servers —
+    /// shared by both wire formats (`build_body` renames nothing further for
+    /// Anthropic; `gemini::stream` renames `input_schema` -> `parameters`).
+    fn tool_list(&self) -> Vec<Value> {
         let mut tool_list = tools::schemas(&self.caps);
         if let Some(m) = &self.mcp {
             tool_list.extend(m.tool_schemas());
         }
+        tool_list
+    }
+
+    fn build_body(&self) -> Value {
         let mut body = json!({
             "model": self.provider.model,
             "max_tokens": self.provider.max_tokens,
             "system": prompt::system_prompt(&self.workspace),
             "messages": self.stored.messages,
-            "tools": tool_list,
+            "tools": self.tool_list(),
         });
         if self.provider.thinking {
             body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
@@ -177,7 +184,12 @@ impl Engine {
                 break;
             }
 
-            let body = self.build_body();
+            let is_gemini = self.provider.kind == provider::Kind::Gemini;
+            // Gemini builds its own request shape from the raw pieces (see
+            // agent::gemini) — no point assembling the Anthropic body for it.
+            let body = if is_gemini { Value::Null } else { self.build_body() };
+            let system = prompt::system_prompt(&self.workspace);
+            let tool_list = self.tool_list();
             let mut acc: Accumulator;
             let mut stream_failed = false;
             let mut attempt = 0u32;
@@ -188,40 +200,32 @@ impl Engine {
                 let mut think_emitted = false;
                 let mut got_event = false;
                 let emit_c = emit.clone();
-                let res = client::stream(
-                    &self.provider,
-                    &self.http,
-                    body.clone(),
-                    |ev| {
-                        got_event = true;
-                        // Pass the raw stream event through, wrapped like Claude Code's.
-                        emit_c.line(json!({ "type": "stream_event", "event": ev }).to_string());
-
-                        // Measure reasoning wall-clock and emit it once as a `cwi:think`
-                        // frame when thinking ends (a non-thinking block starts), so the
-                        // block's timer survives replay/reconnect (which streams instantly).
-                        if ev.get("delta").and_then(|d| d.get("type")).and_then(Value::as_str)
-                            == Some("thinking_delta")
-                            && think_start.is_none()
-                        {
-                            think_start = Some(Instant::now());
-                        }
-                        if !think_emitted
-                            && ev.get("type").and_then(Value::as_str) == Some("content_block_start")
-                            && ev["content_block"].get("type").and_then(Value::as_str) != Some("thinking")
-                        {
-                            if let Some(s) = think_start {
-                                emit_c.line(
-                                    json!({ "cwi": "think", "ms": s.elapsed().as_millis() as u64 }).to_string(),
-                                );
-                                think_emitted = true;
-                            }
-                        }
-                        acc.on_event(&ev);
-                    },
-                    interrupt,
-                )
-                .await;
+                // Both branches feed identical per-event bookkeeping into the SAME
+                // Accumulator via `handle_stream_event` — only how the bytes get
+                // produced differs (see `provider::Kind`'s doc comment).
+                let res = if is_gemini {
+                    gemini::stream(
+                        &self.provider,
+                        &self.http,
+                        &self.stored.messages,
+                        &tool_list,
+                        &system,
+                        self.provider.max_tokens,
+                        self.provider.thinking,
+                        |ev| handle_stream_event(ev, &emit_c, &mut acc, &mut think_start, &mut think_emitted, &mut got_event),
+                        interrupt,
+                    )
+                    .await
+                } else {
+                    client::stream(
+                        &self.provider,
+                        &self.http,
+                        body.clone(),
+                        |ev| handle_stream_event(ev, &emit_c, &mut acc, &mut think_start, &mut think_emitted, &mut got_event),
+                        interrupt,
+                    )
+                    .await
+                };
 
                 match res {
                     Ok(()) => break,
@@ -325,6 +329,43 @@ impl Engine {
             "agent finished turn"
         );
     }
+}
+
+/// Per-stream-event bookkeeping shared by both wire formats: forward the raw
+/// (already Anthropic-shaped, real or synthetic) event to the browser, track
+/// the reasoning timer, and feed the [`Accumulator`]. Extracted to a free
+/// function so both the Anthropic and Gemini branches in `run_turn` can build
+/// an identical closure without either capturing the other's stream call.
+fn handle_stream_event(
+    ev: Value,
+    emit_c: &Emit,
+    acc: &mut Accumulator,
+    think_start: &mut Option<Instant>,
+    think_emitted: &mut bool,
+    got_event: &mut bool,
+) {
+    *got_event = true;
+    // Pass the raw stream event through, wrapped like Claude Code's.
+    emit_c.line(json!({ "type": "stream_event", "event": &ev }).to_string());
+
+    // Measure reasoning wall-clock and emit it once as a `cwi:think` frame when
+    // thinking ends (a non-thinking block starts), so the block's timer
+    // survives replay/reconnect (which streams instantly).
+    if ev.get("delta").and_then(|d| d.get("type")).and_then(Value::as_str) == Some("thinking_delta")
+        && think_start.is_none()
+    {
+        *think_start = Some(Instant::now());
+    }
+    if !*think_emitted
+        && ev.get("type").and_then(Value::as_str) == Some("content_block_start")
+        && ev["content_block"].get("type").and_then(Value::as_str) != Some("thinking")
+    {
+        if let Some(s) = *think_start {
+            emit_c.line(json!({ "cwi": "think", "ms": s.elapsed().as_millis() as u64 }).to_string());
+            *think_emitted = true;
+        }
+    }
+    acc.on_event(&ev);
 }
 
 /// Repair a stored conversation so every assistant `tool_use` is followed by a
@@ -444,6 +485,9 @@ struct Block {
     tool_id: String,
     tool_name: String,
     input_json: String,
+    // Gemini only: the function-call part's `thoughtSignature`, round-tripped so
+    // multi-round tool calls keep working (empty for other providers).
+    tool_signature: String,
 }
 
 #[derive(Default)]
@@ -466,6 +510,8 @@ impl Accumulator {
                 if kind == "tool_use" {
                     b.tool_id = cb.get("id").and_then(Value::as_str).unwrap_or("").to_string();
                     b.tool_name = cb.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+                    b.tool_signature =
+                        cb.get("_gemini_signature").and_then(Value::as_str).unwrap_or("").to_string();
                 }
                 self.blocks.insert(idx, b);
             }
@@ -516,7 +562,13 @@ impl Accumulator {
                 "text" if !b.text.is_empty() => out.push(json!({ "type": "text", "text": b.text })),
                 "tool_use" => {
                     let input: Value = serde_json::from_str(&b.input_json).unwrap_or_else(|_| json!({}));
-                    out.push(json!({ "type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": input }));
+                    let mut tu = json!({ "type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": input });
+                    // Preserve Gemini's thoughtSignature for the round-trip (ignored
+                    // by other providers, which never set it).
+                    if !b.tool_signature.is_empty() {
+                        tu["_gemini_signature"] = json!(b.tool_signature);
+                    }
+                    out.push(tu);
                 }
                 _ => {}
             }
@@ -587,6 +639,16 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].1, "Read");
         assert_eq!(tools[0].2["file_path"], "a.rs");
+    }
+
+    #[test]
+    fn preserves_gemini_thought_signature_on_tool_use() {
+        let mut acc = Accumulator::default();
+        acc.on_event(&json!({"type":"content_block_start","index":0,"content_block":
+            {"type":"tool_use","id":"gemini-call-1","name":"Read","_gemini_signature":"SIG123"}}));
+        let content = acc.assistant_content();
+        assert_eq!(content[0]["type"], "tool_use");
+        assert_eq!(content[0]["_gemini_signature"], "SIG123"); // survives into storage
     }
 
     #[test]

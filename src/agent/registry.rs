@@ -42,6 +42,18 @@ fn registry() -> Vec<ProviderMeta> {
             key_var: "CWI_AGENT_GLM_API_KEY",
             fallback: &["glm-5.2", "glm-4.6", "glm-5-turbo", "glm-4.5-air"],
         },
+        ProviderMeta {
+            id: "gemini",
+            name: "Gemini (Google)",
+            // Real endpoint, for reference — its `{"models":[{"name","displayName"}]}`
+            // shape doesn't match `parse_models`'s `data[].id` expectation, so this
+            // always yields an empty list and falls back to the static one below
+            // (harmless: no error, just skips the live fetch in practice).
+            models_url: "https://generativelanguage.googleapis.com/v1beta/models",
+            auth: Auth::GoogleApiKey,
+            key_var: "CWI_AGENT_GEMINI_API_KEY",
+            fallback: &["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"],
+        },
     ]
 }
 
@@ -72,6 +84,7 @@ async fn models_for(p: &ProviderMeta) -> Vec<ModelInfo> {
             ("anthropic-version", "2023-06-01".to_string()),
         ],
         Auth::Bearer => vec![("authorization", format!("Bearer {key}"))],
+        Auth::GoogleApiKey => vec![("x-goog-api-key", key)],
     };
     match fetch_model_list(p.models_url, &headers).await {
         Ok(list) if !list.is_empty() => list,
