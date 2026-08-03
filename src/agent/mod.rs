@@ -253,6 +253,13 @@ impl Engine {
 
             turn_tokens += acc.output_tokens;
             self.stored.output_tokens += acc.output_tokens;
+            // Input / cache accumulate like the CLI's per-turn usage; last_context
+            // is the CURRENT window fill (this call's prompt), overwritten each step.
+            self.stored.input_tokens += acc.input_tokens;
+            self.stored.cache_read += acc.cache_read;
+            self.stored.cache_creation += acc.cache_creation;
+            self.stored.last_context_tokens =
+                acc.input_tokens + acc.cache_read + acc.cache_creation;
             // Split output tokens into thinking vs answer by text volume (estimate).
             let total_chars = acc.thinking_chars + acc.answer_chars;
             let think_tok = if total_chars > 0 {
@@ -495,6 +502,11 @@ struct Accumulator {
     blocks: BTreeMap<usize, Block>,
     stop_reason: String,
     output_tokens: u64,
+    // Input / prompt-cache tokens: Anthropic sends them on `message_start`, Gemini
+    // on its synthetic `message_delta` (see `gemini::Translator::finish`).
+    input_tokens: u64,
+    cache_read: u64,
+    cache_creation: u64,
     thinking_chars: usize,
     answer_chars: usize,
 }
@@ -541,6 +553,12 @@ impl Accumulator {
                 self.thinking_chars += think_add;
                 self.answer_chars += answer_add;
             }
+            Some("message_start") => {
+                // Anthropic reports input / prompt-cache tokens here.
+                if let Some(u) = ev.get("message").and_then(|m| m.get("usage")) {
+                    self.capture_input_usage(u);
+                }
+            }
             Some("message_delta") => {
                 if let Some(sr) = ev["delta"].get("stop_reason").and_then(Value::as_str) {
                     self.stop_reason = sr.to_string();
@@ -548,8 +566,24 @@ impl Accumulator {
                 if let Some(ot) = ev["usage"].get("output_tokens").and_then(Value::as_u64) {
                     self.output_tokens = ot;
                 }
+                self.capture_input_usage(&ev["usage"]); // Gemini reports input/cache here
             }
             _ => {}
+        }
+    }
+
+    /// Capture input / prompt-cache tokens from a usage object, overwriting only
+    /// the fields present — so Anthropic's `message_start` and Gemini's synthetic
+    /// `message_delta` each fill in whatever they carry.
+    fn capture_input_usage(&mut self, u: &Value) {
+        if let Some(v) = u.get("input_tokens").and_then(Value::as_u64) {
+            self.input_tokens = v;
+        }
+        if let Some(v) = u.get("cache_read_input_tokens").and_then(Value::as_u64) {
+            self.cache_read = v;
+        }
+        if let Some(v) = u.get("cache_creation_input_tokens").and_then(Value::as_u64) {
+            self.cache_creation = v;
         }
     }
 
@@ -639,6 +673,26 @@ mod tests {
         assert_eq!(tools.len(), 1);
         assert_eq!(tools[0].1, "Read");
         assert_eq!(tools[0].2["file_path"], "a.rs");
+    }
+
+    #[test]
+    fn captures_input_and_cache_tokens() {
+        let mut acc = Accumulator::default();
+        // Anthropic reports input/cache on message_start.
+        acc.on_event(&json!({"type":"message_start","message":{"usage":
+            {"input_tokens":120,"cache_read_input_tokens":40,"cache_creation_input_tokens":10}}}));
+        acc.on_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":33}}));
+        assert_eq!(acc.input_tokens, 120);
+        assert_eq!(acc.cache_read, 40);
+        assert_eq!(acc.cache_creation, 10);
+        assert_eq!(acc.output_tokens, 33);
+
+        // Gemini reports them on the (synthetic) message_delta instead.
+        let mut g = Accumulator::default();
+        g.on_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":10,"input_tokens":70,"cache_read_input_tokens":30}}));
+        assert_eq!(g.input_tokens, 70);
+        assert_eq!(g.cache_read, 30);
     }
 
     #[test]

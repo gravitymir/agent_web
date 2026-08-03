@@ -28,6 +28,18 @@ pub struct Stored {
     /// Estimated answer tokens (output minus thinking).
     #[serde(default)]
     pub answer_tokens: u64,
+    /// Cumulative input (prompt) tokens across all model calls.
+    #[serde(default)]
+    pub input_tokens: u64,
+    /// Cumulative prompt-cache read / creation tokens (0 for providers without caching).
+    #[serde(default)]
+    pub cache_read: u64,
+    #[serde(default)]
+    pub cache_creation: u64,
+    /// Context-window fill on the MOST RECENT call (input + cache), overwritten
+    /// each turn — drives the context-fill ring, not a running total.
+    #[serde(default)]
+    pub last_context_tokens: u64,
 }
 
 pub fn dir() -> PathBuf {

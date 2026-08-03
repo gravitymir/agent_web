@@ -183,6 +183,8 @@ struct Translator {
     index: i64,
     current_kind: Option<&'static str>,
     output_tokens: u64,
+    input_tokens: u64, // non-cached prompt tokens (promptTokenCount - cached)
+    cache_read: u64,   // cachedContentTokenCount
     finish_reason: Option<String>,
     started: bool,
 }
@@ -193,6 +195,12 @@ impl Translator {
             let candidates = u.get("candidatesTokenCount").and_then(Value::as_u64).unwrap_or(0);
             let thoughts = u.get("thoughtsTokenCount").and_then(Value::as_u64).unwrap_or(0);
             self.output_tokens = candidates + thoughts; // output_tokens includes thinking, like Anthropic's
+            // Split the prompt into cached vs not, matching Anthropic's shape so
+            // input + cache_read == the full context size (no double counting).
+            let prompt = u.get("promptTokenCount").and_then(Value::as_u64).unwrap_or(0);
+            let cached = u.get("cachedContentTokenCount").and_then(Value::as_u64).unwrap_or(0);
+            self.cache_read = cached;
+            self.input_tokens = prompt.saturating_sub(cached);
         }
         let Some(candidate) = chunk.get("candidates").and_then(Value::as_array).and_then(|a| a.first()) else {
             return;
@@ -278,7 +286,11 @@ impl Translator {
         emit(json!({
             "type": "message_delta",
             "delta": { "stop_reason": stop_reason },
-            "usage": { "output_tokens": self.output_tokens }
+            "usage": {
+                "output_tokens": self.output_tokens,
+                "input_tokens": self.input_tokens,
+                "cache_read_input_tokens": self.cache_read,
+            }
         }));
     }
 }
@@ -384,6 +396,22 @@ mod tests {
         // The signature rides on the tool_use content_block for the Accumulator to store.
         assert_eq!(events[0]["content_block"]["type"], "tool_use");
         assert_eq!(events[0]["content_block"]["_gemini_signature"], "SIG123");
+    }
+
+    #[test]
+    fn translator_splits_prompt_into_input_and_cache() {
+        let mut events = Vec::new();
+        let mut xlate = Translator::default();
+        xlate.on_chunk(
+            &json!({"candidates":[{"content":{"parts":[{"text":"ok"}]},"finishReason":"STOP"}],
+                    "usageMetadata":{"candidatesTokenCount":10,"promptTokenCount":100,"cachedContentTokenCount":30}}),
+            &mut |v| events.push(v),
+        );
+        xlate.finish(&mut |v| events.push(v));
+        let usage = &events.last().unwrap()["usage"];
+        assert_eq!(usage["output_tokens"], 10);
+        assert_eq!(usage["input_tokens"], 70); // 100 prompt - 30 cached
+        assert_eq!(usage["cache_read_input_tokens"], 30);
     }
 
     #[test]

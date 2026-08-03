@@ -974,16 +974,23 @@ export function fmtAgentron(ag) {
   return ag < 0.1 ? "0" : ag.toFixed(1);
 }
 
+// The Agentron unit mark — the clock-antenna icon rendered inline at text height,
+// used as the unit symbol in place of the text "Ag".
+function agMark() {
+  return `<span class="ag-mark" title="Agentron">${iIcon("agentron", 16, "")}</span>`;
+}
+
 // ---------------------------------------------------------------------------
 // Context-window fill indicator — a small ring that fills clockwise, mirroring
-// the gauge the interactive CLI shows. No API exposes a model's exact context
-// limit, so this uses the standard Claude context window (200k tokens) as a
-// flat constant; a model with a larger window would just under-report fill.
+// the gauge the interactive CLI shows. The denominator is per-chat: the backend
+// sends `context_limit` (Claude ~200k, Gemini ~1M, …) via the summary; this flat
+// constant is only the fallback when it's unknown.
 // ---------------------------------------------------------------------------
 export const CONTEXT_WINDOW = 200_000;
 
-export function contextPercent(contextTokens) {
-  return Math.max(0, Math.min(100, ((contextTokens || 0) / CONTEXT_WINDOW) * 100));
+export function contextPercent(contextTokens, limit) {
+  const lim = limit || CONTEXT_WINDOW;
+  return Math.max(0, Math.min(100, ((contextTokens || 0) / lim) * 100));
 }
 
 // `size`/`stroke` in px. Starts at 12 o'clock and fills clockwise via a
@@ -1024,7 +1031,7 @@ export function updateUsageBadge() {
   const tokens = fmtTokens(base + live);
   const totalTokens = base + live + ((u && u.input_tokens) || 0);
   const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
-  const ctxPct = contextPercent(u && u.contextTokens);
+  const ctxPct = contextPercent(u && u.contextTokens, u && u.contextLimit);
   const g = state.usage; // subscription limits (session/week/fable %), refreshed rarely
   if (g) {
     const pct = (o) => (o && o.percent != null ? o.percent : 0) + "%";
@@ -1034,7 +1041,7 @@ export function updateUsageBadge() {
       `<span class="ub-pct" title="Неделя (все модели)">${pct(g.week)}</span>` +
       `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>` +
       `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>` +
-      `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} Ag</span>` +
+      `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} ${agMark()}</span>` +
       `<span class="ub-ctx" title="Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%">` +
       `${contextRing(ctxPct, 14, 2.2)}<span>${Math.round(ctxPct)}%</span></span>`;
   } else {
@@ -1107,14 +1114,15 @@ export function renderUsageDetail() {
   // Context-window fill — same ring as the compact badge, bigger, with the
   // raw numbers (fill is as-of the last completed API call, not a running
   // total — see history.rs::last_context_tokens).
-  const ctxPct = contextPercent(u.contextTokens);
+  const ctxLimit = u.contextLimit || CONTEXT_WINDOW;
+  const ctxPct = contextPercent(u.contextTokens, ctxLimit);
   const context = `<div class="usage-section usage-context">
        <div class="usage-section-head">${iIcon("microscope", 15, "usage-ic")}<span>Контекст чата</span></div>
        <div class="usage-row">
          <span class="usage-ic">${contextRing(ctxPct, 28, 3)}</span>
          <div class="usage-row-main">
            <div class="k">Заполнено на ${Math.round(ctxPct)}%</div>
-           <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(CONTEXT_WINDOW)} токенов, по последнему ходу</div>
+           <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(ctxLimit)} токенов, по последнему ходу</div>
          </div>
        </div>
      </div>`;
@@ -1140,11 +1148,11 @@ export function renderUsageDetail() {
     row("archive", "Создание кэша", fmtFull(u.cache_creation || 0)) +
     row("bubble", "Ходов модели", fmtFull(u.turns || 0)) +
     row(
-      "bolt",
+      "agentron",
       "Agentron",
-      `${fmtAgentron(agentron)} Ag`,
+      `${fmtAgentron(agentron)} ${agMark()}`,
       "объём работы: часы × млн токенов" +
-        (perTurn != null ? ` · ${perTurn.toFixed(2)} Ag/ход — эффективность` : "")
+        (perTurn != null ? ` · ${perTurn.toFixed(2)} ${agMark()}/ход — эффективность` : "")
     ) +
     `</div>`;
 }

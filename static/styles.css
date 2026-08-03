@@ -962,6 +962,10 @@ body.drag-over::after {
 /* Agentron — a secondary, "fun stat" line under the main token count, so it
    reads as supplementary rather than competing with it for attention. */
 .usage-badge.multi .ub-ag { font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 0; }
+/* Agentron unit mark — the clock-antenna icon inline at text height (in place of "Ag"). */
+.ag-mark { display: inline-block; vertical-align: -0.16em; line-height: 0; color: var(--accent); }
+.ag-mark svg { width: 1.15em; height: 1.15em; }
+.usage-badge.multi .ub-ag .ag-mark svg { width: 1.35em; height: 1.35em; }
 /* Context-fill ring + percent, as its own line under Agentron. */
 .usage-badge.multi .ub-ctx {
   display: flex; align-items: center; gap: 4px;
@@ -998,7 +1002,9 @@ body.drag-over::after {
   color: var(--text-dim);
 }
 .usage-section-head .usage-ic { color: var(--accent); }
-.usage-ic { flex-shrink: 0; display: inline-flex; align-items: center; color: var(--text-dim); }
+.usage-ic { flex-shrink: 0; display: inline-flex; align-items: center; color: var(--accent); }
+/* Larger panel icons (~2×) — row icons, section-head icons and the Agentron row. */
+#usage-detail .usage-ic svg { width: 30px; height: 30px; }
 .usage-limits .usage-lim { margin-bottom: 12px; }
 .usage-limits .usage-lim:last-child { margin-bottom: 0; }
 

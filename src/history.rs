@@ -46,6 +46,9 @@ pub struct ChatSummary {
     /// cache_read + cache_creation of the most recent `assistant` line) — not
     /// a sum across the chat. Drives the context-fill ring in the UI.
     pub last_context_tokens: u64,
+    /// The model's context-window size (tokens) — the fill ring's denominator, so
+    /// a large-window model (e.g. Gemini ~1M) isn't over-reported against Claude's 200k.
+    pub context_limit: u64,
     /// Which engine owns this chat: `"cli"` (Claude Code `.jsonl`) or `"native"`
     /// (`cwi_native/*.json`). The sidebar always lists both; a chat whose engine
     /// differs from the active `CWI_ENGINE` is shown read-only ("frozen").
@@ -222,8 +225,22 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
         turns,
         duration_ms: 0,
         last_context_tokens,
+        context_limit: 200_000, // Claude via the CLI
         engine: "cli",
     })
+}
+
+/// Best-effort context-window size for a native model, for the fill-ring
+/// denominator. Approximate — recheck as providers ship bigger windows.
+fn context_limit_for_model(model: &str) -> u64 {
+    let m = model.to_ascii_lowercase();
+    if m.contains("gemini") {
+        1_048_576 // Gemini 2.5 / 3 Pro: ~1M
+    } else if m.contains("kimi") {
+        256_000
+    } else {
+        200_000 // Claude / GLM / unknown
+    }
 }
 
 fn summarize_native_file(path: &Path, id: String) -> Option<ChatSummary> {
@@ -259,12 +276,13 @@ fn summarize_native_file(path: &Path, id: String) -> Option<ChatSummary> {
         updated_at: file_modified_iso(path),
         message_count,
         tokens: stored.output_tokens,
-        input_tokens: 0,
-        cache_read: 0,
-        cache_creation: 0,
+        input_tokens: stored.input_tokens,
+        cache_read: stored.cache_read,
+        cache_creation: stored.cache_creation,
         turns,
         duration_ms: 0,
-        last_context_tokens: 0,
+        last_context_tokens: stored.last_context_tokens,
+        context_limit: context_limit_for_model(&stored.model),
         engine: "native",
     })
 }
