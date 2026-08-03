@@ -62,8 +62,11 @@ async fn add_security_headers(
 /// Shared application state.
 pub struct AppState {
     pub config: Config,
-    /// User-assigned chat metadata (title + icon), overrides auto-derived ones.
-    pub meta: Mutex<MetaStore>,
+    /// User-assigned chat metadata (title + icon) plus accumulated turn
+    /// duration (Agentron), overrides/overlays the auto-derived chat summary.
+    /// Shared with `SessionManager` (its actors add duration as turns finish),
+    /// hence the `Arc` — not just this handle's own private lock.
+    pub meta: Arc<Mutex<MetaStore>>,
     /// Live per-session keeper processes.
     pub sessions: Arc<SessionManager>,
 }
@@ -118,10 +121,11 @@ async fn main() -> anyhow::Result<()> {
         None
     };
 
+    let meta = Arc::new(Mutex::new(MetaStore::load(meta_path)));
     let state = Arc::new(AppState {
         config: config.clone(),
-        meta: Mutex::new(MetaStore::load(meta_path)),
-        sessions: SessionManager::new(config.clone(), mcp),
+        meta: meta.clone(),
+        sessions: SessionManager::new(config.clone(), mcp, meta),
     });
 
     let static_dir = config.static_dir.clone();
@@ -209,6 +213,7 @@ async fn list_chats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                     chat.custom_title = true;
                 }
                 chat.icon = m.icon;
+                chat.duration_ms = m.duration_ms;
             }
         }
     }

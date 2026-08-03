@@ -1,5 +1,62 @@
 # AGENT.md
 
+## Agentron (Ag) — effort unit, not a speed metric
+
+Deliberately **not** tokens/hour — that's throughput, not volume of work done. Modeled on kWh:
+`1 Ag = 1 hour of active agent session × 1 million tokens (input + output)`.
+
+```
+Ag = H × (Tᵢ + Tₒ) / 1_000_000
+```
+
+Live, per-chat, in the running app — not a one-off computation:
+
+- `Tᵢ`/`Tₒ` need no new storage: they're already summed straight from the on-disk `.jsonl`
+  (`history.rs::ChatSummary.input_tokens`/`.tokens`, from each `assistant` line's **top-level**
+  `usage` object — not the nested `iterations[]` breakdown some lines carry, which would
+  double-count a multi-step turn). Cache tokens are tracked separately and deliberately excluded
+  from `T`.
+- `H` comes from **`duration_ms`, summed turn by turn** — not wall-clock time since chat creation
+  (that would count idle gaps between sessions as "work"). The CLI's `result` event carries
+  `duration_ms` for that one turn, but Claude Code never persists `result` lines to its own
+  `.jsonl` (confirmed empirically: zero `"type":"result"` lines in real transcripts) — so there was
+  nothing to retroactively sum. `session.rs::track_turn_duration` intercepts every line either actor
+  (`run_actor` for CLI, `run_native_actor` for native — both frames are `{"type":"result",
+  "duration_ms":...}`) forwards through `emit`, and on a match adds it to
+  `titles.rs::MetaStore::add_duration`, persisted in `cwi_titles.json` (`ChatMeta.duration_ms`,
+  cumulative) alongside title/icon. `MetaStore::set` (title/icon) preserves `duration_ms` even when
+  clearing a title to blank — it only fully removes an entry when duration is *also* zero.
+- `main.rs::list_chats` overlays `duration_ms` from `MetaStore` onto `ChatSummary` exactly like
+  title/icon; the frontend picks it up into `state.chatUsage[id].duration_ms` alongside the existing
+  token/turn fields (`ui.js::renderChatList`). `render.js::computeAgentron(durationMs, tokens)` /
+  `fmtAgentron(ag)` do the actual math + formatting (tenths only; below 0.1 shows a flat `"0"`).
+  Shown as a 5th line on the multi-line usage badge and as a row (with a derived `Ag ÷ turns`
+  "efficiency" figure) in the "Использование чата" detail panel.
+- Pre-existing chats (before this was added) simply have no `duration_ms` yet — Agentron starts
+  accumulating from their next turn onward; nothing is backfilled.
+- Beware noise when eyeballing `~/.claude/projects/<encoded>/`: the app's own `/api/usage` polling
+  (`src/usage.rs`) spawns a throwaway `claude -p "/usage"` process per call, each logging its own
+  near-empty session file with zero `usage` on any line — harmless, but there can be dozens of them.
+
+## Context-window fill indicator
+
+A small ring (fills clockwise, like the interactive CLI's own context gauge) showing how full the
+model's context window is — distinct from Agentron/token totals, which are cumulative *sums*; this
+is a point-in-time *fill level* instead.
+
+- `history.rs::last_context_tokens` is deliberately **not** summed like `tokens`/`input_tokens` — each
+  `assistant` line's usage **overwrites** a running variable instead of adding to it, so after the
+  parse loop it holds only the *most recent* API call's `input + cache_read + cache_creation`. That
+  figure only grows within a chat (context never shrinks), so "last" is always "current."
+  `ws.js`'s `case "assistant"` updates it live, once per tool-loop step — not just at turn end, since
+  a single turn can span several.
+- `render.js::CONTEXT_WINDOW` is a flat `200_000`-token constant — no API exposes a model's actual
+  context limit, so a model with a larger window just under-reports fill. `contextPercent`/
+  `contextRing` do the math + build the ring SVG (a rotated, partially-dashed circle — the standard
+  "progress ring" trick; `stroke-dashoffset` shrinks as `pct` grows).
+- Shown twice: compact (14px) as a 6th badge line, and bigger (28px) with the raw numbers in the
+  "Использование чата" panel's own "Контекст чата" section.
+
 Web interface (Rust + Axum), branded **"Agent Web"**, that drives the **Claude Code CLI** as a
 subprocess and mirrors the desktop experience in a browser: live streaming chat, chat list, history,
 resume. An alternative **native engine** (`CWI_ENGINE=native`) can drive the same UI by talking to
@@ -140,13 +197,21 @@ Allow/Deny prompt — including `AskUserQuestion` — instead of the previous al
 - `run_actor` tracks `current_caps` (refreshed from every `Cmd::User`'s `Caps`, sent alongside each
   turn) and a `pending_controls: HashMap<request_id, original_input>` for requests still awaiting a
   human. On each `control_request` line: if `current_caps.allows(tool_name)` it's auto-approved
-  immediately (no round-trip to the browser); `AskUserQuestion` auto-approval instead runs
-  `auto_answer_question` (picks each question's first/"recommended" option) — otherwise the request
-  is stashed in `pending_controls` and emitted to the browser as `{"cwi":"permission_request",...}`.
-- `Caps` (`agent/tools.rs`) gained `ask_question: bool` — **off** by default, unlike every other
-  group (`read`/`modify`/`run`/`web_fetch`/`web_search`, all on by default): silently auto-picking an
-  answer to a clarifying question can send the agent in the wrong direction, so it needs an explicit
-  opt-in. Also fixed `MultiEdit`/`NotebookEdit` being ungated (now part of the `modify` group).
+  immediately (no round-trip to the browser) — otherwise the request is stashed in `pending_controls`
+  and emitted to the browser as `{"cwi":"permission_request",...}`.
+- This whole mechanism only sees a tool at all if Claude Code itself decides it needs a decision.
+  `config.rs::Config::permission_mode` (`CWI_PERMISSION_MODE`, default `default`) **must not** be
+  `acceptEdits`/`bypassPermissions` — those auto-approve Write/Edit (or everything) at the CLI level,
+  so the caps panel's "Изменение файлов" toggle would silently do nothing for them (confirmed live:
+  `acceptEdits` let Edit through instantly with `modify` off, no permission card). `Read`/`Glob`/`Grep`
+  are a separate story — Claude Code never asks permission for those in **any** mode, so the "Чтение
+  файлов" toggle is inherently a no-op for CLI-engine gating (it still filters the native engine's
+  tool schema).
+- `Caps::allows` (`agent/tools.rs`) hardcodes `"AskUserQuestion" => false` — unlike every other group
+  (`read`/`modify`/`run`/`web_fetch`/`web_search`, all on by default and user-toggleable), there is no
+  setting for it and it is **never** auto-approved: silently picking an answer to a clarifying
+  question defeats the point of asking, so it always goes to the interactive card. Also fixed
+  `MultiEdit`/`NotebookEdit` being ungated (now part of the `modify` group).
 - The browser answers via `{"type":"permission_response","request_id","allow",
   "answers"|"response"}` (`ws.rs::ClientMsg::PermissionResponse` → `SessionKeeper::send_permission_response`
   → `Cmd::PermissionResponse`). `answers` is `{question_text: chosen_label}` (built from the
@@ -160,16 +225,20 @@ Allow/Deny prompt — including `AskUserQuestion` — instead of the previous al
   freeform answer (and vice versa); focusing a non-empty freeform textarea revives it back to
   "freeform" mode. Rendered regardless of `state.replayMode` — an unanswered request is live,
   actionable state that must survive a page reload, not a one-off toast.
-- Toggle lives in the settings drawer's "Инструменты и разрешения" panel (`index.html`'s
-  `cap-ask_question` checkbox); `ui.js::applyCapsAvailability` disables just that one checkbox in
-  native-engine mode (native has no control-protocol concept — the other five caps apply to both
-  engines).
+- The settings drawer's "Инструменты и разрешения" panel (`index.html`) only lists the five
+  toggleable groups (`ui.js::CAP_KEYS`) — no toggle for `AskUserQuestion`, since it's always
+  interactive regardless of caps.
+- The tools/permissions panel closes on **any** click outside it, anywhere on the page — not just
+  within the composer — since `setToolsModal(true)` reparents it to `<body>` while open. The listener
+  is on `document`, guarded against the tools-button's own click (which toggles it separately and
+  already `stopPropagation()`s).
 
 ## Native engine (`src/agent/`, experimental)
 
 An alternative "brain" that talks **directly to an Anthropic-compatible `/v1/messages`** endpoint
 instead of shelling out to the Claude Code CLI — for full control over tools/behaviour/UI and to
-swap providers (Anthropic / Kimi / GLM). Enabled with `CWI_ENGINE=native`.
+swap providers (Anthropic / Kimi / GLM / Gemini — the last via a translation adapter, since it isn't
+Anthropic-compatible; see **Gemini adapter** below). Enabled with `CWI_ENGINE=native`.
 
 - Key design: the engine **emits the exact same event frames the CLI produces** (`stream_event`,
   `assistant`, `user`, `result`, `cwi:*`), so `ws.rs`, the keeper, and the whole frontend work
@@ -199,6 +268,50 @@ swap providers (Anthropic / Kimi / GLM). Enabled with `CWI_ENGINE=native`.
   chats**). MCP, the web tools, and retry/rate-limit handling are implemented (see above). Still
   deferred: context compaction.
 
+### Gemini adapter (`agent/gemini.rs`)
+
+Kimi/GLM are just `provider.rs` presets because they **speak** `/v1/messages` — same request/response
+shape as Anthropic, different URL and key. Gemini doesn't: different request body
+(`contents[].parts[]`, not `messages[].content[]`), different streaming chunks (no explicit
+block-start/stop events), and **no stable id** on a function call (Anthropic's `tool_use.id` /
+`tool_result.tool_use_id` matching has no Gemini equivalent — it matches by name/position). Bending
+`Engine::run_turn`/`Accumulator`/`store.rs` to a second wire format wasn't worth it, so instead:
+
+- `provider::Kind` (`AnthropicMessages` | `Gemini`) tells `run_turn` which of `client::stream` /
+  `gemini::stream` to call; both take/produce the same shapes (a `Value` body vs. raw
+  messages+tools+system for Gemini in, a stream of already-Anthropic-shaped `Value` events out via
+  `on_event`) — so `Accumulator`, tool execution, and `store.rs` need zero Gemini-awareness.
+  `handle_stream_event` (the reasoning-timer + forward-to-browser + `Accumulator` bookkeeping) is one
+  function shared by both branches, not duplicated per provider.
+- `client::response_to_sse_events` was factored out of `client::stream` so `gemini::stream` (which
+  builds its own request — different URL shape, `x-goog-api-key` header, no `anthropic-version`) can
+  still reuse the exact same chunked-line SSE parser (Gemini's `alt=sse` framing is byte-identical:
+  `data: {...}\n\n`).
+- Request translation: our stored `tool_use`/`tool_result` blocks keep their Anthropic `id` in
+  memory (needed so a `tool_result` can look up its call's `name` — Gemini's `functionResponse` is
+  keyed by name, not id) but the id itself is **never sent** to Gemini. Synthesized ids
+  (`gemini-call-{n}`) go the other way, purely so returned tool calls satisfy `Accumulator`'s (every
+  provider's) assumption that a `tool_use` block has an id — never round-tripped back to Gemini either.
+- Response translation (`gemini::Translator`): Gemini's streaming chunks carry a portion of
+  `candidates[0].content.parts[]` with no block-start/stop markers, so block boundaries are inferred
+  from when a part's kind (text / `thought` / `functionCall`) changes; each inferred boundary replays
+  as a synthetic `content_block_start`, each chunk of text as a `content_block_delta` — exactly what
+  `Accumulator::on_event` already expects from a real Anthropic stream. A `functionCall` part is
+  always emitted as one complete `input_json_delta` (Gemini doesn't stream partial tool-call JSON the
+  way Anthropic does). No real `message_stop`/`message_delta` exists on the wire either — `Translator
+  ::finish` synthesizes one from `usageMetadata` once the SSE stream ends.
+- **Least-confident spots** (Gemini's API + model lineup both churn fast — recheck here first if
+  thinking or tool calls come back empty/malformed): the exact shape of a "thought" part
+  (`{"thought": "…"}` vs. `{"text": "…", "thought": true}` — handled defensively, both recognized) and
+  `generationConfig.thinkingConfig`'s exact field names.
+- Model default is `gemini-pro-latest` (a Google "-latest" alias that auto-tracks the current
+  recommended release) rather than a pinned version — Gemini model ids have been deprecated on the
+  order of months, not years.
+- The registry (`agent/registry.rs`) lists Gemini for the settings dropdown with a static model
+  fallback — its `/v1beta/models` list endpoint returns a different shape (`models[].name`/
+  `displayName`) than `models.rs::parse_models` expects (`data[].id`), so the live fetch silently
+  returns empty and falls back; not fixed, since the fallback path already works fine.
+
 ## Conventions / gotchas
 
 - The turn ends on the `result` event, NOT on stdout EOF — the process stays alive between turns in
@@ -211,7 +324,11 @@ swap providers (Anthropic / Kimi / GLM). Enabled with `CWI_ENGINE=native`.
   history for very long-lived sessions; that's an accepted v1 tradeoff.
 - `canonicalize` on Windows yields a `\\?\` verbatim prefix; `encode_project_dir` strips it so the
   session-dir name matches Claude Code's.
-- Config is env-driven (`CWI_*`, see README). Default permission mode is `acceptEdits`. `CLAUDE_CONFIG_DIR`
+- Config is env-driven (`CWI_*`, see README). Default permission mode is `default` — **not**
+  `acceptEdits`/`bypassPermissions`, which would auto-approve at the CLI level before a decision ever
+  reaches our `control_request` handler, silently defeating the caps panel for whatever they
+  auto-approve (found live: with `acceptEdits`, Write/Edit executed instantly with caps' "modify"
+  group off, no permission card — see **Interactive tool permissions** above). `CLAUDE_CONFIG_DIR`
   + `CLAUDE_CODE_OAUTH_TOKEN` isolate all on-disk state from desktop Claude — see **Isolation** above.
 - **Send is held, not queued, across a dead connection.** `ws.send()` can look successful
   (`readyState === OPEN`) for a moment after the server process has actually died — the browser just

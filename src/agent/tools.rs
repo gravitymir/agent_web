@@ -26,19 +26,11 @@ pub struct Caps {
     pub run: bool,
     pub web_fetch: bool,
     pub web_search: bool,
-    /// CLI engine only: auto-answer `AskUserQuestion` (pick each question's
-    /// first/recommended option) instead of showing an interactive prompt.
-    /// Defaults OFF, unlike every other group — clarifying questions are the
-    /// one case where "auto-approve" can silently pick the wrong direction.
-    pub ask_question: bool,
 }
 
 impl Default for Caps {
     fn default() -> Self {
-        Self {
-            read: true, modify: true, run: true, web_fetch: true, web_search: true,
-            ask_question: false,
-        }
+        Self { read: true, modify: true, run: true, web_fetch: true, web_search: true }
     }
 }
 
@@ -53,7 +45,10 @@ impl Caps {
             "Bash" => self.run,
             "WebFetch" => self.web_fetch,
             "WebSearch" => self.web_search,
-            "AskUserQuestion" => self.ask_question,
+            // Never auto-approved (CLI engine — see session.rs's run_actor):
+            // a clarifying question the agent answers for itself defeats the
+            // point of asking. Always goes to the interactive permission card.
+            "AskUserQuestion" => false,
             _ => true,
         }
     }
@@ -846,14 +841,18 @@ mod tests {
     }
 
     #[test]
-    fn ask_question_defaults_off_unlike_everything_else() {
-        let c = Caps::default();
-        // Opt-in, not opt-out: auto-picking a clarifying question's answer can
-        // pick the wrong one, unlike every other group which defaults allowed.
+    fn ask_user_question_is_never_auto_approved() {
+        // Unlike every other group, there's no toggle for this one — silently
+        // picking a clarifying question's answer can pick the wrong one, so it
+        // always goes to the interactive permission card regardless of caps.
+        assert!(!Caps::default().allows("AskUserQuestion"));
+        let mut c = Caps::default();
+        c.read = false;
+        c.modify = false;
+        c.run = false;
+        c.web_fetch = false;
+        c.web_search = false;
         assert!(!c.allows("AskUserQuestion"));
-        let mut c = c;
-        c.ask_question = true;
-        assert!(c.allows("AskUserQuestion"));
     }
 
     #[test]

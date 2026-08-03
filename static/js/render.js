@@ -381,22 +381,35 @@ export function renderToolBody(t, input) {
   }
   if (name === "Grep" || name === "Glob") {
     if (input.path) t.meta.textContent = shortPath(input.path);
-    if (input.pattern) toolCode(t.body, input.pattern);
+    // Everything besides `path` (pattern, glob, output_mode, -n/-A/-B/context,
+    // head_limit, …) — not just the pattern — so the card actually explains
+    // what was searched and how, not just where.
+    toolExtras(t.body, input, ["path"]);
     return;
   }
   if (path) {
-    t.meta.textContent = shortPath(path); // Read, etc. — just the file
+    t.meta.textContent = shortPath(path); // Read, Write's source, etc.
+    // Read's `offset`/`limit` (which lines were actually read) live here too —
+    // dropping them left the card showing nothing but the filename.
+    toolExtras(t.body, input, ["file_path", "path", "notebook_path"]);
     return;
   }
   // Anything else: show each parameter. String values are printed raw so their
   // real newlines render (instead of escaped "\n" from JSON.stringify).
-  const entries = Object.entries(input);
-  if (entries.length) {
-    const text = entries
-      .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
-      .join("\n\n");
-    toolCode(t.body, text);
-  }
+  toolExtras(t.body, input, []);
+}
+
+// Render every input key except `skip`, one per line, as a code block —
+// `undefined`/`null` values and empty strings are omitted (nothing to show).
+function toolExtras(body, input, skip) {
+  const entries = Object.entries(input).filter(
+    ([k, v]) => !skip.includes(k) && v !== undefined && v !== null && v !== ""
+  );
+  if (!entries.length) return;
+  const text = entries
+    .map(([k, v]) => `${k}: ${typeof v === "string" ? v : JSON.stringify(v)}`)
+    .join("\n\n");
+  toolCode(body, text);
 }
 
 // ---------------------------------------------------------------------------
@@ -944,6 +957,52 @@ export function setStreamingUI(on) {
   el.chatControls.hidden = on || !state.sessionId;
 }
 
+// Agentron (Ag): a *volume of work* unit, not a speed metric (tokens/hour would
+// be throughput) — modeled on kWh. 1 Ag = 1 hour of active agent session ×
+// 1 million tokens (input + output; cache tokens don't count — see AGENT.md).
+// `durationMs` is the chat's cumulative `result.duration_ms` (see
+// `history.rs`/`titles.rs`); `tokens` is input+output summed.
+export function computeAgentron(durationMs, tokens) {
+  const hours = (durationMs || 0) / 3_600_000;
+  const mTokens = (tokens || 0) / 1_000_000;
+  return hours * mTokens;
+}
+
+// Only tenths are meaningful at this scale — anything below shows as a flat
+// "0" instead of a noisy near-zero fraction.
+export function fmtAgentron(ag) {
+  return ag < 0.1 ? "0" : ag.toFixed(1);
+}
+
+// ---------------------------------------------------------------------------
+// Context-window fill indicator — a small ring that fills clockwise, mirroring
+// the gauge the interactive CLI shows. No API exposes a model's exact context
+// limit, so this uses the standard Claude context window (200k tokens) as a
+// flat constant; a model with a larger window would just under-report fill.
+// ---------------------------------------------------------------------------
+export const CONTEXT_WINDOW = 200_000;
+
+export function contextPercent(contextTokens) {
+  return Math.max(0, Math.min(100, ((contextTokens || 0) / CONTEXT_WINDOW) * 100));
+}
+
+// `size`/`stroke` in px. Starts at 12 o'clock and fills clockwise via a
+// rotated, partially-dashed circle — the standard SVG "progress ring" trick.
+export function contextRing(pct, size = 18, stroke = 2.5) {
+  const r = size / 2 - stroke;
+  const c = 2 * Math.PI * r;
+  const offset = c * (1 - pct / 100);
+  const cls = pct >= 90 ? "ctx-ring-hot" : pct >= 70 ? "ctx-ring-warm" : "";
+  return (
+    `<svg class="ctx-ring ${cls}" width="${size}" height="${size}" viewBox="0 0 ${size} ${size}">` +
+    `<circle class="ctx-ring-track" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}" fill="none" />` +
+    `<circle class="ctx-ring-fill" cx="${size / 2}" cy="${size / 2}" r="${r}" stroke-width="${stroke}" fill="none" ` +
+    `stroke-dasharray="${c}" stroke-dashoffset="${offset}" stroke-linecap="round" ` +
+    `transform="rotate(-90 ${size / 2} ${size / 2})" />` +
+    `</svg>`
+  );
+}
+
 // Compact token count: 10, 100, 1k, 5k, 100k, 1m, 1.5m …
 export function fmtTokens(n) {
   n = Math.round(n || 0);
@@ -963,6 +1022,9 @@ export function updateUsageBadge() {
   const base = (u && u.tokens) || 0;
   const live = state.current ? state.current.tokens || 0 : 0;
   const tokens = fmtTokens(base + live);
+  const totalTokens = base + live + ((u && u.input_tokens) || 0);
+  const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
+  const ctxPct = contextPercent(u && u.contextTokens);
   const g = state.usage; // subscription limits (session/week/fable %), refreshed rarely
   if (g) {
     const pct = (o) => (o && o.percent != null ? o.percent : 0) + "%";
@@ -971,7 +1033,10 @@ export function updateUsageBadge() {
       `<span class="ub-pct" title="Сессия (5 ч)">${pct(g.session)}</span>` +
       `<span class="ub-pct" title="Неделя (все модели)">${pct(g.week)}</span>` +
       `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>` +
-      `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>`;
+      `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>` +
+      `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} Ag</span>` +
+      `<span class="ub-ctx" title="Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%">` +
+      `${contextRing(ctxPct, 14, 2.2)}<span>${Math.round(ctxPct)}%</span></span>`;
   } else {
     el.usageBadge.classList.remove("multi");
     el.usageBadge.textContent = tokens;
@@ -1023,6 +1088,10 @@ export function renderUsageDetail() {
   const output = (u.tokens || 0) + live;
   const input = u.input_tokens || 0;
   const total = output + input;
+  const agentron = computeAgentron(u.duration_ms, total);
+  // Ag ÷ steps — how much work it took per model round-trip; only meaningful
+  // once there's at least one full turn to divide by.
+  const perTurn = u.turns ? agentron / u.turns : null;
 
   // Subscription limits section (moved here from settings) — shown when known.
   const g = state.usage;
@@ -1035,6 +1104,21 @@ export function renderUsageDetail() {
        </div>`
     : "";
 
+  // Context-window fill — same ring as the compact badge, bigger, with the
+  // raw numbers (fill is as-of the last completed API call, not a running
+  // total — see history.rs::last_context_tokens).
+  const ctxPct = contextPercent(u.contextTokens);
+  const context = `<div class="usage-section usage-context">
+       <div class="usage-section-head">${iIcon("microscope", 15, "usage-ic")}<span>Контекст чата</span></div>
+       <div class="usage-row">
+         <span class="usage-ic">${contextRing(ctxPct, 28, 3)}</span>
+         <div class="usage-row-main">
+           <div class="k">Заполнено на ${Math.round(ctxPct)}%</div>
+           <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(CONTEXT_WINDOW)} токенов, по последнему ходу</div>
+         </div>
+       </div>
+     </div>`;
+
   const row = (icon, k, v, sub, cls) =>
     `<div class="usage-row ${cls || ""}">
        <span class="usage-ic">${iIcon(icon, 16)}</span>
@@ -1046,6 +1130,7 @@ export function renderUsageDetail() {
 
   el.usageDetail.innerHTML =
     limits +
+    context +
     `<div class="usage-section">
        <div class="usage-section-head">${iIcon("chart", 15, "usage-ic")}<span>Токены этого чата</span></div>` +
     row("calculator", "Всего токенов", fmtFull(total), "вход + выход", "total") +
@@ -1054,6 +1139,13 @@ export function renderUsageDetail() {
     row("bolt", "Из кэша", fmtFull(u.cache_read || 0), "дешевле обычного входа") +
     row("archive", "Создание кэша", fmtFull(u.cache_creation || 0)) +
     row("bubble", "Ходов модели", fmtFull(u.turns || 0)) +
+    row(
+      "bolt",
+      "Agentron",
+      `${fmtAgentron(agentron)} Ag`,
+      "объём работы: часы × млн токенов" +
+        (perTurn != null ? ` · ${perTurn.toFixed(2)} Ag/ход — эффективность` : "")
+    ) +
     `</div>`;
 }
 

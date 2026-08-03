@@ -37,6 +37,15 @@ pub struct ChatSummary {
     pub cache_creation: u64,
     /// Number of assistant turns (model responses).
     pub turns: usize,
+    /// Cumulative `result.duration_ms` across every turn — always 0 here (the
+    /// on-disk transcript never carries it); `main.rs::list_chats` overlays
+    /// the real value from `MetaStore`, the same way it overlays title/icon.
+    /// Used for the Agentron effort metric.
+    pub duration_ms: u64,
+    /// Context-window fill as of the *last* completed API call (input +
+    /// cache_read + cache_creation of the most recent `assistant` line) — not
+    /// a sum across the chat. Drives the context-fill ring in the UI.
+    pub last_context_tokens: u64,
     /// Which engine owns this chat: `"cli"` (Claude Code `.jsonl`) or `"native"`
     /// (`cwi_native/*.json`). The sidebar always lists both; a chat whose engine
     /// differs from the active `CWI_ENGINE` is shown read-only ("frozen").
@@ -145,6 +154,11 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
     let mut turns = 0usize;
+    // Current context-window fill, not a running total: overwritten (not
+    // summed) by each assistant line's own usage, so after the loop it holds
+    // the *last* one — i.e. how large the conversation was on the most recent
+    // API call, which only grows monotonically as the chat continues.
+    let mut last_context_tokens = 0u64;
 
     for line in content.lines() {
         let line = line.trim();
@@ -179,6 +193,8 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
                     input_tokens += get("input_tokens");
                     cache_read += get("cache_read_input_tokens");
                     cache_creation += get("cache_creation_input_tokens");
+                    last_context_tokens =
+                        get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens");
                 }
             }
             if title.is_none() && ty == Some("user") {
@@ -204,6 +220,8 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
         cache_read,
         cache_creation,
         turns,
+        duration_ms: 0,
+        last_context_tokens,
         engine: "cli",
     })
 }
@@ -245,6 +263,8 @@ fn summarize_native_file(path: &Path, id: String) -> Option<ChatSummary> {
         cache_read: 0,
         cache_creation: 0,
         turns,
+        duration_ms: 0,
+        last_context_tokens: 0,
         engine: "native",
     })
 }
@@ -493,8 +513,35 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_text, extract_tools, has_tool_result};
+    use super::{extract_text, extract_tools, has_tool_result, summarize_jsonl_file};
     use serde_json::json;
+
+    #[test]
+    fn last_context_tokens_is_the_last_message_not_a_sum() {
+        let path = std::env::temp_dir().join("cwi_history_test_last_context.jsonl");
+        let lines = [
+            json!({"type":"assistant","message":{"usage":{
+                "input_tokens": 10, "output_tokens": 5,
+                "cache_read_input_tokens": 0, "cache_creation_input_tokens": 100
+            }}}),
+            json!({"type":"assistant","message":{"usage":{
+                "input_tokens": 2, "output_tokens": 8,
+                "cache_read_input_tokens": 500, "cache_creation_input_tokens": 20
+            }}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let summary = summarize_jsonl_file(&path, "test-id".into()).expect("should parse");
+        // Sums (existing behavior) cover both messages...
+        assert_eq!(summary.input_tokens, 12);
+        assert_eq!(summary.tokens, 13);
+        // ...but the context gauge reflects only the most recent call's size.
+        assert_eq!(summary.last_context_tokens, 2 + 500 + 20);
+
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn extracts_string_content() {

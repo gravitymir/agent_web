@@ -252,6 +252,18 @@ export function handleEvent(evt) {
         const n = countBlocks(evt, "tool_use");
         if (n) { state.current.runningTasks += n; updateStatus(); setFaviconState("tool"); }
       }
+      // Context-window fill: each assistant message's own usage reflects the
+      // conversation size as of THAT api call (not summed — a later, smaller
+      // number would be wrong going backwards, but it never does within a
+      // chat: context only grows). Updates live, once per step, not just at
+      // turn end, since a single turn can span several tool-loop steps.
+      if (state.sessionId && evt.message && evt.message.usage) {
+        const us = evt.message.usage;
+        const ctx = (us.input_tokens || 0) + (us.cache_read_input_tokens || 0) + (us.cache_creation_input_tokens || 0);
+        const u = (state.chatUsage[state.sessionId] = state.chatUsage[state.sessionId] || {});
+        u.contextTokens = ctx;
+        updateUsageBadge();
+      }
       break;
 
     case "user":

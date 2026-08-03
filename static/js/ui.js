@@ -15,11 +15,11 @@ el.composer.addEventListener("submit", (e) => {
 el.input.addEventListener("keydown", (e) => {
   if (e.key !== "Enter") return;
 
-  // While dictating, Enter is the "finish" gesture: stop recording and send
-  // (send happens once recognition ends, so the final words make it in).
+  // While dictating, Enter only stops the recording — it does not send. The
+  // recognized text stays in the field for review; a *second*, separate Enter
+  // (now that dictation is off) sends it, same as any other typed message.
   if (dictation.active) {
     e.preventDefault();
-    dictation.forceSend = true;
     stopDictation();
     return;
   }
@@ -161,11 +161,7 @@ el.stop.addEventListener("click", () => {
 // Tools / permissions panel (native engine): which tool groups are enabled.
 // Persisted in localStorage; sent with every message as `caps`.
 // ---------------------------------------------------------------------------
-export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run", "ask_question"];
-
-// AskUserQuestion auto-answering defaults OFF (unlike everything else): silently
-// picking a "recommended" option can pick the wrong one, so it's opt-in.
-const CAP_DEFAULT_OFF = new Set(["ask_question"]);
+export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run"];
 
 export function loadCaps() {
   let saved = {};
@@ -177,27 +173,7 @@ export function loadCaps() {
   for (const k of CAP_KEYS) {
     const box = document.getElementById("cap-" + k);
     if (!box) continue;
-    box.checked = CAP_DEFAULT_OFF.has(k) ? saved[k] === true : saved[k] !== false;
-  }
-  applyCapsAvailability();
-}
-
-// The five general caps now gate both engines: the native engine's own schema
-// filtering, AND (see session.rs's run_actor) the CLI's control_request
-// auto-approval. AskUserQuestion auto-answering is CLI-only — the native
-// engine's tool loop has no AskUserQuestion at all — so that one toggle alone
-// is inert under the native engine.
-export function applyCapsAvailability() {
-  const box = document.getElementById("cap-ask_question");
-  if (!box) return;
-  const inertUnderNative = !!state.engineNative;
-  box.disabled = inertUnderNative;
-  const row = box.closest(".toggle-row");
-  if (row) {
-    row.classList.toggle("toggle-row-inert", inertUnderNative);
-    row.title = inertUnderNative
-      ? "Действует только для CLI-движка — нативный движок не вызывает AskUserQuestion"
-      : "";
+    box.checked = saved[k] !== false;
   }
 }
 
@@ -265,13 +241,17 @@ el.toolsBtn.addEventListener("click", (e) => {
   setToolsModal(el.toolsModal.hidden);
 });
 el.toolsClose.addEventListener("click", () => setToolsModal(false));
-// Click outside the tools panel (on the composer backdrop) closes it.
-// The panel itself is inside the composer form, so a click on the input/buttons
-// lands inside the panel and does not close it.
-el.composer.addEventListener("click", (e) => {
-  if (!el.toolsModal.hidden && e.target !== el.toolsModal && !el.toolsModal.contains(e.target)) {
-    setToolsModal(false);
-  }
+// Any click outside the panel closes it — not just within the composer: the
+// panel is reparented to <body> while open (see setToolsModal), so a click on
+// the message list, sidebar, anywhere else on the page should close it too.
+// The tools button's own click already toggles the panel (with stopPropagation,
+// so it never reaches here) — skip it explicitly for the rare fallback path
+// where a click lands on its child SVG without stopping propagation.
+document.addEventListener("click", (e) => {
+  if (el.toolsModal.hidden) return;
+  if (e.target === el.toolsModal || el.toolsModal.contains(e.target)) return;
+  if (e.target.closest && e.target.closest("#tools-btn")) return;
+  setToolsModal(false);
 });
 // Escape closes the tools panel (when no higher modal is open).
 document.addEventListener("keydown", (e) => {
@@ -284,7 +264,7 @@ document.addEventListener("keydown", (e) => {
 // and drop the recognized text into the input; the user reviews and sends.
 // ---------------------------------------------------------------------------
 export const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-export const dictation = { rec: null, active: false, interim: "", forceSend: false };
+export const dictation = { rec: null, active: false, interim: "" };
 
 // Insert text at the current caret (replacing any selection), gluing on a space
 // if it would butt against a word. Returns exactly what was inserted.
@@ -331,7 +311,6 @@ export function startDictation() {
   rec.continuous = true;
 
   dictation.interim = "";
-  dictation.forceSend = false;
   el.input.focus(); // make the caret live so inserts land where it sits
 
   rec.onresult = (e) => {
@@ -368,16 +347,15 @@ export function stopDictation() {
 }
 
 export function endDictationUI(ok) {
-  const force = dictation.forceSend; // Enter was pressed to finish
   dictation.active = false;
   dictation.rec = null;
-  dictation.forceSend = false;
   dictation.interim = ""; // any tail left in the field stays as real text
   el.mic.classList.remove("recording");
   el.mic.title = "Диктовка (голосовой ввод)";
-  // Send if recognition ended cleanly and either auto-send is on or the user
-  // pressed Enter to finish.
-  if (ok && (settings.autoSend || force) && el.input.value.trim()) {
+  // Only the explicit auto-send setting sends automatically — stopping
+  // dictation (via Enter, the mic button, or recognition ending on its own)
+  // never sends by itself; the user reviews the text and sends separately.
+  if (ok && settings.autoSend && el.input.value.trim()) {
     submit();
     return;
   }
@@ -697,7 +675,6 @@ export async function loadProviders() {
   state.engineNative = !!data.native;
   redecorateChatList();
   refreshComposerState();
-  applyCapsAvailability(); // re-sync once we know whether AskUserQuestion applies
   if (!data.native) {
     el.providerSection.hidden = true;
     loadModels(); // CLI mode: Claude models via the OAuth-backed endpoint
@@ -856,6 +833,8 @@ export function renderChatList(chats) {
       cache_read: c.cache_read || 0,
       cache_creation: c.cache_creation || 0,
       turns: c.turns || 0,
+      duration_ms: c.duration_ms || 0,
+      contextTokens: c.last_context_tokens || 0,
     };
     state.chatEngine[c.id] = c.engine || "cli";
     const item = document.createElement("div");

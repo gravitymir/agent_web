@@ -12,9 +12,14 @@ pub struct Config {
     pub workspace_dir: PathBuf,
     /// The `claude` executable to invoke. Defaults to `claude` on PATH.
     pub claude_bin: String,
-    /// Permission mode passed to Claude Code. In non-interactive (`--print`)
-    /// mode there is no human to answer prompts, so a non-blocking mode is
-    /// required for tools to run. Defaults to `acceptEdits`.
+    /// Permission mode passed to Claude Code. `acceptEdits`/`bypassPermissions`
+    /// would auto-approve at the CLI level *before* a decision ever reaches our
+    /// `--permission-prompt-tool stdio` handler (`run_actor`'s `control_request`
+    /// handling in session.rs) — silently defeating the caps panel's "Изменение
+    /// файлов" toggle for Write/Edit specifically. `default` routes every
+    /// tool that needs a decision through that handler instead, so the caps
+    /// panel actually gates it. `Read`/`Glob`/`Grep` are never gated by Claude
+    /// Code at any permission mode — that's unrelated to this setting.
     pub permission_mode: String,
     /// Root of Claude Code's on-disk sessions (`<claude-config-dir>/projects`).
     /// The config dir honors `CLAUDE_CONFIG_DIR`, so the web app can run fully
@@ -41,7 +46,7 @@ impl Config {
         let claude_bin = std::env::var("CWI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
 
         let permission_mode =
-            std::env::var("CWI_PERMISSION_MODE").unwrap_or_else(|_| "acceptEdits".to_string());
+            std::env::var("CWI_PERMISSION_MODE").unwrap_or_else(|_| "default".to_string());
 
         let projects_root = claude_config_dir().join("projects");
 

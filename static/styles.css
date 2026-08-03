@@ -297,7 +297,10 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 .scroll-to-bottom {
   position: fixed;
   bottom: calc(10vh + 20px);
-  right: 96px;
+  /* Left of the scrollbar's track+hit area (right: 130px, ±8px hit area — see
+     .scrollbar) with a clear 5px gap, so this button's opaque circle never
+     sits over the thumb: 130 + 8 + 5 = 143. */
+  right: 143px;
   z-index: 45;
   width: 50px;
   height: 50px;
@@ -782,12 +785,6 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 .toggle input:checked + .toggle-track::before { transform: translateX(18px); }
 .toggle input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-/* CLI mode: caps don't gate anything (native-engine-only concept, see
-   `applyCapsAvailability`) — read as a status display, not a control. */
-.toggle-row-inert { cursor: default; opacity: 0.55; }
-.toggle-row-inert:hover { background: none; }
-.toggle-row-inert .toggle { cursor: default; }
-
 /* Pasted-image thumbnails above the input. */
 .attach-preview { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .attach-preview[hidden] { display: none; }
@@ -962,6 +959,24 @@ body.drag-over::after {
 .usage-badge.multi .ub-pct { font-size: .72rem; }
 .usage-badge.multi .ub-dim { color: color-mix(in srgb, var(--text-dim) 65%, transparent); }
 .usage-badge.multi .ub-tok { font-size: .8rem; color: var(--text); margin-top: 2px; }
+/* Agentron — a secondary, "fun stat" line under the main token count, so it
+   reads as supplementary rather than competing with it for attention. */
+.usage-badge.multi .ub-ag { font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 0; }
+/* Context-fill ring + percent, as its own line under Agentron. */
+.usage-badge.multi .ub-ctx {
+  display: flex; align-items: center; gap: 4px;
+  font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 2px;
+}
+
+/* Context-window fill ring: a clockwise-filling circle (see render.js::contextRing),
+   same idea as the interactive CLI's own context gauge. Track is a faint full
+   circle; the fill circle is rotated -90deg (start at 12 o'clock) with a
+   dasharray/dashoffset trick so only `pct`% of its circumference is drawn. */
+.ctx-ring { flex-shrink: 0; display: inline-block; }
+.ctx-ring-track { stroke: var(--border); }
+.ctx-ring-fill { stroke: var(--accent); transition: stroke-dashoffset .25s ease, stroke .15s ease; }
+.ctx-ring-warm .ctx-ring-fill { stroke: #c98a3f; }
+.ctx-ring-hot .ctx-ring-fill { stroke: #c9503f; }
 
 /* Usage detail drawer (opened by clicking the token badge). */
 .usage-overlay { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, 0.25); }

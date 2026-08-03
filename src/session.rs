@@ -25,6 +25,7 @@ use tokio::sync::{broadcast, mpsc};
 
 use crate::claude::{spawn_claude, Spawned};
 use crate::config::Config;
+use crate::titles::MetaStore;
 
 const SCROLLBACK_MAX: usize = 3000;
 const BROADCAST_CAP: usize = 2048;
@@ -149,14 +150,23 @@ pub struct SessionManager {
     sessions: Mutex<HashMap<String, Arc<SessionKeeper>>>,
     /// Connected MCP servers (native engine only), shared across sessions.
     mcp: Option<Arc<crate::agent::mcp::McpClient>>,
+    /// Same store as `AppState::meta` — the actor accumulates each turn's
+    /// `duration_ms` here (see `track_turn_duration`), while HTTP handlers use
+    /// it for title/icon. Shared so both sides see the same on-disk file.
+    meta: Arc<Mutex<MetaStore>>,
 }
 
 impl SessionManager {
-    pub fn new(config: Config, mcp: Option<Arc<crate::agent::mcp::McpClient>>) -> Arc<Self> {
+    pub fn new(
+        config: Config,
+        mcp: Option<Arc<crate::agent::mcp::McpClient>>,
+        meta: Arc<Mutex<MetaStore>>,
+    ) -> Arc<Self> {
         let mgr = Arc::new(Self {
             config,
             sessions: Mutex::new(HashMap::new()),
             mcp,
+            meta,
         });
         spawn_reaper(mgr.clone());
         mgr
@@ -232,6 +242,7 @@ impl SessionManager {
             events.clone(),
             scrollback.clone(),
             finished.clone(),
+            self.meta.clone(),
         ));
         Arc::new(SessionKeeper {
             session_id: id,
@@ -265,6 +276,8 @@ impl SessionManager {
             events.clone(),
             scrollback.clone(),
             finished.clone(),
+            id.clone(),
+            self.meta.clone(),
         ));
         Ok(Arc::new(SessionKeeper {
             session_id: id,
@@ -357,32 +370,23 @@ fn parse_control_request(line: &str) -> Option<ControlRequest> {
     Some(ControlRequest { request_id, tool_name, input })
 }
 
-/// Auto-answer an `AskUserQuestion` input by picking each question's first
-/// option (Anthropic's own convention puts a recommended option first — see
-/// `Caps::ask_question`). Used only when that toggle is on; otherwise the
-/// question always goes to the interactive `permission_request` card.
-fn auto_answer_question(input: Value) -> Value {
-    let mut obj = match input {
-        Value::Object(o) => o,
-        _ => serde_json::Map::new(),
-    };
-    let mut answers = serde_json::Map::new();
-    if let Some(questions) = obj.get("questions").and_then(Value::as_array) {
-        for q in questions {
-            let question = q.get("question").and_then(Value::as_str);
-            let first_label = q
-                .get("options")
-                .and_then(Value::as_array)
-                .and_then(|opts| opts.first())
-                .and_then(|opt| opt.get("label"))
-                .and_then(Value::as_str);
-            if let (Some(question), Some(label)) = (question, first_label) {
-                answers.insert(question.to_string(), Value::String(label.to_string()));
-            }
-        }
+/// If `line` is a `{"type":"result", "duration_ms":...}` frame — the one
+/// per-turn event neither engine ever persists to its own on-disk store (the
+/// CLI's `.jsonl` has no `result` lines at all; the native store only keeps
+/// `messages`) — add its duration to the chat's running total. Used for the
+/// Agentron effort metric (`Ag = H × (Tᵢ+Tₒ)/1e6`; tokens are cheap to sum
+/// from history on demand, but elapsed time only ever exists in this event).
+/// Cheap substring pre-filter first since this runs on every emitted line,
+/// most of which are high-frequency streaming deltas, not `result` frames.
+fn track_turn_duration(line: &str, session_id: &str, meta: &Mutex<MetaStore>) {
+    if !line.contains(r#""type":"result""#) {
+        return;
     }
-    obj.insert("answers".to_string(), Value::Object(answers));
-    Value::Object(obj)
+    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+    let Some(ms) = v.get("duration_ms").and_then(Value::as_u64) else { return };
+    if let Ok(mut m) = meta.lock() {
+        let _ = m.add_duration(session_id, ms);
+    }
 }
 
 /// Write a `control_response` line answering `request_id`. `updated_input` is
@@ -423,6 +427,8 @@ async fn run_actor(
     events: broadcast::Sender<String>,
     scrollback: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    session_id: String,
+    meta: Arc<Mutex<MetaStore>>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
     // Caps from the most recent turn — gates which `control_request`s get
@@ -522,22 +528,14 @@ async fn run_actor(
                     match parse_control_request(&l) {
                         Some(req) if current_caps.allows(&req.tool_name) => {
                             // Auto-approved by the caps panel — answer immediately, no
-                            // client round-trip, no visible prompt. `AskUserQuestion`
-                            // only reaches here when its own toggle is on, in which
-                            // case "approved" means "auto-pick each question's first
-                            // (recommended) option" — a plain unchanged echo wouldn't
-                            // give Claude an actual answer to work with.
-                            let updated_input = if req.tool_name == "AskUserQuestion" {
-                                auto_answer_question(req.input)
-                            } else {
-                                req.input
-                            };
-                            write_control_response(&mut stdin, &req.request_id, true, Some(updated_input), None).await;
+                            // client round-trip, no visible prompt. Never true for
+                            // `AskUserQuestion` (see `Caps::allows`) — that always
+                            // falls through to the interactive branch below.
+                            write_control_response(&mut stdin, &req.request_id, true, Some(req.input), None).await;
                         }
                         Some(req) => {
-                            // Needs a human: the caps panel has this tool's group off
-                            // (or, for AskUserQuestion, its own toggle is off — the
-                            // default, since auto-picking an answer can pick wrong).
+                            // Needs a human: the caps panel has this tool's group off,
+                            // or it's an AskUserQuestion (always interactive).
                             // Stash clones before the originals move into the emit below.
                             pending_controls.insert(req.request_id.clone(), req.input.clone());
                             emit(&scrollback, &events, json!({
@@ -547,7 +545,10 @@ async fn run_actor(
                                 "input": req.input,
                             }).to_string());
                         }
-                        None => emit(&scrollback, &events, l),
+                        None => {
+                            track_turn_duration(&l, &session_id, &meta);
+                            emit(&scrollback, &events, l);
+                        }
                     }
                 }
                 Ok(Some(_)) => {}
@@ -592,16 +593,19 @@ async fn run_native_actor(
     events: broadcast::Sender<String>,
     scrollback: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    meta: Arc<Mutex<MetaStore>>,
 ) {
+    let session_id = engine.session_id.clone();
+
     // Emit closure: push to scrollback + broadcast, exactly-once like `emit`.
     let sb = scrollback.clone();
     let ev = events.clone();
+    let sid = session_id.clone();
     let emitter = crate::agent::Emit::new(Arc::new(move |line: String| {
+        track_turn_duration(&line, &sid, &meta);
         emit(&sb, &ev, line);
     }));
     let interrupt = Arc::new(AtomicBool::new(false));
-
-    let session_id = engine.session_id.clone();
 
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
@@ -675,7 +679,7 @@ fn spawn_reaper(mgr: Arc<SessionManager>) {
 
 #[cfg(test)]
 mod control_request_tests {
-    use super::{auto_answer_question, parse_control_request};
+    use super::parse_control_request;
     use serde_json::json;
 
     #[test]
@@ -704,31 +708,35 @@ mod control_request_tests {
         .to_string();
         assert!(parse_control_request(&other_subtype).is_none());
     }
+}
+
+#[cfg(test)]
+mod turn_duration_tests {
+    use super::{track_turn_duration, MetaStore};
+    use std::sync::Mutex;
+
+    fn temp_store(name: &str) -> Mutex<MetaStore> {
+        let path = std::env::temp_dir().join(format!("cwi_session_test_{name}.json"));
+        let _ = std::fs::remove_file(&path);
+        Mutex::new(MetaStore::load(path))
+    }
 
     #[test]
-    fn auto_answer_picks_the_first_option_per_question() {
-        let input = json!({
-            "questions": [
-                {
-                    "question": "How should I format the output?",
-                    "options": [
-                        { "label": "Summary", "description": "Brief" },
-                        { "label": "Detailed", "description": "Full" },
-                    ],
-                },
-                {
-                    "question": "Which sections?",
-                    "options": [{ "label": "Intro" }, { "label": "Conclusion" }],
-                },
-            ],
-        });
-        let answered = auto_answer_question(input);
-        assert_eq!(
-            answered["answers"]["How should I format the output?"],
-            json!("Summary")
-        );
-        assert_eq!(answered["answers"]["Which sections?"], json!("Intro"));
-        // The original questions array must survive unchanged (the CLI expects it).
-        assert!(answered["questions"].is_array());
+    fn accumulates_duration_from_a_result_line() {
+        let meta = temp_store("accumulates");
+        let line = r#"{"type":"result","duration_ms":1500,"num_turns":3}"#;
+        track_turn_duration(line, "sess-1", &meta);
+        track_turn_duration(line, "sess-1", &meta);
+        assert_eq!(meta.lock().unwrap().get("sess-1").unwrap().duration_ms, 3000);
+    }
+
+    #[test]
+    fn ignores_lines_that_are_not_a_result_event() {
+        let meta = temp_store("ignores");
+        track_turn_duration(r#"{"type":"assistant","message":{}}"#, "sess-2", &meta);
+        track_turn_duration("not json at all", "sess-2", &meta);
+        // A result line with no duration_ms must not create an entry either.
+        track_turn_duration(r#"{"type":"result","num_turns":1}"#, "sess-2", &meta);
+        assert!(meta.lock().unwrap().get("sess-2").is_none());
     }
 }
