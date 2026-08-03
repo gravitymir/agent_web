@@ -1,6 +1,6 @@
 import { state, el, ICONS, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { connect, sendWs, sendWsOrQueue } from './ws.js';
+import { connect, sendWs, markSentPending } from './ws.js';
 import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage } from './render.js';
 import { setFaviconState } from '../favicon.js';
 import { ensureNotifyPermission } from '../notify.js';
@@ -74,9 +74,10 @@ export function submit() {
   };
   const sent = sendWs(payload);
   if (!sent) {
-    // Queue the message so it is sent automatically once the socket recovers.
-    sendWsOrQueue(payload);
-    showSystem("Соединение потеряно — сообщение будет отправлено после восстановления.");
+    // Nothing was touched — input and attachments are exactly as the user
+    // left them. No auto-retry: they decide when to try again themselves.
+    showSystem("Соединение потеряно — сообщение не отправлено. Отправьте ещё раз, когда связь восстановится.");
+    return;
   }
 
   // After the first message of a brand-new chat the backend has created the
@@ -87,13 +88,15 @@ export function submit() {
   }
   state.isNew = false; // subsequent turns reuse the live process
 
-  // Clear the composer and lock it until the turn completes (this also applies
-  // to queued messages that will go out as soon as the socket reconnects).
-  el.input.value = "";
-  state.pendingImages = [];
-  state.pendingFiles = [];
-  renderAttachPreview();
-  autoGrow();
+  // `readyState` can still read OPEN for a moment after the server process
+  // actually died — the browser doesn't always notice a dead socket right
+  // away — so this "success" isn't guaranteed yet. Hold the text AND
+  // attachments (don't clear them) and lock the composer until the keeper's
+  // own echo confirms the send actually arrived (`confirmSentMessage`) — or,
+  // if the connection drops first, just unlock it again (`restoreUnsentMessage`,
+  // called from ws.js) since nothing was ever thrown away to restore.
+  markSentPending();
+  lockComposerForConfirmation(true);
   state.streaming = true;
   setStreamingUI(true);
   updateSendButton(); // toggle send → stop immediately
@@ -101,6 +104,34 @@ export function submit() {
   // Scroll to the bottom so the outgoing message is visible while we wait for
   // the keeper's echo and the assistant response.
   scrollToBottom();
+}
+
+// Locks/unlocks just the "is this pending send confirmed yet" window — a
+// narrower, shorter scope than `state.streaming` (which covers the whole
+// turn): the user can still queue up their NEXT message once THIS one is
+// confirmed, even while the assistant is still generating a reply.
+function lockComposerForConfirmation(locked) {
+  el.input.disabled = locked;
+  el.attachPreview.querySelectorAll(".rm").forEach((btn) => { btn.disabled = locked; });
+}
+
+// Called from ws.js once the server's own echo confirms a pending send truly
+// arrived — only now is it safe to actually clear the composer.
+export function confirmSentMessage() {
+  lockComposerForConfirmation(false);
+  el.input.value = "";
+  state.pendingImages = [];
+  state.pendingFiles = [];
+  renderAttachPreview();
+  autoGrow();
+}
+
+// Called from ws.js when a send that looked successful never got confirmed —
+// the connection dropped before its echo arrived. Text/attachments were never
+// cleared, so there's nothing to restore — just unlock the composer.
+export function restoreUnsentMessage() {
+  lockComposerForConfirmation(false);
+  showSystem("Соединение прервалось до подтверждения отправки — сообщение не ушло. Отправьте ещё раз, когда связь восстановится.");
 }
 
 // Turn attached text files into a prompt preamble. Uses a fence long enough to
@@ -130,7 +161,11 @@ el.stop.addEventListener("click", () => {
 // Tools / permissions panel (native engine): which tool groups are enabled.
 // Persisted in localStorage; sent with every message as `caps`.
 // ---------------------------------------------------------------------------
-export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run"];
+export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run", "ask_question"];
+
+// AskUserQuestion auto-answering defaults OFF (unlike everything else): silently
+// picking a "recommended" option can pick the wrong one, so it's opt-in.
+const CAP_DEFAULT_OFF = new Set(["ask_question"]);
 
 export function loadCaps() {
   let saved = {};
@@ -141,27 +176,28 @@ export function loadCaps() {
   }
   for (const k of CAP_KEYS) {
     const box = document.getElementById("cap-" + k);
-    if (box) box.checked = saved[k] !== false; // default enabled
+    if (!box) continue;
+    box.checked = CAP_DEFAULT_OFF.has(k) ? saved[k] === true : saved[k] !== false;
   }
   applyCapsAvailability();
 }
 
-// Caps only gate tools for the native engine — the CLI keeper ignores them
-// outright (session.rs: "caps are a native-engine concept, ignored here"), so
-// toggling them there would silently do nothing. Disable the controls until
-// `state.engineNative` is confirmed true, so the panel reads as a status
-// display rather than a (non-functional) control in CLI mode.
+// The five general caps now gate both engines: the native engine's own schema
+// filtering, AND (see session.rs's run_actor) the CLI's control_request
+// auto-approval. AskUserQuestion auto-answering is CLI-only — the native
+// engine's tool loop has no AskUserQuestion at all — so that one toggle alone
+// is inert under the native engine.
 export function applyCapsAvailability() {
-  const enabled = !!state.engineNative;
-  for (const k of CAP_KEYS) {
-    const box = document.getElementById("cap-" + k);
-    if (!box) continue;
-    box.disabled = !enabled;
-    const row = box.closest(".toggle-row");
-    if (row) {
-      row.classList.toggle("toggle-row-inert", !enabled);
-      row.title = enabled ? "" : "Действует только для нативного движка — в CLI-режиме не применяется";
-    }
+  const box = document.getElementById("cap-ask_question");
+  if (!box) return;
+  const inertUnderNative = !!state.engineNative;
+  box.disabled = inertUnderNative;
+  const row = box.closest(".toggle-row");
+  if (row) {
+    row.classList.toggle("toggle-row-inert", inertUnderNative);
+    row.title = inertUnderNative
+      ? "Действует только для CLI-движка — нативный движок не вызывает AskUserQuestion"
+      : "";
   }
 }
 
@@ -661,7 +697,7 @@ export async function loadProviders() {
   state.engineNative = !!data.native;
   redecorateChatList();
   refreshComposerState();
-  applyCapsAvailability(); // caps only mean something once we know it's native
+  applyCapsAvailability(); // re-sync once we know whether AskUserQuestion applies
   if (!data.native) {
     el.providerSection.hidden = true;
     loadModels(); // CLI mode: Claude models via the OAuth-backed endpoint

@@ -42,6 +42,24 @@ pub struct ImageData {
 enum Cmd {
     User { text: String, images: Vec<ImageData>, caps: crate::agent::tools::Caps },
     Interrupt,
+    /// The user's decision on a pending `control_request` from the CLI — either
+    /// a plain tool-approval Allow/Deny, or an `AskUserQuestion` answer (see
+    /// `run_actor`'s handling of `control_request` lines on stdout). Ignored by
+    /// the native keeper, which never emits one.
+    PermissionResponse {
+        request_id: String,
+        allow: bool,
+        /// `AskUserQuestion` only: each question's text mapped to the
+        /// selected label(s). Mutually exclusive with `response`.
+        answers: Option<serde_json::Map<String, Value>>,
+        /// `AskUserQuestion` only: a freeform reply replacing the whole
+        /// structured answer set (the user typed something instead of picking
+        /// options) — a distinct protocol field, not just another answer.
+        /// Mutually exclusive with `answers`.
+        response: Option<String>,
+        /// Shown to Claude when `allow` is false.
+        message: Option<String>,
+    },
 }
 
 /// A live conversation and its process, shared behind an `Arc`.
@@ -74,6 +92,22 @@ impl SessionKeeper {
     /// Kill the process (ends the session; a later open re-spawns via `--resume`).
     pub async fn interrupt(&self) {
         let _ = self.cmd_tx.send(Cmd::Interrupt).await;
+    }
+
+    /// Answer a pending tool-approval / `AskUserQuestion` request (see
+    /// `Cmd::PermissionResponse`).
+    pub async fn send_permission_response(
+        &self,
+        request_id: String,
+        allow: bool,
+        answers: Option<serde_json::Map<String, Value>>,
+        response: Option<String>,
+        message: Option<String>,
+    ) {
+        let _ = self
+            .cmd_tx
+            .send(Cmd::PermissionResponse { request_id, allow, answers, response, message })
+            .await;
     }
 
     /// Snapshot the scrollback and subscribe to future events. Holding the
@@ -297,6 +331,88 @@ fn emit(scrollback: &Arc<Mutex<VecDeque<String>>>, events: &broadcast::Sender<St
     let _ = events.send(line);
 }
 
+/// A `{"type":"control_request", "request":{"subtype":"can_use_tool",...}}`
+/// line from the CLI's stdout — sent (via `--permission-prompt-tool stdio`)
+/// whenever a tool needs a decision the CLI can't make on its own, including
+/// `AskUserQuestion`. Without `--permission-prompt-tool stdio` these auto-deny
+/// instead of ever appearing on stdout.
+struct ControlRequest {
+    request_id: String,
+    tool_name: String,
+    input: Value,
+}
+
+fn parse_control_request(line: &str) -> Option<ControlRequest> {
+    let v: Value = serde_json::from_str(line).ok()?;
+    if v.get("type").and_then(Value::as_str) != Some("control_request") {
+        return None;
+    }
+    let request_id = v.get("request_id")?.as_str()?.to_string();
+    let request = v.get("request")?;
+    if request.get("subtype").and_then(Value::as_str) != Some("can_use_tool") {
+        return None;
+    }
+    let tool_name = request.get("tool_name")?.as_str()?.to_string();
+    let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
+    Some(ControlRequest { request_id, tool_name, input })
+}
+
+/// Auto-answer an `AskUserQuestion` input by picking each question's first
+/// option (Anthropic's own convention puts a recommended option first — see
+/// `Caps::ask_question`). Used only when that toggle is on; otherwise the
+/// question always goes to the interactive `permission_request` card.
+fn auto_answer_question(input: Value) -> Value {
+    let mut obj = match input {
+        Value::Object(o) => o,
+        _ => serde_json::Map::new(),
+    };
+    let mut answers = serde_json::Map::new();
+    if let Some(questions) = obj.get("questions").and_then(Value::as_array) {
+        for q in questions {
+            let question = q.get("question").and_then(Value::as_str);
+            let first_label = q
+                .get("options")
+                .and_then(Value::as_array)
+                .and_then(|opts| opts.first())
+                .and_then(|opt| opt.get("label"))
+                .and_then(Value::as_str);
+            if let (Some(question), Some(label)) = (question, first_label) {
+                answers.insert(question.to_string(), Value::String(label.to_string()));
+            }
+        }
+    }
+    obj.insert("answers".to_string(), Value::Object(answers));
+    Value::Object(obj)
+}
+
+/// Write a `control_response` line answering `request_id`. `updated_input` is
+/// required by the CLI for `allow` (the original input, or the original plus
+/// `AskUserQuestion`'s `answers`); `message` is shown to Claude on `deny`.
+async fn write_control_response(
+    stdin: &mut tokio::process::ChildStdin,
+    request_id: &str,
+    allow: bool,
+    updated_input: Option<Value>,
+    message: Option<String>,
+) {
+    let response = if allow {
+        json!({ "behavior": "allow", "updatedInput": updated_input.unwrap_or_else(|| json!({})) })
+    } else {
+        json!({
+            "behavior": "deny",
+            "message": message.unwrap_or_else(|| "User denied this action".to_string()),
+        })
+    };
+    let payload = json!({
+        "type": "control_response",
+        "response": { "subtype": "success", "request_id": request_id, "response": response }
+    });
+    let mut line = payload.to_string();
+    line.push('\n');
+    let _ = stdin.write_all(line.as_bytes()).await;
+    let _ = stdin.flush().await;
+}
+
 /// The keeper's background task: owns the process, pumps stdout to viewers, and
 /// applies commands. Runs until the process exits or all handles are dropped.
 async fn run_actor(
@@ -309,12 +425,19 @@ async fn run_actor(
     finished: Arc<AtomicBool>,
 ) {
     let mut lines = BufReader::new(stdout).lines();
+    // Caps from the most recent turn — gates which `control_request`s get
+    // auto-approved (see below) vs. forwarded to the client as a real prompt.
+    let mut current_caps = crate::agent::tools::Caps::default();
+    // Original `input` of each forwarded (not auto-approved) control_request,
+    // keyed by request_id, so answering it can echo that input back (plus
+    // `AskUserQuestion`'s `answers`) without trusting the client to round-trip it.
+    let mut pending_controls: HashMap<String, Value> = HashMap::new();
 
     loop {
         tokio::select! {
             cmd = cmd_rx.recv() => match cmd {
-                Some(Cmd::User { text, images, caps: _ }) => {
-                    // (CLI keeper: caps are a native-engine concept, ignored here.)
+                Some(Cmd::User { text, images, caps }) => {
+                    current_caps = caps;
                     // Echo the prompt (with any images) to all viewers, then feed it to Claude.
                     emit(
                         &scrollback,
@@ -355,12 +478,77 @@ async fn run_actor(
                 Some(Cmd::Interrupt) => {
                     kill_process_tree(&mut child).await;
                 }
+                Some(Cmd::PermissionResponse { request_id, allow, answers, response, message }) => {
+                    let original_input = pending_controls.remove(&request_id);
+                    // Both are moved into `updated_input` below; keep copies for the
+                    // broadcast so every viewer (not just whoever clicked) can show
+                    // the actual outcome, not just "it's resolved".
+                    let answers_json = answers.clone().map(Value::Object);
+                    let response_json = response.clone();
+                    let updated_input = if allow {
+                        match (original_input, answers, response) {
+                            (Some(Value::Object(mut obj)), _, Some(resp)) => {
+                                // A freeform reply REPLACES the structured answer set
+                                // entirely — a distinct protocol field, not another
+                                // answer (see `Cmd::PermissionResponse`'s doc comment).
+                                obj.remove("answers");
+                                obj.insert("response".to_string(), Value::String(resp));
+                                Some(Value::Object(obj))
+                            }
+                            (Some(Value::Object(mut obj)), Some(answers), None) => {
+                                obj.insert("answers".to_string(), Value::Object(answers));
+                                Some(Value::Object(obj))
+                            }
+                            (Some(input), _, _) => Some(input), // plain approval: input unchanged
+                            (None, _, _) => Some(json!({})),
+                        }
+                    } else {
+                        None
+                    };
+                    write_control_response(&mut stdin, &request_id, allow, updated_input, message).await;
+                    emit(&scrollback, &events, json!({
+                        "cwi": "permission_resolved",
+                        "request_id": request_id,
+                        "allow": allow,
+                        "answers": answers_json,
+                        "response": response_json,
+                    }).to_string());
+                }
                 None => break, // no more handles referencing this keeper
             },
 
             line = lines.next_line() => match line {
                 Ok(Some(l)) if !l.trim().is_empty() => {
-                    emit(&scrollback, &events, l);
+                    match parse_control_request(&l) {
+                        Some(req) if current_caps.allows(&req.tool_name) => {
+                            // Auto-approved by the caps panel — answer immediately, no
+                            // client round-trip, no visible prompt. `AskUserQuestion`
+                            // only reaches here when its own toggle is on, in which
+                            // case "approved" means "auto-pick each question's first
+                            // (recommended) option" — a plain unchanged echo wouldn't
+                            // give Claude an actual answer to work with.
+                            let updated_input = if req.tool_name == "AskUserQuestion" {
+                                auto_answer_question(req.input)
+                            } else {
+                                req.input
+                            };
+                            write_control_response(&mut stdin, &req.request_id, true, Some(updated_input), None).await;
+                        }
+                        Some(req) => {
+                            // Needs a human: the caps panel has this tool's group off
+                            // (or, for AskUserQuestion, its own toggle is off — the
+                            // default, since auto-picking an answer can pick wrong).
+                            // Stash clones before the originals move into the emit below.
+                            pending_controls.insert(req.request_id.clone(), req.input.clone());
+                            emit(&scrollback, &events, json!({
+                                "cwi": "permission_request",
+                                "request_id": req.request_id,
+                                "tool_name": req.tool_name,
+                                "input": req.input,
+                            }).to_string());
+                        }
+                        None => emit(&scrollback, &events, l),
+                    }
                 }
                 Ok(Some(_)) => {}
                 Ok(None) | Err(_) => {
@@ -438,12 +626,16 @@ async fn run_native_actor(
                                 interrupt.store(true, Ordering::SeqCst);
                             }
                             Some(Cmd::User { .. }) => {} // ignore prompts mid-turn
+                            // Native engine never emits a control_request (no CLI
+                            // subprocess), so nothing is ever waiting on this.
+                            Some(Cmd::PermissionResponse { .. }) => {}
                             None => interrupt.store(true, Ordering::SeqCst),
                         },
                     }
                 }
             }
             Cmd::Interrupt => {} // nothing running
+            Cmd::PermissionResponse { .. } => {} // nothing running; see above
         }
     }
 
@@ -479,4 +671,64 @@ fn spawn_reaper(mgr: Arc<SessionManager>) {
             }
         }
     });
+}
+
+#[cfg(test)]
+mod control_request_tests {
+    use super::{auto_answer_question, parse_control_request};
+    use serde_json::json;
+
+    #[test]
+    fn parses_a_can_use_tool_control_request() {
+        let line = json!({
+            "type": "control_request",
+            "request_id": "req_1",
+            "request": { "subtype": "can_use_tool", "tool_name": "Bash", "input": { "command": "ls" } },
+        })
+        .to_string();
+        let req = parse_control_request(&line).expect("should parse");
+        assert_eq!(req.request_id, "req_1");
+        assert_eq!(req.tool_name, "Bash");
+        assert_eq!(req.input, json!({ "command": "ls" }));
+    }
+
+    #[test]
+    fn ignores_non_control_request_lines() {
+        assert!(parse_control_request(r#"{"type":"assistant","message":{}}"#).is_none());
+        assert!(parse_control_request("not json at all").is_none());
+        // Right envelope, wrong subtype — must not be mistaken for can_use_tool.
+        let other_subtype = json!({
+            "type": "control_request", "request_id": "req_2",
+            "request": { "subtype": "set_permission_mode" },
+        })
+        .to_string();
+        assert!(parse_control_request(&other_subtype).is_none());
+    }
+
+    #[test]
+    fn auto_answer_picks_the_first_option_per_question() {
+        let input = json!({
+            "questions": [
+                {
+                    "question": "How should I format the output?",
+                    "options": [
+                        { "label": "Summary", "description": "Brief" },
+                        { "label": "Detailed", "description": "Full" },
+                    ],
+                },
+                {
+                    "question": "Which sections?",
+                    "options": [{ "label": "Intro" }, { "label": "Conclusion" }],
+                },
+            ],
+        });
+        let answered = auto_answer_question(input);
+        assert_eq!(
+            answered["answers"]["How should I format the output?"],
+            json!("Summary")
+        );
+        assert_eq!(answered["answers"]["Which sections?"], json!("Intro"));
+        // The original questions array must survive unchanged (the CLI expects it).
+        assert!(answered["questions"].is_array());
+    }
 }

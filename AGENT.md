@@ -124,6 +124,47 @@ and weekly-Fable percentages plus reset times — in the envelope's `result`. It
   badge shows four lines (session % / week % / Fable % / chat tokens); the "Использование чата" panel
   shows the limits block + per-metric token rows with icons.
 
+## Interactive tool permissions + `AskUserQuestion` (CLI engine)
+
+`--print` mode has no TTY to answer permission prompts, but Claude Code exposes the same decision
+as a JSON control protocol over stdio when started with `--permission-prompt-tool stdio`
+(`claude.rs::spawn_claude` always passes it). This is used to give the web UI a real interactive
+Allow/Deny prompt — including `AskUserQuestion` — instead of the previous all-or-nothing
+`--permission-mode`.
+
+- **Wire protocol** (CLI stdout, interleaved with normal `stream-json` events):
+  `{"type":"control_request","request_id":"…","request":{"subtype":"can_use_tool","tool_name":"…","input":{…}}}`.
+  The reply on stdin: `{"type":"control_response","response":{"subtype":"success","request_id":"…",
+  "response":{"behavior":"allow"|"deny","updatedInput":{…}}}}`. `session.rs::parse_control_request` /
+  `write_control_response` are the two ends of this.
+- `run_actor` tracks `current_caps` (refreshed from every `Cmd::User`'s `Caps`, sent alongside each
+  turn) and a `pending_controls: HashMap<request_id, original_input>` for requests still awaiting a
+  human. On each `control_request` line: if `current_caps.allows(tool_name)` it's auto-approved
+  immediately (no round-trip to the browser); `AskUserQuestion` auto-approval instead runs
+  `auto_answer_question` (picks each question's first/"recommended" option) — otherwise the request
+  is stashed in `pending_controls` and emitted to the browser as `{"cwi":"permission_request",...}`.
+- `Caps` (`agent/tools.rs`) gained `ask_question: bool` — **off** by default, unlike every other
+  group (`read`/`modify`/`run`/`web_fetch`/`web_search`, all on by default): silently auto-picking an
+  answer to a clarifying question can send the agent in the wrong direction, so it needs an explicit
+  opt-in. Also fixed `MultiEdit`/`NotebookEdit` being ungated (now part of the `modify` group).
+- The browser answers via `{"type":"permission_response","request_id","allow",
+  "answers"|"response"}` (`ws.rs::ClientMsg::PermissionResponse` → `SessionKeeper::send_permission_response`
+  → `Cmd::PermissionResponse`). `answers` is `{question_text: chosen_label}` (built from the
+  `AskUserQuestion` option buttons); `response` is a distinct, whole-card **freeform** fallback (the
+  protocol supports replacing the entire structured answer with plain text) — the two are mutually
+  exclusive, `response` taking priority when both would otherwise apply. A `{"cwi":"permission_resolved",
+  ...}` frame lets every viewer (not just the one who answered) mark the card resolved.
+- Frontend (`render.js`): `renderPermissionRequest`/`buildToolApprovalBody`/`buildQuestionBody`/
+  `markPermissionResolved`. The question card tracks an explicit `activeMode: "options"|"freeform"|null`
+  rather than inferring intent from field contents — clicking an option never clears a drafted
+  freeform answer (and vice versa); focusing a non-empty freeform textarea revives it back to
+  "freeform" mode. Rendered regardless of `state.replayMode` — an unanswered request is live,
+  actionable state that must survive a page reload, not a one-off toast.
+- Toggle lives in the settings drawer's "Инструменты и разрешения" panel (`index.html`'s
+  `cap-ask_question` checkbox); `ui.js::applyCapsAvailability` disables just that one checkbox in
+  native-engine mode (native has no control-protocol concept — the other five caps apply to both
+  engines).
+
 ## Native engine (`src/agent/`, experimental)
 
 An alternative "brain" that talks **directly to an Anthropic-compatible `/v1/messages`** endpoint
@@ -172,6 +213,24 @@ swap providers (Anthropic / Kimi / GLM). Enabled with `CWI_ENGINE=native`.
   session-dir name matches Claude Code's.
 - Config is env-driven (`CWI_*`, see README). Default permission mode is `acceptEdits`. `CLAUDE_CONFIG_DIR`
   + `CLAUDE_CODE_OAUTH_TOKEN` isolate all on-disk state from desktop Claude — see **Isolation** above.
+- **Send is held, not queued, across a dead connection.** `ws.send()` can look successful
+  (`readyState === OPEN`) for a moment after the server process has actually died — the browser just
+  hasn't noticed the socket is gone yet. Rather than auto-queue-and-resend on reconnect (tried and
+  discarded: any resend risks a duplicate turn if the first one *did* land), `ui.js::submit()` leaves
+  the typed text and attachments in place and locks the composer (`lockComposerForConfirmation`,
+  disables `#input` + attachment remove buttons) until the send is confirmed. Confirmation is the
+  keeper's own `{"cwi":"user"}` echo (`ws.js`'s `awaitingConfirmation` flag →
+  `ui.js::confirmSentMessage`, which is what actually clears the composer); if the socket closes
+  first, `restoreUnsentMessage` just unlocks — nothing was ever cleared, so there's nothing to
+  restore. If `sendWs()` sees the socket already `CLOSED` synchronously, it fails immediately without
+  ever locking — the user notices right away and can just retry once reconnected.
+- **Turn-complete chime/notification** (`render.js::finalizeTurn({notify=true})`,
+  `static/notify.js`) fires only for a turn that actually finished live — `notify: false` is passed
+  explicitly on `{"cwi":"exit"}` (interrupt / crash / server shutting down for a restart all end a
+  turn without anyone having answered anything) and the sound/notify block is also skipped whenever
+  `state.replayMode` is true (a reconnect replaying old history isn't a new answer). The desktop
+  notification's icon switches to a "?" glyph when the answer text ends in one — a cheap signal that
+  the agent is waiting on the user specifically.
 
 ## Stack choices (already decided)
 

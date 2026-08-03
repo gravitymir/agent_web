@@ -302,8 +302,9 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   width: 50px;
   height: 50px;
   padding: 0;
-  background: #fff;
-  border: 1px solid #000;
+  background: var(--bg-elev);
+  color: var(--text-dim);
+  border: 1px solid var(--border);
   border-radius: 50%;
   cursor: pointer;
   display: flex;
@@ -312,18 +313,17 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
   opacity: 0;
   visibility: hidden;
-  transition: opacity .22s ease, visibility .22s ease, transform .1s ease;
+  transition: opacity .22s ease, visibility .22s ease, transform .1s ease, color .15s, border-color .15s, background .15s;
 }
 .scroll-to-bottom:not([hidden]) {
   opacity: 1;
   visibility: visible;
 }
-.scroll-to-bottom:hover { transform: translateY(-1px); }
+.scroll-to-bottom:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .scroll-to-bottom:active { transform: translateY(0); }
 .scroll-to-bottom svg {
   width: 22px;
   height: 22px;
-  color: #000;
 }
 
 /* Custom scrollbar: a thin fixed white track (80vh, clear of the badges) with
@@ -371,23 +371,12 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 }
 /* Assistant — the important content: a bright, high-contrast white card. */
 .msg.assistant {
-  position: relative; /* positioning context for the corner flag, see .msg-flag */
   background-color: #ffffff;
   color: #111111;
   border-radius: 12px;
   padding: 10px 14px;
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
 }
-/* At-a-glance corner badge for how a finished turn ended (see `flagTurnEnd`
-   in render.js) — currently just "ends with a question", more to come. */
-.msg-flag {
-  position: absolute; top: -8px; right: -8px; z-index: 1;
-  width: 22px; height: 22px; border-radius: 50%;
-  display: flex; align-items: center; justify-content: center;
-  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
-}
-.msg-flag svg { width: 13px; height: 13px; display: block; }
-.msg-flag-question { background: #e5484d; color: #fff; }
 /* Service / informational — a user action (interrupt, error, notice), not a
    message. Muted: pale gray on pale gray, quiet and centered. */
 .msg.system {
@@ -482,7 +471,10 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 /* Current-chat controls (export MD / JSON, delete) — a floating chip fixed to
    the bottom-right of the chat area, to the right of the centred composer. */
 .chat-controls {
-  position: fixed; right: 24px; bottom: 22px; z-index: 31;
+  /* The chip's own width (~120px) used to reach past `right: 24px` far enough
+     to sit under the scrollbar's track (right: 130px, ±8px hit area — see
+     .scrollbar). Anchored past that zone (138) plus a clear gap instead. */
+  position: fixed; right: 156px; bottom: 22px; z-index: 31;
   display: flex; gap: 4px;
   background: var(--bg-elev);
   border: 1px solid var(--border);
@@ -499,7 +491,7 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   transition: background .15s, color .15s, transform .1s ease;
 }
 .cc-btn svg { width: 1.15em; height: 1.15em; }
-.cc-btn:hover { background: var(--bg); color: var(--text); transform: translateY(-1px); }
+.cc-btn:hover { background: var(--bg); color: var(--accent); transform: translateY(-1px); }
 .cc-btn:active { transform: translateY(0); }
 
 /* Tool call cards: name + parameters (and a git-style +/- for file edits).
@@ -553,6 +545,69 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 .d-add { background: #e6ffec; color: #1a7f37; }
 .d-del { background: #ffebe9; color: #cf222e; }
 .tool-more { color: var(--text-dim); font-size: 0.78rem; padding: 4px 2px 0; }
+
+/* Tool approval / AskUserQuestion prompt (see render.js's renderPermissionRequest) —
+   accent border while it needs a decision, muted once .resolved. */
+.perm-card {
+  margin: 10px 0; border: 1px solid color-mix(in srgb, var(--accent) 40%, var(--border));
+  border-radius: 8px; background: var(--bg-elev); overflow: hidden;
+}
+.perm-card.resolved { border-color: var(--border); opacity: 0.85; }
+.perm-card.pending-response { opacity: 0.6; pointer-events: none; }
+.perm-head {
+  display: flex; align-items: center; gap: 8px; padding: 8px 10px;
+  font-weight: 600; font-size: 0.85rem; color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.perm-card.resolved .perm-head { color: var(--text-dim); background: transparent; }
+.perm-body { padding: 10px; }
+.perm-actions { display: flex; gap: 8px; margin-top: 10px; }
+.perm-btn {
+  padding: 7px 16px; border-radius: 8px; font-size: 0.85rem; cursor: pointer;
+  border: 1px solid var(--border); background: var(--bg-elev); color: var(--text);
+  transition: background .12s ease, border-color .12s ease, transform .1s ease;
+}
+.perm-btn:hover { transform: translateY(-1px); }
+.perm-allow { border-color: var(--accent); background: var(--accent); color: #fff; }
+.perm-allow:hover { background: var(--accent-hover); }
+.perm-allow:disabled { opacity: 0.4; cursor: default; transform: none; }
+.perm-deny { color: var(--text-dim); }
+.perm-deny:hover { border-color: #e5534b; color: #e5534b; }
+
+.perm-question-block { margin-bottom: 12px; }
+.perm-question-block:last-of-type { margin-bottom: 0; }
+.perm-question-text { font-size: 0.92rem; margin-bottom: 8px; }
+.perm-options { display: flex; flex-direction: column; gap: 6px; }
+.perm-option {
+  display: flex; flex-direction: column; align-items: flex-start; gap: 2px;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-elev); cursor: pointer; text-align: left; width: 100%;
+  transition: background .12s ease, border-color .12s ease;
+}
+.perm-option:hover { border-color: var(--accent); }
+.perm-option.selected { border-color: var(--accent); background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev)); }
+.perm-option-label { font-weight: 600; font-size: 0.85rem; }
+.perm-option-desc { font-size: 0.78rem; color: var(--text-dim); }
+/* Structured options vs. the freeform alternative below are mutually exclusive
+   at the whole-card level — dimmed (not disabled: still clickable) to show
+   which one will actually be sent, per render.js's buildQuestionBody. */
+.perm-option-dimmed { opacity: 0.4; border-color: var(--border); background: var(--bg-elev); }
+.perm-option-dimmed.selected { border-color: var(--border); background: var(--bg-elev); }
+
+.perm-alt { margin: 10px 0 4px; transition: opacity .15s ease; }
+.perm-alt-dimmed { opacity: 0.4; }
+.perm-alt-label { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 6px; }
+.perm-alt-input {
+  width: 100%; box-sizing: border-box; resize: vertical;
+  padding: 8px 10px; border-radius: 8px; border: 1px solid var(--border);
+  background: var(--bg-input); color: var(--text); font: inherit; font-size: 0.85rem;
+}
+.perm-alt-input:focus { outline: none; border-color: var(--accent); }
+
+.perm-answer { font-size: 0.85rem; color: var(--text-dim); margin-bottom: 4px; }
+.perm-answer:last-child { margin-bottom: 0; }
+.perm-answer b { color: var(--text); }
+
 /* The answer itself: full-contrast text (vs. the muted status/detail lines below it). */
 .msg.assistant .content { color: #111111; }
 
@@ -762,6 +817,8 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   cursor: pointer; font-size: 0.8rem; line-height: 1;
   display: flex; align-items: center; justify-content: center;
 }
+/* Locked alongside #input while a send awaits its echo — same reasoning. */
+.rm:disabled { opacity: 0.4; cursor: not-allowed; }
 
 /* Drag-and-drop affordance while dragging files over the window. */
 body.drag-over::after {
@@ -804,6 +861,10 @@ body.drag-over::after {
 }
 #input::-webkit-scrollbar { display: none; }
 #input:focus { border-color: var(--accent); }
+/* Briefly locked while a just-sent message awaits the server's own echo (see
+   ui.js's lockComposerForConfirmation) — held, not cleared, so it needs a
+   visible "don't touch this yet" cue distinct from the empty idle state. */
+#input:disabled { opacity: 0.55; cursor: not-allowed; }
 .btn-send, .btn-stop {
   /* Same height as a single line of the input (line 1.5em + padding 1.5em),
      so both scale together with the font-size setting; the button stays this

@@ -4,6 +4,7 @@ import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings }
 import { setFaviconState } from '../favicon.js';
 import { playCompletionChime } from '../sound.js';
 import { notifyTurnComplete } from '../notify.js';
+import { sendWs } from './ws.js';
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -398,6 +399,215 @@ export function renderToolBody(t, input) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// Tool approval / AskUserQuestion prompts (the CLI's `control_request` relayed
+// over `cwi:"permission_request"` — see session.rs's `run_actor`). A card per
+// request, live in the answer stream; resolved only by the server's own
+// "permission_resolved" echo (same pattern as the user's own message bubble,
+// which also renders only from its echo) — never finalized optimistically, so
+// every viewer (and a page reload) ends up showing the same real outcome.
+const pendingPermissionCards = new Map(); // request_id -> card element
+
+export function renderPermissionRequest(evt) {
+  const cur = ensureAssistant();
+  const isQuestion = evt.tool_name === "AskUserQuestion";
+
+  const card = document.createElement("div");
+  card.className = "perm-card";
+
+  const head = document.createElement("div");
+  head.className = "perm-head";
+  head.innerHTML = `${iIcon(isQuestion ? "help" : "shield", 15, "inline")} <span>${
+    isQuestion ? "Уточняющий вопрос" : `Разрешить «${escapeHtml(evt.tool_name)}»?`
+  }</span>`;
+  card.appendChild(head);
+
+  const body = document.createElement("div");
+  body.className = "perm-body";
+  card.appendChild(body);
+
+  const submit = (allow, answers, response) => {
+    if (card.classList.contains("pending-response") || !pendingPermissionCards.has(evt.request_id)) return;
+    card.classList.add("pending-response"); // guard against double-click before the echo lands
+    sendWs({
+      type: "permission_response", request_id: evt.request_id, allow,
+      answers: answers || undefined, response: response || undefined,
+    });
+  };
+
+  if (isQuestion) {
+    buildQuestionBody(body, (evt.input && evt.input.questions) || [], submit);
+  } else {
+    buildToolApprovalBody(body, evt.input, submit);
+  }
+
+  cur.answerEl.appendChild(card);
+  pendingPermissionCards.set(evt.request_id, card);
+  scrollToBottomIfPinned();
+}
+
+function buildToolApprovalBody(body, input, submit) {
+  const pre = document.createElement("pre");
+  pre.className = "tool-code";
+  pre.textContent = JSON.stringify(input || {}, null, 2);
+  body.appendChild(pre);
+
+  const actions = document.createElement("div");
+  actions.className = "perm-actions";
+  const allowBtn = document.createElement("button");
+  allowBtn.type = "button";
+  allowBtn.className = "perm-btn perm-allow";
+  allowBtn.textContent = "Разрешить";
+  allowBtn.addEventListener("click", () => submit(true, null, null));
+  const denyBtn = document.createElement("button");
+  denyBtn.type = "button";
+  denyBtn.className = "perm-btn perm-deny";
+  denyBtn.textContent = "Отклонить";
+  denyBtn.addEventListener("click", () => submit(false, null, null));
+  actions.appendChild(allowBtn);
+  actions.appendChild(denyBtn);
+  body.appendChild(actions);
+}
+
+// Structured options vs. the freeform alternative are mutually exclusive at
+// the whole-card level (the protocol's `response` field replaces ALL answers,
+// not just one question's — see `Cmd::PermissionResponse` on the Rust side).
+// Typing in the alternative dims every option; picking an option dims the
+// alternative back — but neither is ever truly `disabled`, so the user can
+// freely change their mind in either direction (per the user's own spec).
+function buildQuestionBody(body, questions, submit) {
+  const selected = questions.map(() => new Set()); // chosen option indices, per question
+  const optionButtons = [];
+  // Whichever the user touched most recently — drives which side is dimmed.
+  // Neither side's data is ever cleared on switch, so going back restores it.
+  let activeMode = null; // "options" | "freeform" | null
+
+  questions.forEach((q, qi) => {
+    const block = document.createElement("div");
+    block.className = "perm-question-block";
+    const qText = document.createElement("div");
+    qText.className = "perm-question-text";
+    qText.textContent = q.question || "";
+    block.appendChild(qText);
+
+    const opts = document.createElement("div");
+    opts.className = "perm-options";
+    (q.options || []).forEach((opt, oi) => {
+      const optBtn = document.createElement("button");
+      optBtn.type = "button";
+      optBtn.className = "perm-option";
+      optBtn.innerHTML = `<span class="perm-option-label">${escapeHtml(opt.label || "")}</span>` +
+        (opt.description ? `<span class="perm-option-desc">${escapeHtml(opt.description)}</span>` : "");
+      optBtn.addEventListener("click", () => {
+        if (q.multiSelect) {
+          optBtn.classList.toggle("selected");
+          if (optBtn.classList.contains("selected")) selected[qi].add(oi);
+          else selected[qi].delete(oi);
+        } else {
+          opts.querySelectorAll(".perm-option").forEach((b) => b.classList.remove("selected"));
+          optBtn.classList.add("selected");
+          selected[qi] = new Set([oi]);
+        }
+        // Picking an option makes it the active mode — but the alternative's
+        // draft text is kept, not erased, so the user can still come back to it.
+        activeMode = "options";
+        syncModeVisuals();
+      });
+      optionButtons.push(optBtn);
+      opts.appendChild(optBtn);
+    });
+    block.appendChild(opts);
+    body.appendChild(block);
+  });
+
+  const altWrap = document.createElement("div");
+  altWrap.className = "perm-alt";
+  const altLabel = document.createElement("div");
+  altLabel.className = "perm-alt-label";
+  altLabel.textContent = "Ни один вариант не подходит — опишите свой:";
+  const altInput = document.createElement("textarea");
+  altInput.className = "perm-alt-input";
+  altInput.rows = 3;
+  altInput.placeholder = "Опишите альтернативный или гибридный вариант…";
+  altWrap.appendChild(altLabel);
+  altWrap.appendChild(altInput);
+  body.appendChild(altWrap);
+
+  const actions = document.createElement("div");
+  actions.className = "perm-actions";
+  const submitBtn = document.createElement("button");
+  submitBtn.type = "button";
+  submitBtn.className = "perm-btn perm-allow";
+  submitBtn.textContent = "Отправить";
+  actions.appendChild(submitBtn);
+  body.appendChild(actions);
+
+  function syncModeVisuals() {
+    optionButtons.forEach((btn) => btn.classList.toggle("perm-option-dimmed", activeMode === "freeform"));
+    altWrap.classList.toggle("perm-alt-dimmed", activeMode === "options");
+    const hasFreeformText = altInput.value.trim().length > 0;
+    const allAnswered = questions.length > 0 && selected.every((s) => s.size > 0);
+    submitBtn.disabled = !(
+      (activeMode === "freeform" && hasFreeformText) ||
+      (activeMode === "options" && allAnswered)
+    );
+  }
+  altInput.addEventListener("input", () => {
+    // Typing takes over as the active mode; clearing the box falls back to
+    // "options" if something's picked there, or to neutral if nothing is.
+    activeMode = altInput.value.trim()
+      ? "freeform"
+      : selected.some((s) => s.size > 0) ? "options" : null;
+    syncModeVisuals();
+  });
+  altInput.addEventListener("focus", () => {
+    // Focus alone (no typing needed) revives a non-empty draft — it was
+    // dimmed by picking an option, not cleared, so it's still "the answer"
+    // the moment the user's attention returns to it.
+    if (altInput.value.trim()) {
+      activeMode = "freeform";
+      syncModeVisuals();
+    }
+  });
+  syncModeVisuals(); // starts disabled: nothing picked, nothing typed
+
+  submitBtn.addEventListener("click", () => {
+    // Respect whichever mode is ACTIVE, not just "does the textarea have
+    // leftover text" — the other side's draft is kept but must not win.
+    if (activeMode === "freeform") {
+      submit(true, null, altInput.value.trim());
+      return;
+    }
+    const answers = {};
+    questions.forEach((q, qi) => {
+      const labels = [...selected[qi]].map((oi) => q.options[oi] && q.options[oi].label).filter(Boolean);
+      answers[q.question] = q.multiSelect ? labels : (labels[0] || "");
+    });
+    submit(true, answers, null);
+  });
+}
+
+// Called from ws.js on the server's "permission_resolved" echo — the single
+// source of truth for how a request ended, whoever actually answered it.
+export function markPermissionResolved(requestId, allow, answers, response) {
+  const card = pendingPermissionCards.get(requestId);
+  if (!card) return;
+  pendingPermissionCards.delete(requestId);
+  card.classList.remove("pending-response");
+  card.classList.add("resolved");
+  const body = card.querySelector(".perm-body");
+  if (!body) return;
+  if (allow && response) {
+    body.innerHTML = `<div class="perm-answer"><b>Ваш вариант:</b> ${escapeHtml(response)}</div>`;
+  } else if (allow && answers && Object.keys(answers).length) {
+    body.innerHTML = Object.entries(answers)
+      .map(([q, a]) => `<div class="perm-answer"><b>${escapeHtml(q)}:</b> ${escapeHtml(Array.isArray(a) ? a.join(", ") : String(a))}</div>`)
+      .join("");
+  } else {
+    body.innerHTML = `<div class="perm-answer">${allow ? "Разрешено" : "Отклонено"}</div>`;
+  }
+}
+
 // Stash the `result` event's final stats; `finalizeTurn` (called right after,
 // see ws.js) folds them into the status line instead of a separate element.
 export function addMeta(evt) {
@@ -427,21 +637,11 @@ function finalizeStatusLine(cur) {
   if (hasDetail) renderStatusDetail(cur); // keep it fresh in case it's already open
 }
 
-// Small corner badge flagging how the turn ended, at a glance, when scanning
-// a long chat — currently just "the answer ends with a question" (the agent
-// is waiting on you), but built to grow (see the "чего ещё" list discussed
-// with the user: interrupted, errored, etc. would add more `msg-flag-*` cases).
-function flagTurnEnd(cur) {
-  const text = (cur.textRaw || "").trim();
-  if (!/\?\s*$/.test(text)) return;
-  const flag = document.createElement("span");
-  flag.className = "msg-flag msg-flag-question";
-  flag.title = "Ответ заканчивается вопросом";
-  flag.innerHTML = iIcon("help", 13);
-  cur.msgEl.appendChild(flag);
-}
-
-export function finalizeTurn() {
+// `notify: false` skips the chime/desktop-notification (but still does all
+// the UI bookkeeping) — used for "exit", which fires on ANY process death
+// (explicit interrupt, a crash, or the whole server shutting down for a
+// restart) and never actually means "here's your answer".
+export function finalizeTurn({ notify = true } = {}) {
   if (state.statusTimer) {
     clearInterval(state.statusTimer);
     state.statusTimer = null;
@@ -459,7 +659,6 @@ export function finalizeTurn() {
     }
     state.current.msgEl.classList.remove("streaming");
     finalizeStatusLine(state.current);
-    flagTurnEnd(state.current);
     if (state.current.answerEl) addFoldIfLong(state.current.answerEl);
     // Fold this turn's tokens into the chat total so the badge doesn't dip
     // before the authoritative refresh lands.
@@ -478,7 +677,7 @@ export function finalizeTurn() {
   setFaviconState("idle");
   // Reattaching after a reload replays past turns through this same function —
   // only a turn that just finished live should chime/notify.
-  if (!state.replayMode) {
+  if (!state.replayMode && notify) {
     if (settings.sound) playCompletionChime();
     if (settings.notify) notifyTurnComplete((el.title.textContent || "").trim(), answerPreview);
   }
@@ -739,6 +938,10 @@ el.scrollbar.addEventListener("pointercancel", endScrollbarDrag);
 export function setStreamingUI(on) {
   el.input.disabled = false;
   updateSendButton();
+  // Export/delete would otherwise act on a chat mid-turn — the exported file
+  // would be missing the reply still being streamed. Hide the controls for
+  // the duration; refreshComposerState() governs their visibility otherwise.
+  el.chatControls.hidden = on || !state.sessionId;
 }
 
 // Compact token count: 10, 100, 1k, 5k, 100k, 1m, 1.5m …

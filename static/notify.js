@@ -40,10 +40,14 @@ export function notifyTurnComplete(chatTitle, answerText) {
   // said — more useful than the title alone for deciding whether to switch.
   const body = [chatTitle, buildPreview(answerText)].filter(Boolean).join("\n")
     || "Чат готов к следующему сообщению";
+  // A plain "done" notification carries no icon (was just visual noise) — but
+  // an answer ending in "?" means the agent hit a fork and is waiting on YOUR
+  // decision, worth flagging at a glance before you even open the chat.
+  const endsWithQuestion = /\?\s*$/.test((answerText || "").trim());
   try {
     const n = new Notification("Ответ готов", {
       body,
-      // No `icon` — the orange square added no information, just visual noise.
+      ...(endsWithQuestion ? { icon: "/question-icon.svg" } : {}),
       // A fixed tag would make each turn REPLACE the previous notification —
       // on Windows that silently updates the Action Center entry without
       // re-showing the toast banner, so only the very first one in a session

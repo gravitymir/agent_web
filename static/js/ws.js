@@ -1,7 +1,7 @@
 import { state, el } from './state.js';
-import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText } from './render.js';
+import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText, renderPermissionRequest, markPermissionResolved } from './render.js';
 import { setFaviconState } from '../favicon.js';
-import { renderTranscriptWindowed } from './ui.js';
+import { renderTranscriptWindowed, restoreUnsentMessage, confirmSentMessage } from './ui.js';
 
 // ---------------------------------------------------------------------------
 // WebSocket connection with exponential-backoff auto-reconnect.
@@ -14,7 +14,23 @@ let reconnectAttempts = 0;
 let reconnectTimer = null;
 let heartbeatTimer = null;
 let intentionalClose = false;
-let replayMsgCount = 0;
+// Whether the keeper we just attached to had ANY live scrollback at all (the
+// server's own `replay` flag — a plain non-empty/empty check, not a count).
+let hadLiveReplay = false;
+// Whether a "send" that looked successful (readyState was OPEN) is still
+// awaiting its own "cwi:user" echo. `readyState` can still read OPEN for a
+// moment after the server process actually died — the browser doesn't always
+// notice a dead socket right away — so `send()` can silently vanish into a
+// connection that's already gone. The composer holds its text/attachments
+// (see ui.js's `lockComposerForConfirmation`) until this resolves either way:
+// confirmed (`confirmSentMessage`) or the connection dropped first
+// (`restoreUnsentMessage` — nothing to restore, it was never cleared).
+let awaitingConfirmation = false;
+
+// Call right after `sendWs(payload)` reports success for a chat message.
+export function markSentPending() {
+  awaitingConfirmation = true;
+}
 
 export function connect() {
   clearTimeout(reconnectTimer);
@@ -32,13 +48,15 @@ export function connect() {
     if (state.sessionId && !state.isNew) {
       sendWs({ type: "attach", session_id: state.sessionId });
     }
-    // If any messages were queued while offline, send them now.
-    flushPendingSends();
   };
 
   ws.onclose = () => {
     stopHeartbeat();
     setConn(false);
+    if (awaitingConfirmation) {
+      restoreUnsentMessage();
+      awaitingConfirmation = false;
+    }
     if (!intentionalClose) {
       scheduleReconnect();
     }
@@ -130,27 +148,6 @@ export function sendWs(obj) {
   return false;
 }
 
-// Queue a message to be sent once the socket comes back. The existing reconnect
-// loop (or the currently opening socket) will flush the queue on the next open event.
-export function sendWsOrQueue(obj) {
-  if (sendWs(obj)) return true;
-  state.pendingSends.push(obj);
-  // If the socket is completely down and no reconnect is in flight, kick one off now.
-  if (!state.ws && !reconnectTimer) {
-    reconnectAttempts = 0;
-    connect();
-  }
-  return false;
-}
-
-function flushPendingSends() {
-  while (state.pendingSends.length) {
-    const obj = state.pendingSends[0];
-    if (!sendWs(obj)) break;
-    state.pendingSends.shift();
-  }
-}
-
 // ---------------------------------------------------------------------------
 // Event handling (control frames + Claude stream-json)
 // ---------------------------------------------------------------------------
@@ -161,29 +158,40 @@ export function handleEvent(evt) {
         state.sessionId = evt.session_id;
         // A replay means we're (re)attaching to a live session: rebuild the
         // view from the scrollback that follows.
+        hadLiveReplay = !!evt.replay;
         if (evt.replay) {
           state.replayMode = true;
-          replayMsgCount = 0;
           resetMessages();
         }
         break;
       case "replay_end":
         state.replayMode = false;
-        // The live scrollback only covers the keeper's lifetime. If it's
-        // shorter than the on-disk history, restore the full disk history so
-        // the user doesn't lose earlier turns after a page reload.
-        if (state.transcript && replayMsgCount < state.transcript.msgs.length) {
+        // A brand-new keeper (nothing live to show — e.g. just re-spawned via
+        // --resume) has an empty scrollback; restore the on-disk history so
+        // the user doesn't land on a blank chat. But if there WAS live replay
+        // (the same keeper survived a reload, mid-turn or not), trust it fully
+        // — it's strictly more current than disk (a pending permission_request,
+        // for instance, only ever exists live, never in the on-disk transcript).
+        // Comparing message COUNTS here used to decide this instead, but raw
+        // live events and on-disk logical messages are different units (one
+        // "assistant" turn can emit many raw stream events) and could misfire
+        // in either direction — replacing live state with stale disk state.
+        if (state.transcript && !hadLiveReplay) {
           // Re-render windowed (last MAX_RENDERED + "load earlier"), not the whole
           // transcript — otherwise a reconnect on a long chat unbounds the DOM.
           renderTranscriptWindowed(state.transcript.msgs);
         }
-        replayMsgCount = 0;
         break;
       case "user": {
-        // A user turn, echoed by the keeper (also seen by other viewers).
+        // A user turn, echoed by the keeper (also seen by other viewers). Any
+        // echo proves this connection's own send actually reached the server —
+        // safe now to clear the held composer for real (see `markSentPending`).
+        if (awaitingConfirmation) {
+          awaitingConfirmation = false;
+          confirmSentMessage();
+        }
         // Only finalize a *previous* assistant turn; don't reset the composer
         // for our own just-sent message (no current turn yet).
-        if (state.replayMode) replayMsgCount++;
         if (state.current) finalizeTurn();
         const text = evt.text || "";
         addUserMessage(text, evt.images || []);
@@ -203,13 +211,24 @@ export function handleEvent(evt) {
         }
         break;
       case "exit":
-        finalizeTurn();
+        // Never a real "answer ready": fires on an explicit interrupt (the
+        // user is already at the keyboard), a crash, or the server itself
+        // shutting down for a restart — none of those earned a chime.
+        finalizeTurn({ notify: false });
         break;
       case "no_session":
         break; // nothing live to attach to; keep whatever is shown
       case "error":
         showSystem(`Ошибка: ${evt.message}`);
         finalizeTurn();
+        break;
+      case "permission_request":
+        // Rendered regardless of replay: an unanswered request is still
+        // actionable state after a reload, not a one-off notification.
+        renderPermissionRequest(evt);
+        break;
+      case "permission_resolved":
+        markPermissionResolved(evt.request_id, evt.allow, evt.answers, evt.response);
         break;
     }
     return;
@@ -228,7 +247,6 @@ export function handleEvent(evt) {
 
     case "assistant":
       // Render each tool call with its parameters, and count them as running.
-      if (state.replayMode) replayMsgCount++;
       if (state.current) {
         renderToolCalls(state.current, evt);
         const n = countBlocks(evt, "tool_use");

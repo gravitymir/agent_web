@@ -6,6 +6,11 @@
 //!   { "type": "send", "session_id": "<uuid|null>", "text": "...", "model": "opus", "new_chat": false }
 //!   { "type": "attach", "session_id": "<uuid>" }   // (re)connect to a live session
 //!   { "type": "interrupt" }
+//!   { "type": "permission_response", "request_id": "...", "allow": true,
+//!     "answers": { "question text": "chosen label" } }   // AskUserQuestion only
+//!   { "type": "permission_response", "request_id": "...", "allow": true,
+//!     "response": "freeform text" }   // AskUserQuestion "none of these" fallback,
+//!     mutually exclusive with "answers" — replaces the whole structured answer
 //!
 //! Server -> client:
 //!   raw Claude `stream-json` events (objects WITHOUT a `cwi` field), plus
@@ -15,6 +20,11 @@
 //!   { "cwi": "exit" }                    the Claude process finished
 //!   { "cwi": "no_session" }              nothing live to attach to
 //!   { "cwi": "error", "message": "..." }
+//!   { "cwi": "permission_request", "request_id": "...", "tool_name": "...", "input": {...} }
+//!     a tool the caps panel doesn't auto-approve (or any `AskUserQuestion`) —
+//!     answer with a "permission_response" client frame
+//!   { "cwi": "permission_resolved", "request_id": "..." }
+//!     the request above got an answer (from this viewer or another one)
 
 use std::collections::VecDeque;
 use std::sync::Arc;
@@ -88,6 +98,22 @@ enum ClientMsg {
         session_id: String,
     },
     Interrupt,
+    /// The user's decision on a `{"cwi":"permission_request"}` — a plain tool
+    /// Allow/Deny, an `AskUserQuestion` answer (`answers` populated), or a
+    /// freeform reply replacing the whole question (`response` populated,
+    /// mutually exclusive with `answers`). Routed to whichever keeper this
+    /// connection is attached to (like `Interrupt`) — a request is only ever
+    /// shown to viewers already attached to the session it came from.
+    PermissionResponse {
+        request_id: String,
+        allow: bool,
+        #[serde(default)]
+        answers: Option<serde_json::Map<String, serde_json::Value>>,
+        #[serde(default)]
+        response: Option<String>,
+        #[serde(default)]
+        message: Option<String>,
+    },
     Ping,
 }
 
@@ -237,6 +263,13 @@ async fn handle_client(
             if let Some(k) = keeper.as_ref() {
                 tracing::info!(session = %k.session_id, "user interrupted");
                 k.interrupt().await;
+            }
+        }
+
+        ClientMsg::PermissionResponse { request_id, allow, answers, response, message } => {
+            if let Some(k) = keeper.as_ref() {
+                tracing::info!(session = %k.session_id, %request_id, allow, "permission response");
+                k.send_permission_response(request_id, allow, answers, response, message).await;
             }
         }
 

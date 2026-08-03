@@ -26,24 +26,34 @@ pub struct Caps {
     pub run: bool,
     pub web_fetch: bool,
     pub web_search: bool,
+    /// CLI engine only: auto-answer `AskUserQuestion` (pick each question's
+    /// first/recommended option) instead of showing an interactive prompt.
+    /// Defaults OFF, unlike every other group — clarifying questions are the
+    /// one case where "auto-approve" can silently pick the wrong direction.
+    pub ask_question: bool,
 }
 
 impl Default for Caps {
     fn default() -> Self {
-        Self { read: true, modify: true, run: true, web_fetch: true, web_search: true }
+        Self {
+            read: true, modify: true, run: true, web_fetch: true, web_search: true,
+            ask_question: false,
+        }
     }
 }
 
 impl Caps {
-    /// Whether a built-in tool is currently allowed. Unknown names (e.g. `mcp__*`)
-    /// are not gated here and return `true`.
+    /// Whether a built-in tool is currently allowed. Unknown names (e.g. `mcp__*`,
+    /// or CLI-internal tools like `TodoWrite`/`Task` that don't touch the
+    /// filesystem/network) are not gated here and return `true`.
     pub fn allows(&self, tool: &str) -> bool {
         match tool {
             "Read" | "Glob" | "Grep" => self.read,
-            "Write" | "Edit" => self.modify,
+            "Write" | "Edit" | "MultiEdit" | "NotebookEdit" => self.modify,
             "Bash" => self.run,
             "WebFetch" => self.web_fetch,
             "WebSearch" => self.web_search,
+            "AskUserQuestion" => self.ask_question,
             _ => true,
         }
     }
@@ -829,8 +839,21 @@ mod tests {
         assert!(!c.allows("Write"));
         assert!(!c.allows("Edit"));
         assert!(!c.allows("Bash"));
+        assert!(!c.allows("MultiEdit"));
+        assert!(!c.allows("NotebookEdit"));
         assert!(c.allows("Read")); // read group still on
         assert!(c.allows("mcp__x__y"));
+    }
+
+    #[test]
+    fn ask_question_defaults_off_unlike_everything_else() {
+        let c = Caps::default();
+        // Opt-in, not opt-out: auto-picking a clarifying question's answer can
+        // pick the wrong one, unlike every other group which defaults allowed.
+        assert!(!c.allows("AskUserQuestion"));
+        let mut c = c;
+        c.ask_question = true;
+        assert!(c.allows("AskUserQuestion"));
     }
 
     #[test]

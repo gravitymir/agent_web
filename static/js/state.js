@@ -11,7 +11,6 @@ export const state = {
   current: null,     // active assistant render context
   pendingImages: [], // pasted images awaiting send: {media_type, data, url}
   pendingFiles: [],  // attached text files awaiting send: {name, text, truncated}
-  pendingSends: [],  // messages queued while offline, flushed on reconnect
   chatUsage: {},     // session_id -> {tokens,input_tokens,cache_read,cache_creation,turns}
   providers: [],     // native engine: [{id,name,has_key,models}]
   replayMode: false, // true while replaying a live session's scrollback

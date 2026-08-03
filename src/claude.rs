@@ -65,7 +65,14 @@ pub fn spawn_claude(
         .arg("--include-partial-messages")
         .arg("--verbose")
         .arg("--permission-mode")
-        .arg(&config.permission_mode);
+        .arg(&config.permission_mode)
+        // Without this, any tool needing a decision beyond `permission_mode`'s
+        // own auto-approvals (Bash, WebFetch, AskUserQuestion, ...) silently
+        // auto-denies in headless `--print` mode. This routes those decisions
+        // to us instead, as `control_request`/`control_response` lines over
+        // the same stdout/stdin — see `run_actor` in session.rs.
+        .arg("--permission-prompt-tool")
+        .arg("stdio");
 
     if resume {
         cmd.arg("--resume").arg(&id);
