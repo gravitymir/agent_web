@@ -1,6 +1,7 @@
 import { state, el } from './state.js';
-import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, renderThinkSummary, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge } from './render.js';
+import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText } from './render.js';
 import { setFaviconState } from '../favicon.js';
+import { renderTranscriptWindowed } from './ui.js';
 
 // ---------------------------------------------------------------------------
 // WebSocket connection with exponential-backoff auto-reconnect.
@@ -172,28 +173,33 @@ export function handleEvent(evt) {
         // shorter than the on-disk history, restore the full disk history so
         // the user doesn't lose earlier turns after a page reload.
         if (state.transcript && replayMsgCount < state.transcript.msgs.length) {
-          resetMessages();
-          const frag = document.createDocumentFragment();
-          renderMsgRange(state.transcript.msgs, 0, state.transcript.msgs.length, frag);
-          el.messages.appendChild(frag);
-          scrollToBottom();
+          // Re-render windowed (last MAX_RENDERED + "load earlier"), not the whole
+          // transcript — otherwise a reconnect on a long chat unbounds the DOM.
+          renderTranscriptWindowed(state.transcript.msgs);
         }
         replayMsgCount = 0;
         break;
-      case "user":
+      case "user": {
         // A user turn, echoed by the keeper (also seen by other viewers).
         // Only finalize a *previous* assistant turn; don't reset the composer
         // for our own just-sent message (no current turn yet).
         if (state.replayMode) replayMsgCount++;
         if (state.current) finalizeTurn();
-        addUserMessage(evt.text || "", evt.images || []);
+        const text = evt.text || "";
+        addUserMessage(text, evt.images || []);
+        // Show the "печатает…" placeholder the moment the send is confirmed
+        // (this echo), rather than waiting for the model's first token — closes
+        // the silent gap during process spin-up / first-token latency. Skipped
+        // for a synthetic interrupt marker: that ends a turn, it doesn't start one.
+        if (!state.replayMode && !isServiceText(text)) ensureAssistant();
         break;
+      }
       case "think":
         // Authoritative reasoning duration (survives replay) → freeze the timer.
-        if (state.current && state.current.thinkEl) {
+        if (state.current && state.current.thinkStart != null) {
           state.current.thinkMs = evt.ms;
           stopThinkingClock(state.current);
-          renderThinkSummary(state.current);
+          updateStatus();
         }
         break;
       case "exit":

@@ -3,6 +3,7 @@ import { iIcon } from './ios-icons.js';
 import { connect, sendWs, sendWsOrQueue } from './ws.js';
 import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage } from './render.js';
 import { setFaviconState } from '../favicon.js';
+import { ensureNotifyPermission } from '../notify.js';
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
@@ -118,7 +119,11 @@ export function filesToPrompt(files) {
 }
 
 el.stop.addEventListener("click", () => {
-  sendWs({ type: "interrupt" });
+  // Stop needs the live socket (the keeper runs server-side). If it can't be
+  // delivered, say so instead of failing silently.
+  if (!sendWs({ type: "interrupt" })) {
+    showSystem("Нет связи с сервером — остановить не удалось. Попробуйте после переподключения.");
+  }
 });
 
 // ---------------------------------------------------------------------------
@@ -137,6 +142,26 @@ export function loadCaps() {
   for (const k of CAP_KEYS) {
     const box = document.getElementById("cap-" + k);
     if (box) box.checked = saved[k] !== false; // default enabled
+  }
+  applyCapsAvailability();
+}
+
+// Caps only gate tools for the native engine — the CLI keeper ignores them
+// outright (session.rs: "caps are a native-engine concept, ignored here"), so
+// toggling them there would silently do nothing. Disable the controls until
+// `state.engineNative` is confirmed true, so the panel reads as a status
+// display rather than a (non-functional) control in CLI mode.
+export function applyCapsAvailability() {
+  const enabled = !!state.engineNative;
+  for (const k of CAP_KEYS) {
+    const box = document.getElementById("cap-" + k);
+    if (!box) continue;
+    box.disabled = !enabled;
+    const row = box.closest(".toggle-row");
+    if (row) {
+      row.classList.toggle("toggle-row-inert", !enabled);
+      row.title = enabled ? "" : "Действует только для нативного движка — в CLI-режиме не применяется";
+    }
   }
 }
 
@@ -548,6 +573,12 @@ export const settings = {
   provider: localStorage.getItem("cwi_provider") || "",
   // Voice: auto-send after dictation. Off by default.
   autoSend: localStorage.getItem("cwi_autosend") === "1",
+  // Chime when a turn finishes. On by default; absent key ("" from
+  // localStorage.getItem returning null → not "0") reads as enabled.
+  sound: localStorage.getItem("cwi_sound") !== "0",
+  // Desktop notification when a turn finishes in a hidden tab. Off by default —
+  // unlike sound, this needs an explicit OS permission grant.
+  notify: localStorage.getItem("cwi_notify") === "1",
 };
 
 export function applySettings() {
@@ -555,6 +586,8 @@ export function applySettings() {
   document.documentElement.style.fontSize = settings.fontSize + "px";
   el.model.value = settings.model;
   el.autosend.checked = settings.autoSend;
+  el.sound.checked = settings.sound;
+  el.notify.checked = settings.notify;
   markActive(el.fontSeg, "size", settings.fontSize);
   autoGrow(); // recompute the input height for the new font size
 }
@@ -562,6 +595,31 @@ export function applySettings() {
 el.autosend.addEventListener("change", () => {
   settings.autoSend = el.autosend.checked;
   localStorage.setItem("cwi_autosend", settings.autoSend ? "1" : "0");
+});
+
+el.sound.addEventListener("change", () => {
+  settings.sound = el.sound.checked;
+  localStorage.setItem("cwi_sound", settings.sound ? "1" : "0");
+});
+
+el.notify.addEventListener("change", () => {
+  settings.notify = el.notify.checked;
+  localStorage.setItem("cwi_notify", settings.notify ? "1" : "0");
+  if (!settings.notify) return;
+  // The permission prompt requires a user gesture — this click is one. If the
+  // browser didn't actually grant it (blocked earlier, or the prompt got
+  // dismissed without a choice), silently leaving the checkbox "on" would be
+  // misleading — notifications would never fire and nothing would say why.
+  ensureNotifyPermission().then((permission) => {
+    if (permission === "granted") return;
+    settings.notify = false;
+    el.notify.checked = false;
+    localStorage.setItem("cwi_notify", "0");
+    const why = permission === "denied"
+      ? "уведомления заблокированы в настройках сайта в браузере — разрешите их там и включите ещё раз."
+      : "браузер не подтвердил разрешение (диалог закрыли без ответа).";
+    showSystem(`Не удалось включить уведомления: ${why}`);
+  });
 });
 
 el.model.addEventListener("change", () => {
@@ -603,6 +661,7 @@ export async function loadProviders() {
   state.engineNative = !!data.native;
   redecorateChatList();
   refreshComposerState();
+  applyCapsAvailability(); // caps only mean something once we know it's native
   if (!data.native) {
     el.providerSection.hidden = true;
     loadModels(); // CLI mode: Claude models via the OAuth-backed endpoint
@@ -855,6 +914,13 @@ export async function deleteChat(id, title, item) {
   delete state.chatUsage[id];
   // If the open chat was the one deleted, clear the view and persisted state.
   if (state.sessionId === id) {
+    // Deleting a chat kills its keeper server-side; if it was mid-stream, clear
+    // the local streaming state too, or the composer stays locked until reload.
+    if (state.streaming) {
+      state.streaming = false;
+      setStreamingUI(false);
+      setFaviconState("idle");
+    }
     state.sessionId = null;
     state.isNew = true;
     state.current = null;
@@ -974,6 +1040,9 @@ export async function openChat(id, title, icon, item) {
     const msgs = await res.json();
     if (!msgs.length) {
       showSystem("В этом чате пока нет сообщений.");
+      // Empty/placeholder chat (never had a real turn) → start a fresh session on
+      // the first send instead of trying to --resume a non-existent conversation.
+      state.isNew = true;
     }
     // Windowed render: only the last MAX_RENDERED messages are in the DOM; a
     // "load earlier" button reveals older ones. Bounds the DOM for huge chats.
@@ -998,6 +1067,21 @@ export async function openChat(id, title, icon, item) {
 
 const MAX_RENDERED = 60; // messages rendered initially when opening a chat
 const LOAD_CHUNK = 40; // older messages revealed per "load earlier" click
+
+// Render a transcript with windowing: only the last MAX_RENDERED messages go in
+// the DOM, with a "load earlier" button for the rest, and `state.transcript.start`
+// is set so paging works. Used both on open and on reattach (replay_end), so the
+// DOM stays bounded either way (a full re-render on reconnect used to blow it up).
+export function renderTranscriptWindowed(msgs) {
+  resetMessages();
+  const start = Math.max(0, msgs.length - MAX_RENDERED);
+  state.transcript = { msgs, start };
+  const frag = document.createDocumentFragment();
+  renderMsgRange(msgs, start, msgs.length, frag);
+  el.messages.appendChild(frag);
+  updateEarlierButton();
+  scrollToBottom();
+}
 
 export function updateEarlierButton() {
   let btn = document.getElementById("load-earlier");

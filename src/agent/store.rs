@@ -45,22 +45,37 @@ pub fn load(id: &str) -> Stored {
         .unwrap_or_default()
 }
 
-/// Persist a session, best-effort. Failures can't be handled by the caller
-/// (save runs inside the turn loop), but they're logged rather than swallowed
-/// so a broken disk / permissions problem is visible instead of silent data loss.
+/// Persist a session synchronously, best-effort. Used off the hot path (e.g.
+/// `ensure_chat_exists`). Failures are logged, not swallowed.
 pub fn save(id: &str, stored: &Stored) {
-    let dir = dir();
-    if let Err(e) = std::fs::create_dir_all(&dir) {
-        tracing::warn!(session = %id, "native store: create_dir_all {} failed: {e}", dir.display());
-        return;
+    match serde_json::to_string(stored) {
+        Ok(json) => write_json(id, json),
+        Err(e) => tracing::warn!(session = %id, "native store: serialize failed: {e}"),
     }
+}
+
+/// Async variant for the turn loop (`Engine::save`, called every tool step):
+/// serialize on the async thread (cheap CPU) but offload the blocking disk write
+/// to the blocking pool, so the executor isn't stalled on `std::fs::write` each
+/// step. Borrows `stored` — no clone of the (growing) messages array.
+pub async fn save_async(id: &str, stored: &Stored) {
     let json = match serde_json::to_string(stored) {
-        Ok(s) => s,
+        Ok(j) => j,
         Err(e) => {
             tracing::warn!(session = %id, "native store: serialize failed: {e}");
             return;
         }
     };
+    let id = id.to_string();
+    let _ = tokio::task::spawn_blocking(move || write_json(&id, json)).await;
+}
+
+fn write_json(id: &str, json: String) {
+    let dir = dir();
+    if let Err(e) = std::fs::create_dir_all(&dir) {
+        tracing::warn!(session = %id, "native store: create_dir_all {} failed: {e}", dir.display());
+        return;
+    }
     let p = path(id);
     if let Err(e) = std::fs::write(&p, json) {
         tracing::warn!(session = %id, "native store: write {} failed: {e}", p.display());

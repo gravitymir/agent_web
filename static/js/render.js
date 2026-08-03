@@ -1,7 +1,9 @@
 import { state, el, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { hideBadge, showBadgeSoon, loadChatList } from './ui.js';
+import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings } from './ui.js';
 import { setFaviconState } from '../favicon.js';
+import { playCompletionChime } from '../sound.js';
+import { notifyTurnComplete } from '../notify.js';
 // ---------------------------------------------------------------------------
 // Rendering
 // ---------------------------------------------------------------------------
@@ -46,31 +48,60 @@ export function ensureAssistant() {
   bodyEl.appendChild(answerEl);
   const statusEl = document.createElement("div");
   statusEl.className = "stream-status";
+  const statusDetailEl = document.createElement("div");
+  statusDetailEl.className = "status-detail";
+  statusDetailEl.hidden = true;
   bodyEl.appendChild(statusEl);
-  state.current = {
-    msgEl, bodyEl, answerEl, statusEl,
-    textEl: null, textRaw: "", thinkEl: null,
+  bodyEl.appendChild(statusDetailEl);
+  const cur = {
+    msgEl, bodyEl, answerEl, statusEl, statusDetailEl,
+    textEl: null, textRaw: "",
+    thinkStart: null, thinkEnd: null, thinkMs: null, thinkTokens: 0, thinkChars: 0, thinkRaw: "",
     startTime: Date.now(), tokens: 0, runningTasks: 0, status: "печатает…",
   };
+  state.current = cur;
+  // Toggle the reasoning detail panel; only active once there's a reasoning
+  // phase to show (the "has-detail" class, set in `updateStatus`/
+  // `finalizeStatusLine`, gates this so clicking an ordinary line is a no-op).
+  // Closes over THIS turn's own `cur` — not `state.current` — so a finalized,
+  // historical message's line still expands its own data after later turns
+  // have moved `state.current` on.
+  statusEl.addEventListener("click", () => {
+    if (!statusEl.classList.contains("has-detail")) return;
+    const opening = statusDetailEl.hidden;
+    statusDetailEl.hidden = !opening;
+    statusEl.classList.toggle("expanded", opening);
+    if (opening) renderStatusDetail(cur);
+  });
   state.streaming = true;
   setStreamingUI(true);
   setFaviconState("thinking");
   if (state.statusTimer) clearInterval(state.statusTimer);
   state.statusTimer = setInterval(updateStatus, 1000); // live elapsed timer
   updateStatus();
+  // Reveal the new bubble immediately — otherwise it lands behind the fixed
+  // composer and only scrolls into view once later content forces a re-scroll.
+  scrollToBottomIfPinned();
   return state.current;
 }
 
 // Live status line during generation: elapsed · tokens · running tasks · phrase.
+// Gains a trailing chevron once a reasoning phase starts (see `ensureThinking`)
+// — expanding it reveals the duration/token estimate (and raw text, native
+// engine only) that used to live in a separate always-visible "thinking" box.
 export function updateStatus() {
   const c = state.current;
   if (!c) return;
-  if (c.thinkEl && !c.thinkEnd) renderThinkSummary(c); // tick the reasoning clock
   if (!c.statusEl) return;
   const parts = [fmtElapsed(Date.now() - c.startTime), `${c.tokens} токенов`];
   if (c.runningTasks > 0) parts.push(`${c.runningTasks} ${c.runningTasks === 1 ? "задача" : "задач"}`);
   parts.push(c.status);
-  c.statusEl.innerHTML = `<span class="pulse"></span><span>${escapeHtml(parts.join(" · "))}</span>`;
+  const hasDetail = c.thinkStart != null;
+  c.statusEl.classList.toggle("has-detail", hasDetail);
+  c.statusEl.innerHTML =
+    `<span class="pulse"></span><span class="status-text">${escapeHtml(parts.join(" · "))}</span>` +
+    (hasDetail ? `<span class="status-chevron">${CHEVRON_SVG}</span>` : "");
+  if (hasDetail && c.statusDetailEl && !c.statusDetailEl.hidden) renderStatusDetail(c);
 }
 export function fmtElapsed(ms) {
   const s = Math.floor(ms / 1000);
@@ -78,10 +109,6 @@ export function fmtElapsed(ms) {
 }
 
 export function appendText(cur, text) {
-  // Measure before changing the DOM.  Measuring afterwards means even a
-  // reader who just started scrolling up can be mistaken for "near bottom"
-  // while a small streamed chunk is being appended.
-  const wasPinned = isScrolledToBottom();
   stopThinkingClock(cur); // the answer is starting → stop counting reasoning time
   if (!cur.textEl) {
     cur.textEl = document.createElement("div");
@@ -91,7 +118,9 @@ export function appendText(cur, text) {
   }
   cur.textRaw += text;
   cur.textEl.innerHTML = renderMarkdown(cur.textRaw);
-  scrollToBottomIfPinned(wasPinned);
+  // Follow the stream while the user is near the bottom (state.followBottom is
+  // driven by their scrolling, so appends don't skew it like a post-hoc measure).
+  scrollToBottomIfPinned();
 }
 
 // Chevron icon (points down); rotated 180° via CSS when expanded.
@@ -99,8 +128,7 @@ export const CHEVRON_SVG =
   '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m6 9 6 6 6-6"/></svg>';
 
 // Make `contentEl` collapse/expand (animated) via `chevronEl`. `rootEl` carries
-// the `collapsed` state class (CSS controls the anchor: answers keep their last
-// lines, the reasoning panel keeps its first lines).
+// the `collapsed` state class (CSS anchors a collapsed answer to its last lines).
 export function makeCollapsible(rootEl, contentEl, chevronEl) {
   rootEl.classList.add("cfold");
   contentEl.classList.add("fold-content");
@@ -149,82 +177,46 @@ export function makeCollapsible(rootEl, contentEl, chevronEl) {
   return { collapse, expand };
 }
 
-// Per-turn reasoning block: a one-line summary (clock · tokens · status) that
-// expands to the reasoning text when the engine delivers it (native mode; the
-// Claude Code CLI redacts it, so the block stays one-line there).
+// Mark the start of a reasoning phase. No dedicated DOM — folded into the
+// status line's expandable detail (see `renderStatusDetail`): the Claude Code
+// CLI never delivers actual reasoning text (only a token estimate), so a
+// separate always-visible panel had nothing to show but a clock there anyway.
 export function ensureThinking(cur) {
-  if (cur.thinkEl) return cur.thinkEl;
-  const panel = document.createElement("div");
-  panel.className = "thinking collapsed"; // reasoning text hidden until expanded
-
-  const head = document.createElement("div");
-  head.className = "think-head";
-  const label = document.createElement("span");
-  label.className = "think-label";
-  const chev = document.createElement("span");
-  chev.className = "think-chevron";
-  chev.innerHTML = CHEVRON_SVG;
-  head.appendChild(label);
-  head.appendChild(chev);
-
-  const content = document.createElement("div");
-  content.className = "think-content";
-
-  panel.appendChild(head);
-  panel.appendChild(content);
-  // Reasoning block sits above the answer.
-  cur.bodyEl.insertBefore(panel, cur.bodyEl.firstChild);
-
-  head.addEventListener("click", () => panel.classList.toggle("collapsed"));
-
-  cur.thinkEl = panel;
-  cur.thinkSummary = label;
-  cur.thinkContentEl = content;
-  cur.thinkRaw = "";
-  cur.thinkTokens = 0;
+  if (cur.thinkStart != null) return;
   cur.thinkStart = Date.now();
   cur.thinkEnd = null; // set when the answer starts → the clock freezes
-  renderThinkSummary(cur);
-  return cur.thinkEl;
+  updateStatus(); // reveal the detail chevron immediately, not on the next tick
 }
 
-// Append reasoning text to the (collapsed) block and enable expansion.
+// Accumulate reasoning text for the detail panel (native engine only — the
+// CLI's estimate-only `thinking_delta` never sets this).
 export function appendThinkingText(cur, text) {
   cur.thinkRaw = (cur.thinkRaw || "") + text;
-  if (cur.thinkContentEl) {
-    cur.thinkContentEl.textContent = cur.thinkRaw;
-    cur.thinkEl.classList.add("has-text");
-  }
+  if (cur.statusDetailEl && !cur.statusDetailEl.hidden) renderStatusDetail(cur);
 }
 
-// One line: a ticking clock + the running token estimate (the reasoning text
-// itself is not delivered in API/print mode). No "Размышления" label.
-export function renderThinkSummary(cur) {
-  if (!cur.thinkSummary) return;
+// The status line's expandable detail: reasoning duration + token estimate,
+// plus the raw text when the engine delivers it (native mode only).
+function renderStatusDetail(cur) {
+  if (!cur.statusDetailEl || cur.thinkStart == null) return;
   // Prefer the authoritative duration from the engine (survives replay).
   const ms = cur.thinkMs != null ? cur.thinkMs : (cur.thinkEnd || Date.now()) - cur.thinkStart;
-  const t = fmtElapsed(ms);
-  const textParts = [t];
-  if (cur.thinkTokens) textParts.push(`~${cur.thinkTokens} токенов`);
-  // While still thinking, a reassuring status that progresses with elapsed time.
-  if (!cur.thinkEnd) {
-    const secs = (Date.now() - cur.thinkStart) / 1000;
-    textParts.push(secs < 4 ? "размышляет…" : secs < 9 ? "ещё немного…" : "почти готово…");
-  }
-  cur.thinkSummary.textContent = textParts.join(" · ");
+  const parts = [`Рассуждения: ${fmtElapsed(ms)}`];
+  if (cur.thinkTokens) parts.push(`~${cur.thinkTokens} токенов`);
+  let html = `<div class="status-detail-line">${escapeHtml(parts.join(" · "))}</div>`;
+  if (cur.thinkRaw) html += `<div class="status-detail-text">${escapeHtml(cur.thinkRaw)}</div>`;
+  cur.statusDetailEl.innerHTML = html;
 }
 
 // Freeze the reasoning clock (called when the answer begins or the turn ends).
 export function stopThinkingClock(cur) {
-  if (cur && cur.thinkEl && !cur.thinkEnd) {
+  if (cur && cur.thinkStart != null && cur.thinkEnd == null) {
     cur.thinkEnd = Date.now();
-    renderThinkSummary(cur);
   }
 }
 
 export function setThinkingTokens(cur, n) {
   if (n > cur.thinkTokens) cur.thinkTokens = n;
-  renderThinkSummary(cur);
 }
 
 // Render every tool_use block of an assistant message as a card showing the
@@ -332,7 +324,6 @@ export function renderToolCard(cur, name, input) {
   card.appendChild(head);
   card.appendChild(body);
   cur.answerEl.appendChild(card);
-  const wasBottom = isScrolledToBottom();
 
   renderToolBody({ name, meta, body }, input || {});
 
@@ -346,9 +337,10 @@ export function renderToolCard(cur, name, input) {
     head.appendChild(chev);
     head.addEventListener("click", () => card.classList.toggle("collapsed"));
   }
-  // Scroll only if the user was already pinned to the bottom before the card
-  // was rendered (matching streaming text behaviour).
-  if (wasBottom) scrollToBottom(); else scrollToBottomIfPinned();
+  // Same single source of truth as the rest (state.followBottom via
+  // scrollToBottomIfPinned) — no separate post-append measurement that could
+  // disagree if the user is scrolling away just as the card appears.
+  scrollToBottomIfPinned();
 }
 
 export function renderToolBody(t, input) {
@@ -406,6 +398,8 @@ export function renderToolBody(t, input) {
   }
 }
 
+// Stash the `result` event's final stats; `finalizeTurn` (called right after,
+// see ws.js) folds them into the status line instead of a separate element.
 export function addMeta(evt) {
   if (!state.current) return;
   const parts = [];
@@ -414,11 +408,37 @@ export function addMeta(evt) {
   const outTokens = evt.usage && evt.usage.output_tokens;
   if (outTokens != null) parts.push(`${fmtTokens(outTokens)} токенов`);
   if (evt.num_turns != null) parts.push(`${evt.num_turns} turns`);
-  if (!parts.length) return;
-  const meta = document.createElement("div");
-  meta.className = "meta-line";
-  meta.textContent = parts.join(" · ");
-  state.current.bodyEl.appendChild(meta);
+  state.current.finalMetaParts = parts.length ? parts : null;
+}
+
+// Turn the live status line into a persistent, collapsed summary once the
+// turn ends: no more pulse, final stats instead of the ticking elapsed/tokens
+// (falling back to those if the turn never got a `result` — e.g. interrupted
+// or errored). The reasoning chevron (if any) stays clickable afterward too.
+function finalizeStatusLine(cur) {
+  if (!cur.statusEl) return;
+  const parts = cur.finalMetaParts || [fmtElapsed(Date.now() - cur.startTime), `${cur.tokens} токенов`];
+  const hasDetail = cur.thinkStart != null;
+  cur.statusEl.classList.add("done");
+  cur.statusEl.classList.toggle("has-detail", hasDetail);
+  cur.statusEl.innerHTML =
+    `<span class="status-text">${escapeHtml(parts.join(" · "))}</span>` +
+    (hasDetail ? `<span class="status-chevron">${CHEVRON_SVG}</span>` : "");
+  if (hasDetail) renderStatusDetail(cur); // keep it fresh in case it's already open
+}
+
+// Small corner badge flagging how the turn ended, at a glance, when scanning
+// a long chat — currently just "the answer ends with a question" (the agent
+// is waiting on you), but built to grow (see the "чего ещё" list discussed
+// with the user: interrupted, errored, etc. would add more `msg-flag-*` cases).
+function flagTurnEnd(cur) {
+  const text = (cur.textRaw || "").trim();
+  if (!/\?\s*$/.test(text)) return;
+  const flag = document.createElement("span");
+  flag.className = "msg-flag msg-flag-question";
+  flag.title = "Ответ заканчивается вопросом";
+  flag.innerHTML = iIcon("help", 13);
+  cur.msgEl.appendChild(flag);
 }
 
 export function finalizeTurn() {
@@ -426,11 +446,20 @@ export function finalizeTurn() {
     clearInterval(state.statusTimer);
     state.statusTimer = null;
   }
+  // Captured before `state.current` is nulled below, so the notification (sent
+  // after) can show a snippet of what the answer actually said.
+  const answerPreview = state.current ? state.current.textRaw || "" : "";
   if (state.current) {
     stopThinkingClock(state.current); // freeze the reasoning clock at turn end
-    if (state.current.textEl) state.current.textEl.classList.remove("cursor");
+    // A turn with text interleaved between tool calls creates a fresh `textEl`
+    // per segment (content_block_start resets it), each stamped with "cursor" —
+    // clearing only the last one leaves every earlier segment blinking forever.
+    if (state.current.answerEl) {
+      state.current.answerEl.querySelectorAll(".cursor").forEach((elm) => elm.classList.remove("cursor"));
+    }
     state.current.msgEl.classList.remove("streaming");
-    if (state.current.statusEl) state.current.statusEl.remove();
+    finalizeStatusLine(state.current);
+    flagTurnEnd(state.current);
     if (state.current.answerEl) addFoldIfLong(state.current.answerEl);
     // Fold this turn's tokens into the chat total so the badge doesn't dip
     // before the authoritative refresh lands.
@@ -447,6 +476,12 @@ export function finalizeTurn() {
   setStreamingUI(false);
   updateUsageBadge();
   setFaviconState("idle");
+  // Reattaching after a reload replays past turns through this same function —
+  // only a turn that just finished live should chime/notify.
+  if (!state.replayMode) {
+    if (settings.sound) playCompletionChime();
+    if (settings.notify) notifyTurnComplete((el.title.textContent || "").trim(), answerPreview);
+  }
   loadChatList().then(updateUsageBadge); // authoritative token total from the .jsonl
   loadUsage(); // refresh subscription %s at turn end (cached ~20s server-side)
 }
@@ -497,6 +532,15 @@ export function capMessages() {
   if (nodes.length <= LIVE_CAP) return;
   const remove = nodes.length - LIVE_CAP;
   for (let i = 0; i < remove; i++) nodes[i].remove();
+  // Evicting the top of the DOM must advance the windowed-transcript cursor,
+  // otherwise "load earlier" desyncs (re-inserts a gap) after history was paged in.
+  if (state.transcript) {
+    state.transcript.start = Math.min(
+      state.transcript.msgs.length,
+      state.transcript.start + remove
+    );
+    updateEarlierButton();
+  }
 }
 
 // Some entries stored as "user" are actions, not messages (e.g. an interrupt).
@@ -571,20 +615,17 @@ export function resetMessages() {
 
 export function scrollToBottom() {
   el.messages.scrollTop = el.messages.scrollHeight;
+  // Set the flag here rather than waiting for the browser's (async) `scroll`
+  // event, so the button hides on the same tick instead of one frame later.
+  state.followBottom = true;
   scheduleScrollbar();
   updateScrollToBottomButton();
 }
 
-// Only an actually bottom-pinned view follows streamed output.  A tiny
-// fractional-pixel allowance prevents rounding from breaking the follow mode.
-const SCROLL_BOTTOM_TOLERANCE = 2;
-// Distance from the bottom that hides the "scroll to bottom" button.
-const SCROLL_BOTTOM_HIDDEN_ZONE = 180;
-
-export function isScrolledToBottom() {
-  const m = el.messages;
-  return m.scrollHeight - m.clientHeight - m.scrollTop <= SCROLL_BOTTOM_TOLERANCE;
-}
+// While the user is within this many px of the bottom we keep following new
+// output; scroll up past it and auto-follow turns off so they can read earlier
+// messages. `state.followBottom` is maintained by the scroll listener below.
+const FOLLOW_THRESHOLD = 80;
 
 export function distanceFromBottom() {
   const m = el.messages;
@@ -594,7 +635,7 @@ export function distanceFromBottom() {
 // Keep following only when the caller observed the view at the exact bottom
 // before its DOM update. Once the user scrolls up, no streamed update may pull
 // them down; clicking the arrow (or returning to the bottom) re-enables it.
-export function scrollToBottomIfPinned(wasPinned = isScrolledToBottom()) {
+export function scrollToBottomIfPinned(wasPinned = state.followBottom) {
   if (wasPinned) {
     scrollToBottom();
   } else {
@@ -603,20 +644,16 @@ export function scrollToBottomIfPinned(wasPinned = isScrolledToBottom()) {
   updateScrollToBottomButton();
 }
 
-// Show the "scroll to bottom" button only once the user has scrolled up a
-// meaningful amount. The 180px zone intentionally remains passive: it must
-// never force a reader back to the latest streamed line.
+// Mirror `state.followBottom` exactly: the button is the visual counterpart of
+// auto-follow, so it must appear the instant auto-scroll turns off and vanish
+// the instant it turns back on (same FOLLOW_THRESHOLD, no separate zone) —
+// otherwise there'd be a dead band where follow is off but the button is still
+// hidden, leaving the user with no cue that scrolling stopped following.
 export function updateScrollToBottomButton() {
   const btn = el.scrollToBottomBtn;
   if (!btn) return;
-  const dist = distanceFromBottom();
-  const canScroll = dist > 0;
-  const farEnough = dist > SCROLL_BOTTOM_HIDDEN_ZONE;
-  if (!canScroll || !farEnough) {
-    btn.hidden = true;
-  } else {
-    btn.hidden = false;
-  }
+  const canScroll = distanceFromBottom() > 0;
+  btn.hidden = state.followBottom || !canScroll;
 }
 
 // --- Custom scrollbar ---------------------------------------------------------
@@ -648,7 +685,14 @@ export function scheduleScrollbar() {
   });
 }
 
-el.messages.addEventListener("scroll", () => { updateScrollbar(); updateScrollToBottomButton(); }, { passive: true });
+el.messages.addEventListener("scroll", () => {
+  // The user's scroll position is the single source of truth for follow mode:
+  // within FOLLOW_THRESHOLD of the bottom → keep following; scrolled up → stop.
+  // (A programmatic scrollToBottom lands at ~0 distance, so it keeps follow on.)
+  state.followBottom = distanceFromBottom() <= FOLLOW_THRESHOLD;
+  updateScrollbar();
+  updateScrollToBottomButton();
+}, { passive: true });
 window.addEventListener("resize", () => { updateScrollbar(); updateScrollToBottomButton(); });
 el.scrollToBottomBtn?.addEventListener("click", () => {
   el.scrollToBottomBtn.blur();
@@ -760,11 +804,9 @@ function limRow(label, o, compact) {
   </div>`;
 }
 
-function planLine(g) {
-  return g.plan
-    ? `<div class="usage-plan">${escapeHtml(String(g.plan).toUpperCase())}${
-        g.email ? " · " + escapeHtml(g.email) : ""}</div>`
-    : "";
+function subscriptionHeading(g) {
+  const plan = g.plan ? " " + escapeHtml(String(g.plan).toUpperCase()) : "";
+  return `Подписка${plan}`;
 }
 
 // Full n with thousands separators, e.g. 1 234 567.
@@ -783,8 +825,7 @@ export function renderUsageDetail() {
   const g = state.usage;
   const limits = g
     ? `<div class="usage-section usage-limits">
-         <div class="usage-section-head">${iIcon("target", 15, "usage-ic")}<span>Лимиты подписки</span></div>
-         ${planLine(g)}
+         <div class="usage-section-head">${iIcon("target", 15, "usage-ic")}<span>${subscriptionHeading(g)}</span></div>
          ${limRow("Сессия (5 ч)", g.session, false)}
          ${limRow("Неделя", g.week, false)}
          ${limRow("Неделя (Fable)", g.fable, false)}

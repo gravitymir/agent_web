@@ -173,6 +173,15 @@ async fn handle_client(
 
     match client_msg {
         ClientMsg::Send { session_id, text, model, provider, new_chat, images, caps } => {
+            // Validate client-supplied identifiers before they become file paths or
+            // CLI arguments (path traversal / `cmd.exe` injection).
+            if let Some(id) = session_id.as_deref() {
+                if !crate::ids::is_valid_session_id(id) {
+                    let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "invalid session id" })).await;
+                    return true;
+                }
+            }
+            let model = model.filter(|m| crate::ids::is_valid_model(m));
             let sid = session_id.clone();
             // Freeze guard: a chat that lives only in the *other* engine's store is
             // read-only until the user switches CWI_ENGINE. Viewing is a separate
@@ -184,7 +193,14 @@ async fn handle_client(
                     return true;
                 }
             }
-            if keeper.is_none() {
+            // A cached keeper can be stale: `interrupt()` kills the CLI process
+            // (see `SessionKeeper::interrupt`), which marks it `finished` without
+            // ever clearing this connection's reference to it. Left unchecked, the
+            // next `send_user_message` below would go to a keeper whose actor task
+            // already exited — the channel send silently no-ops (closed receiver),
+            // so the message vanishes with no error and no server-side trace.
+            if keeper.as_ref().map_or(true, |k| k.is_finished()) {
+                *keeper = None;
                 let resume = session_id.is_some() && !new_chat;
                 match state.sessions.get_or_spawn(session_id, resume, model, provider) {
                     Ok(k) => {

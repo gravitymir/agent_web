@@ -40,6 +40,20 @@ pub fn spawn_claude(
         None => (false, uuid::Uuid::new_v4().to_string()),
     };
 
+    // A chat can exist only as the placeholder `.jsonl` that `ensure_chat_exists`
+    // writes so a named new chat shows in the sidebar before its first turn — with
+    // no real conversation yet. That stub satisfies NEITHER launch path: `--resume`
+    // fails ("No conversation found with session ID") and `--session-id` fails
+    // ("Session ID is already in use"). So: only `--resume` a chat that has a real
+    // conversation, and for the start path delete a placeholder-only stub first so
+    // `--session-id` gets a clean slate. A real transcript is never deleted.
+    let session_jsonl = config.session_dir().join(format!("{id}.jsonl"));
+    let has_conversation = jsonl_has_conversation(&session_jsonl);
+    let resume = resume && has_conversation;
+    if !resume && !has_conversation && session_jsonl.exists() {
+        let _ = std::fs::remove_file(&session_jsonl);
+    }
+
     let mut cmd = base_command(&config.claude_bin);
     cmd.current_dir(config.workspace_abs());
 
@@ -91,6 +105,21 @@ pub fn spawn_claude(
         stdin,
         stdout,
         session_id: id,
+    })
+}
+
+/// True if the session `.jsonl` holds a real conversation (a `user`/`assistant`
+/// turn), as opposed to just the placeholder line `ensure_chat_exists` writes.
+/// A missing/unreadable file counts as "no conversation" (→ start fresh).
+fn jsonl_has_conversation(path: &std::path::Path) -> bool {
+    let Ok(content) = std::fs::read_to_string(path) else {
+        return false;
+    };
+    content.lines().any(|line| {
+        serde_json::from_str::<serde_json::Value>(line)
+            .ok()
+            .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
+            .is_some_and(|t| t == "user" || t == "assistant")
     })
 }
 

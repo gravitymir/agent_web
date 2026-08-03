@@ -71,8 +71,8 @@ impl Engine {
         }
     }
 
-    fn save(&self) {
-        store::save(&self.session_id, &self.stored);
+    async fn save(&self) {
+        store::save_async(&self.session_id, &self.stored).await;
     }
 
     fn user_message(&self, text: &str, images: &[ImageData]) -> Value {
@@ -268,7 +268,7 @@ impl Engine {
             self.stored
                 .messages
                 .push(json!({ "role": "assistant", "content": content }));
-            self.save();
+            self.save().await;
 
             // Execute whenever the model emitted tool_use blocks — do NOT gate on
             // stop_reason (providers like Kimi report it differently). Every
@@ -308,7 +308,7 @@ impl Engine {
             self.stored
                 .messages
                 .push(json!({ "role": "user", "content": results }));
-            self.save();
+            self.save().await;
         }
 
         emit.line(json!({

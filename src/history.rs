@@ -131,7 +131,11 @@ fn list_native_chats(native_dir: &Path) -> Vec<ChatSummary> {
 }
 
 fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
-    let content = std::fs::read_to_string(path).ok()?;
+    // Lossy decode so a chat with a bit of invalid UTF-8 still lists (partial
+    // recovery) instead of silently vanishing from the sidebar.
+    let content = std::fs::read(path)
+        .ok()
+        .map(|b| String::from_utf8_lossy(&b).into_owned())?;
 
     let mut title: Option<String> = None;
     let mut last_ts: Option<String> = None;
@@ -189,7 +193,7 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
     }
 
     Some(ChatSummary {
-        title: title.unwrap_or_else(|| format!("Chat {}", &id[..id.len().min(8)])),
+        title: title.unwrap_or_else(|| format!("Chat {}", id.chars().take(8).collect::<String>())),
         custom_title: false,
         icon: None,
         id,
@@ -230,7 +234,7 @@ fn summarize_native_file(path: &Path, id: String) -> Option<ChatSummary> {
     };
 
     Some(ChatSummary {
-        title: title.unwrap_or_else(|| format!("Chat {}", &id[..id.len().min(8)])),
+        title: title.unwrap_or_else(|| format!("Chat {}", id.chars().take(8).collect::<String>())),
         custom_title: false,
         icon: None,
         id,
@@ -261,8 +265,9 @@ pub fn load_chat(session_dir: &Path, native_dir: Option<&Path>, id: &str) -> Vec
 }
 
 fn load_jsonl_chat(path: &Path) -> Vec<ChatMessage> {
-    let content = match std::fs::read_to_string(path) {
-        Ok(c) => c,
+    // Lossy decode so a bit of invalid UTF-8 doesn't wipe the whole transcript.
+    let content = match std::fs::read(path) {
+        Ok(b) => String::from_utf8_lossy(&b).into_owned(),
         Err(_) => return Vec::new(),
     };
 

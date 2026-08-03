@@ -135,8 +135,11 @@ impl SessionManager {
     }
 
     /// Get the live keeper for this session, spawning one if there isn't one (or
-    /// the previous one finished). The (potentially slow) spawn happens WITHOUT
-    /// holding the sessions lock, so other sessions aren't blocked.
+    /// the previous one finished). The whole check-and-spawn runs under one lock,
+    /// so two concurrent requests for the same `session_id` can't both spawn a
+    /// real `claude --resume` process. Building a keeper is synchronous — the
+    /// process spawn is a quick OS call and the actor runs on a spawned task — so
+    /// the lock is held only briefly and doesn't block across an await.
     pub fn get_or_spawn(
         &self,
         session_id: Option<String>,
@@ -144,9 +147,10 @@ impl SessionManager {
         model: Option<String>,
         provider: Option<String>,
     ) -> Result<Arc<SessionKeeper>> {
-        // Fast path: return an existing live keeper (brief lock, no spawn).
-        if let Some(id) = &session_id {
-            let map = self.sessions.lock().unwrap();
+        let mut map = self.sessions.lock().unwrap();
+
+        // Reuse a live keeper for this id if one exists.
+        if let Some(id) = session_id.as_deref() {
             if let Some(k) = map.get(id) {
                 if !k.is_finished() {
                     return Ok(k.clone());
@@ -154,23 +158,15 @@ impl SessionManager {
             }
         }
 
-        // Build the keeper outside the lock.
+        // Otherwise spawn one — still under the lock, so a concurrent request for
+        // the same id waits here and then takes this keeper instead of spawning a
+        // second process.
         let keeper = if self.config.native_engine {
             self.build_native_keeper(session_id, model, provider)
         } else {
             self.build_cli_keeper(session_id, resume, model)?
         };
-        let id = keeper.session_id.clone();
-
-        // Insert under the lock; if someone raced us to the same id, use theirs
-        // and drop ours (its actor stops when the keeper's cmd channel closes).
-        let mut map = self.sessions.lock().unwrap();
-        if let Some(existing) = map.get(&id) {
-            if !existing.is_finished() {
-                return Ok(existing.clone());
-            }
-        }
-        map.insert(id, keeper.clone());
+        map.insert(keeper.session_id.clone(), keeper.clone());
         Ok(keeper)
     }
 
@@ -258,6 +254,15 @@ impl SessionManager {
         let keeper = self.sessions.lock().unwrap().remove(id);
         if let Some(k) = keeper {
             k.interrupt().await;
+            // Wait (bounded) for the actor to actually kill the process before the
+            // caller deletes the transcript, so we don't race a still-writing
+            // `claude`. `finished` flips only after the child is reaped.
+            for _ in 0..30 {
+                if k.is_finished() {
+                    break;
+                }
+                tokio::time::sleep(Duration::from_millis(20)).await;
+            }
         }
     }
 
@@ -348,7 +353,7 @@ async fn run_actor(
                     let _ = stdin.flush().await;
                 }
                 Some(Cmd::Interrupt) => {
-                    let _ = child.start_kill();
+                    kill_process_tree(&mut child).await;
                 }
                 None => break, // no more handles referencing this keeper
             },
@@ -368,6 +373,24 @@ async fn run_actor(
     }
 
     finished.store(true, Ordering::Release);
+    kill_process_tree(&mut child).await;
+}
+
+/// Kill the Claude child **and its descendants**. On Windows the child is a
+/// `cmd /C claude.cmd` wrapper, so `start_kill()` alone reaps only `cmd` and
+/// orphans the real `claude` (node) process — the turn would keep running and the
+/// Stop button would appear to do nothing. `taskkill /T` kills the whole tree.
+/// On Unix the child *is* `claude`, so `start_kill()` suffices.
+async fn kill_process_tree(child: &mut tokio::process::Child) {
+    #[cfg(windows)]
+    if let Some(pid) = child.id() {
+        let _ = tokio::process::Command::new("taskkill")
+            .args(["/T", "/F", "/PID", &pid.to_string()])
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .status()
+            .await;
+    }
     let _ = child.start_kill();
 }
 

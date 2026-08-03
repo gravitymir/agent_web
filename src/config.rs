@@ -65,8 +65,22 @@ impl Config {
     /// Absolute, normalized workspace path used both to run Claude and to
     /// locate its session directory.
     pub fn workspace_abs(&self) -> PathBuf {
-        std::fs::canonicalize(&self.workspace_dir)
-            .unwrap_or_else(|_| self.workspace_dir.clone())
+        match std::fs::canonicalize(&self.workspace_dir) {
+            Ok(p) => p,
+            Err(e) => {
+                // Falling back to the raw path silently can point `session_dir()`
+                // at the wrong folder. Warn once (this is called per request, so
+                // don't spam) and carry on with the non-canonical path.
+                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
+                WARN_ONCE.call_once(|| {
+                    tracing::warn!(
+                        "canonicalize({}) failed: {e}; using the path as-is",
+                        self.workspace_dir.display()
+                    );
+                });
+                self.workspace_dir.clone()
+            }
+        }
     }
 
     /// The `~/.claude/projects/<encoded>` directory holding this workspace's

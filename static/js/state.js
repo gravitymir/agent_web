@@ -19,6 +19,8 @@ export const state = {
   engineNative: null, // active engine: true=native, false=cli, null=unknown yet
   chatEngine: {},     // session_id -> "cli" | "native" (which store owns the chat)
   usage: null,        // subscription limits from /api/usage (or null if N/A)
+  followBottom: true, // true while the user is reading the tail (near the bottom);
+                      // streamed output pulls the view down only while this holds
 };
 
 // A chat is "frozen" (read-only) when its owning engine differs from the active
@@ -75,6 +77,8 @@ export const el = {
   settingsOverlay: document.getElementById("settings-overlay"),
   fontSeg: document.getElementById("fontsize-seg"),
   autosend: document.getElementById("autosend-check"),
+  sound: document.getElementById("sound-check"),
+  notify: document.getElementById("notify-check"),
   // modal
   modalOverlay: document.getElementById("modal-overlay"),
   iconGrid: document.getElementById("icon-grid"),
@@ -100,10 +104,12 @@ export const ICONS = [
 // Minimal Markdown renderer (self-contained, HTML-escaping)
 // ---------------------------------------------------------------------------
 export function escapeHtml(s) {
-  return s
+  return String(s)
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
-    .replace(/>/g, "&gt;");
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&#39;");
 }
 
 // ---------------------------------------------------------------------------
@@ -207,12 +213,10 @@ export function renderMarkdown(src) {
   html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
 
   // Links [text](url) — only http/https are linkified (so `javascript:` etc.
-  // never become anchors). The URL still needs its quotes neutralized: escapeHtml
-  // above handles <>& but not `"`/`'`, and a quote in the URL would otherwise
-  // break out of the href attribute (attribute-injection XSS).
+  // never become anchors). `escapeHtml(src)` above already neutralized <>&"' in
+  // the whole string, so the captured URL can't break out of the href attribute.
   html = html.replace(/\[([^\]]+)\]\((https?:\/\/[^\s)]+)\)/g, (m, text, url) => {
-    const safe = url.replace(/"/g, "&quot;").replace(/'/g, "&#39;");
-    return `<a href="${safe}" target="_blank" rel="noopener">${text}</a>`;
+    return `<a href="${url}" target="_blank" rel="noopener">${text}</a>`;
   });
 
   // Block-level: headings, lists, paragraphs

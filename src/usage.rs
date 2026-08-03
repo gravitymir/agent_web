@@ -31,7 +31,9 @@ pub async fn usage_json(config: &Config) -> Value {
         return json!({ "available": false, "reason": "native" });
     }
     {
-        let guard = CACHE.lock().unwrap();
+        // Recover from a poisoned lock instead of propagating a panic — a stale
+        // cache is harmless and better than taking down every /api/usage request.
+        let guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((t, v)) = guard.as_ref() {
             if t.elapsed() < TTL {
                 return v.clone();
@@ -39,7 +41,7 @@ pub async fn usage_json(config: &Config) -> Value {
         }
     }
     let v = fetch(config).await;
-    *CACHE.lock().unwrap() = Some((Instant::now(), v.clone()));
+    *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
     v
 }
 

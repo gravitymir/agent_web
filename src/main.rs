@@ -2,6 +2,7 @@ mod agent;
 mod claude;
 mod config;
 mod history;
+mod ids;
 mod models;
 mod session;
 mod titles;
@@ -247,6 +248,10 @@ async fn set_meta(
     Path(id): Path<String>,
     Json(body): Json<SetMeta>,
 ) -> impl IntoResponse {
+    // Reject non-UUID ids before they become a file path (`ensure_chat_exists`).
+    if !ids::is_valid_session_id(&id) {
+        return StatusCode::BAD_REQUEST;
+    }
     match state.meta.lock() {
         Ok(mut meta) => {
             // Creating a new chat from the frontend saves its title/icon before
@@ -264,13 +269,17 @@ async fn set_meta(
 async fn load_chat(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Reject non-UUID ids before they become a file path (arbitrary file read).
+    if !ids::is_valid_session_id(&id) {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
     // Load from whichever store holds the chat, regardless of active engine —
     // frozen chats are still fully readable.
     let native_dir = agent::store::dir();
     let messages = history::load_chat(
         &state.config.session_dir(), Some(&native_dir), &id);
-    Json(messages)
+    Json(messages).into_response()
 }
 
 /// Delete a chat: kill any live keeper, then remove its transcript
@@ -280,8 +289,8 @@ async fn delete_chat(
     State(state): State<Arc<AppState>>,
     Path(id): Path<String>,
 ) -> impl IntoResponse {
-    // Guard against path traversal — a chat id is a bare session id, never a path.
-    if id.is_empty() || id.contains(['/', '\\']) || id.contains("..") {
+    // A chat id is always a UUID; reject anything else (path traversal / injection).
+    if !ids::is_valid_session_id(&id) {
         return StatusCode::BAD_REQUEST;
     }
 
@@ -316,12 +325,47 @@ fn remove_if_present(path: &std::path::Path, id: &str) {
 
 async fn ws_upgrade(
     ws: WebSocketUpgrade,
+    headers: axum::http::HeaderMap,
     State(state): State<Arc<AppState>>,
-) -> impl IntoResponse {
+) -> axum::response::Response {
+    // Reject cross-site WebSocket hijacking: a page on evil.com sends its own
+    // Origin, so refuse any Origin that isn't a loopback host. (A browser always
+    // sends Origin on a WS handshake; non-browser tools may omit it, and they
+    // can't be driven cross-site, so a missing Origin is allowed.)
+    if !origin_is_local(&headers) {
+        tracing::warn!("ws: rejected cross-origin upgrade");
+        return StatusCode::FORBIDDEN.into_response();
+    }
     // Cap inbound frame/message size so a client can't force a huge allocation.
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
         .max_frame_size(MAX_WS_MESSAGE_BYTES)
         .on_upgrade(move |socket| ws::handle_socket(socket, state))
+        .into_response()
+}
+
+/// True if the request has no `Origin` (non-browser client) or an `Origin` that
+/// is **same-origin** with the `Host` we were reached on, or a loopback host.
+/// Blocks cross-site WebSocket hijacking without breaking access via a LAN
+/// address (same-origin covers any bind address; loopback covers dev).
+fn origin_is_local(headers: &axum::http::HeaderMap) -> bool {
+    let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
+        return true;
+    };
+    let Ok(origin) = origin.to_str() else { return false };
+    // The authority ("host:port") of the Origin URL.
+    let authority = match origin.split_once("://") {
+        Some((_, rest)) => rest.split('/').next().unwrap_or(rest),
+        None => return false,
+    };
+    // Same-origin: the Origin's authority equals the Host header we answered on.
+    if let Some(host) = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()) {
+        if authority.eq_ignore_ascii_case(host) {
+            return true;
+        }
+    }
+    // Otherwise only a loopback host is allowed.
+    let host_only = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority);
+    matches!(host_only, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
 /// Available models from the Anthropic Models API (via Claude Code's OAuth token).

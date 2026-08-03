@@ -255,10 +255,40 @@ fn str_field<'a>(input: &'a Value, key: &str) -> Option<&'a str> {
 
 fn truncate(mut s: String) -> String {
     if s.len() > MAX_OUTPUT {
-        s.truncate(MAX_OUTPUT);
+        // `String::truncate` panics if the byte index isn't a char boundary, so
+        // back up to the nearest one — a multibyte char (Cyrillic, emoji, …) can
+        // straddle `MAX_OUTPUT` in real non-ASCII tool output.
+        let mut end = MAX_OUTPUT;
+        while end > 0 && !s.is_char_boundary(end) {
+            end -= 1;
+        }
+        s.truncate(end);
         s.push_str("\n… [output truncated]");
     }
     s
+}
+
+#[cfg(test)]
+mod truncate_tests {
+    use super::{truncate, MAX_OUTPUT};
+
+    #[test]
+    fn does_not_panic_on_multibyte_boundary() {
+        // Make a 2-byte 'я' straddle the MAX_OUTPUT cut point: byte MAX_OUTPUT
+        // lands inside the char, which would panic a naive `String::truncate`.
+        let mut s = "a".repeat(MAX_OUTPUT - 1);
+        s.push('я');
+        assert!(s.len() > MAX_OUTPUT);
+        assert!(!s.is_char_boundary(MAX_OUTPUT)); // precondition: mid-char cut
+        let out = truncate(s); // must not panic
+        assert!(out.ends_with("[output truncated]"));
+    }
+
+    #[test]
+    fn leaves_short_output_untouched() {
+        let s = "hello".to_string();
+        assert_eq!(truncate(s), "hello");
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -290,23 +320,33 @@ async fn bash(input: &Value, workspace: &Path) -> ToolOutput {
         Err(e) => return ToolOutput::err(format!("Bash: failed to spawn: {e}")),
     };
 
-    let mut stdout = child.stdout.take();
-    let mut stderr = child.stderr.take();
-    let mut out = String::new();
-    let mut err = String::new();
+    let stdout = child.stdout.take();
+    let stderr = child.stderr.take();
 
     let run = async {
-        if let Some(s) = stdout.as_mut() {
-            let _ = s.read_to_string(&mut out).await;
-        }
-        if let Some(s) = stderr.as_mut() {
-            let _ = s.read_to_string(&mut err).await;
-        }
-        child.wait().await
+        // Read BOTH pipes concurrently: draining stdout to EOF before touching
+        // stderr deadlocks once the child fills the stderr pipe buffer (verbose
+        // compilers etc.). Each stream is capped as it's read, so a runaway
+        // command can't exhaust memory — the excess is drained and discarded so
+        // the child never blocks on a full pipe.
+        let out_fut = async {
+            match stdout {
+                Some(s) => read_capped(s, MAX_OUTPUT).await,
+                None => (String::new(), false),
+            }
+        };
+        let err_fut = async {
+            match stderr {
+                Some(s) => read_capped(s, MAX_OUTPUT).await,
+                None => (String::new(), false),
+            }
+        };
+        let (out, err) = tokio::join!(out_fut, err_fut);
+        (out, err, child.wait().await)
     };
 
     match tokio::time::timeout(BASH_TIMEOUT, run).await {
-        Ok(Ok(status)) => {
+        Ok(((out, out_trunc), (err, err_trunc), Ok(status))) => {
             let mut combined = String::new();
             if !out.is_empty() {
                 combined.push_str(&out);
@@ -317,15 +357,44 @@ async fn bash(input: &Value, workspace: &Path) -> ToolOutput {
                 }
                 combined.push_str(&err);
             }
+            if out_trunc || err_trunc {
+                combined.push_str("\n…(output truncated)");
+            }
             if combined.trim().is_empty() {
                 combined = format!("(no output, exit code {})", status.code().unwrap_or(-1));
             }
             let is_error = !status.success();
             ToolOutput { content: truncate(combined), is_error }
         }
-        Ok(Err(e)) => ToolOutput::err(format!("Bash: {e}")),
+        Ok((_, _, Err(e))) => ToolOutput::err(format!("Bash: {e}")),
         Err(_) => ToolOutput::err(format!("Bash: timed out after {}s", BASH_TIMEOUT.as_secs())),
     }
+}
+
+/// Read `reader` to EOF but keep only the first `cap` bytes; the rest is drained
+/// and discarded so the child never blocks on a full pipe. Returns the captured
+/// text and whether it was truncated.
+async fn read_capped<R: tokio::io::AsyncRead + Unpin>(mut reader: R, cap: usize) -> (String, bool) {
+    let mut buf: Vec<u8> = Vec::new();
+    let mut chunk = [0u8; 8192];
+    let mut truncated = false;
+    loop {
+        match reader.read(&mut chunk).await {
+            Ok(0) | Err(_) => break,
+            Ok(n) => {
+                if buf.len() < cap {
+                    let take = (cap - buf.len()).min(n);
+                    buf.extend_from_slice(&chunk[..take]);
+                    if take < n {
+                        truncated = true;
+                    }
+                } else {
+                    truncated = true;
+                }
+            }
+        }
+    }
+    (String::from_utf8_lossy(&buf).into_owned(), truncated)
 }
 
 // ---------------------------------------------------------------------------

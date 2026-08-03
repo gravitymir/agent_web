@@ -10,7 +10,6 @@
   --accent-hover: #b5502f;
   --code-bg: #f2f2ef;
   --code-text: #1a1a19;
-  --thinking-bg: #f0efeb;
   --thinking-text: #6b6b66;
   --shadow: rgba(0, 0, 0, 0.15);
   --radius: 10px;
@@ -159,12 +158,13 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   /* rem so it follows the page-wide "Размер шрифта" setting (root font-size). */
   color: var(--text-dim); font-size: 0.83rem; line-height: 1.4;
 }
+/* `display: flex` above beats the UA `[hidden]{display:none}`, so restore it. */
+.frozen-banner[hidden] { display: none; }
 /* Lock glyph sized in em so it scales with the banner text. */
 .frozen-lock { flex-shrink: 0; width: 1.15em; height: 1.15em; }
 
 /* Subscription usage/limits block in the settings panel. */
 .usage-info { display: flex; flex-direction: column; gap: 13px; }
-.usage-plan { font-size: .78rem; letter-spacing: .02em; color: var(--text-dim); }
 .usage-lim-top { display: flex; justify-content: space-between; font-size: .82rem; margin-bottom: 5px; }
 .usage-track {
   height: 7px; border-radius: 4px; overflow: hidden;
@@ -329,8 +329,10 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 /* Custom scrollbar: a thin fixed white track (80vh, clear of the badges) with
    an orange thumb whose size reflects the visible fraction of the content. */
 .scrollbar {
-  /* Offset from the right edge by two settings-button widths (2 × 40px). */
-  position: fixed; top: 10vh; height: 80vh; right: 80px; width: 1px;
+  /* `right` clears the usage badge's reserved width (100px, see .usage-badge.multi)
+     plus its own 12px offset, with an ~18px gap so the thumb is never flush
+     against the badge: 12 + 100 + 18 = 130. */
+  position: fixed; top: 10vh; height: 80vh; right: 130px; width: 1px;
   background: rgba(0, 0, 0, 0.35); z-index: 40; cursor: pointer;
 }
 .scrollbar[hidden] { display: none; }
@@ -369,12 +371,23 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 }
 /* Assistant — the important content: a bright, high-contrast white card. */
 .msg.assistant {
+  position: relative; /* positioning context for the corner flag, see .msg-flag */
   background-color: #ffffff;
   color: #111111;
   border-radius: 12px;
   padding: 10px 14px;
   box-shadow: 0 1px 5px rgba(0, 0, 0, 0.35);
 }
+/* At-a-glance corner badge for how a finished turn ended (see `flagTurnEnd`
+   in render.js) — currently just "ends with a question", more to come. */
+.msg-flag {
+  position: absolute; top: -8px; right: -8px; z-index: 1;
+  width: 22px; height: 22px; border-radius: 50%;
+  display: flex; align-items: center; justify-content: center;
+  box-shadow: 0 1px 4px rgba(0, 0, 0, 0.25);
+}
+.msg-flag svg { width: 13px; height: 13px; display: block; }
+.msg-flag-question { background: #e5484d; color: #fff; }
 /* Service / informational — a user action (interrupt, error, notice), not a
    message. Muted: pale gray on pale gray, quiet and centered. */
 .msg.system {
@@ -540,33 +553,7 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 .d-add { background: #e6ffec; color: #1a7f37; }
 .d-del { background: #ffebe9; color: #cf222e; }
 .tool-more { color: var(--text-dim); font-size: 0.78rem; padding: 4px 2px 0; }
-/* Reasoning: a single one-line token estimate (no collapse — the text itself
-   is not delivered in API/print mode). */
-.thinking {
-  margin: 0 0 12px;
-  padding: 6px 12px;
-  background: var(--thinking-bg);
-  border: 1px solid var(--border);
-  border-radius: 9px;
-  font-size: 0.9rem;
-  color: var(--thinking-text);
-}
-.think-head { display: flex; align-items: center; gap: 8px; }
-.think-label { font-weight: 500; flex: 1; min-width: 0; }
-/* Chevron appears only when there is reasoning text to expand. */
-.think-chevron { display: none; color: var(--text-dim); transition: transform .2s ease; }
-.think-chevron svg { width: 14px; height: 14px; display: block; }
-.thinking.has-text .think-head { cursor: pointer; }
-.thinking.has-text .think-chevron { display: flex; }
-.thinking:not(.collapsed) .think-chevron { transform: rotate(180deg); }
-.think-content { display: none; }
-.thinking:not(.collapsed) .think-content {
-  display: block; white-space: pre-wrap; word-break: break-word;
-  margin-top: 8px; padding-top: 8px; border-top: 1px solid var(--border);
-  color: var(--thinking-text); font-size: 0.92em; line-height: 1.5;
-  max-height: 340px; overflow-y: auto;
-}
-/* The answer itself: full-contrast text, clearly distinct from the muted reasoning. */
+/* The answer itself: full-contrast text (vs. the muted status/detail lines below it). */
 .msg.assistant .content { color: #111111; }
 
 /* Markdown tables. display:block + overflow lets wide tables scroll instead of
@@ -584,6 +571,8 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   background: color-mix(in srgb, var(--bg-elev) 40%, transparent);
 }
 
+/* User bubble's outgoing-token caption only (the assistant's final stats now
+   live in .stream-status.done instead of a separate meta line). */
 .meta-line { font-size: 0.767rem; color: #6f6f6f; margin-top: 6px; }
 /* Outgoing-token caption — pinned to the bottom-left corner INSIDE the user
    bubble, accent-coloured. */
@@ -592,11 +581,17 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   color: var(--accent); opacity: 0.85;
 }
 
-/* Live status line while a turn is generating. */
+/* Status line under an assistant answer: live (pulsing dot, ticking elapsed/
+   tokens/phase) while streaming, then frozen into a compact final summary
+   (.done) once the turn ends — replacing the old separate "thinking" box and
+   meta line. A trailing chevron (.has-detail) appears whenever there was a
+   reasoning phase; click the line to reveal its duration/tokens (.status-detail). */
 .stream-status {
   display: flex; align-items: center; gap: 8px;
   margin-top: 8px; font-size: 0.8rem; color: var(--text-dim);
 }
+.stream-status .status-text { flex: 1; min-width: 0; }
+.stream-status.done { color: #6f6f6f; }
 .stream-status .pulse {
   width: 9px; height: 9px; border-radius: 50%; background: var(--accent);
   flex-shrink: 0; animation: pulse 1s ease-in-out infinite;
@@ -604,6 +599,20 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 @keyframes pulse {
   0%, 100% { opacity: 1; transform: scale(1); }
   50% { opacity: 0.35; transform: scale(0.7); }
+}
+.stream-status.has-detail { cursor: pointer; }
+.status-chevron { display: flex; flex-shrink: 0; color: var(--text-dim); transition: transform .2s ease; }
+.status-chevron svg { width: 14px; height: 14px; display: block; }
+.stream-status.expanded .status-chevron { transform: rotate(180deg); }
+.status-detail[hidden] { display: none; }
+.status-detail {
+  margin-top: 4px; padding: 8px 0 0; border-top: 1px solid var(--border);
+  color: var(--thinking-text); font-size: 0.8rem;
+}
+.status-detail-line { margin-bottom: 4px; }
+.status-detail-text {
+  white-space: pre-wrap; word-break: break-word; line-height: 1.5;
+  max-height: 340px; overflow-y: auto;
 }
 
 /* Collapsible content shared by long answers and the reasoning panel. */
@@ -717,6 +726,12 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 .toggle input:checked + .toggle-track { background: var(--accent); }
 .toggle input:checked + .toggle-track::before { transform: translateX(18px); }
 .toggle input:focus-visible + .toggle-track { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+/* CLI mode: caps don't gate anything (native-engine-only concept, see
+   `applyCapsAvailability`) — read as a status display, not a control. */
+.toggle-row-inert { cursor: default; opacity: 0.55; }
+.toggle-row-inert:hover { background: none; }
+.toggle-row-inert .toggle { cursor: default; }
 
 /* Pasted-image thumbnails above the input. */
 .attach-preview { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
@@ -872,9 +887,14 @@ body.drag-over::after {
 .usage-badge:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .usage-badge:active { transform: translateY(0); }
 .usage-badge[hidden] { display: none; }
-/* Four-line variant: session% / week% / Fable week% / tokens. */
+/* Four-line variant: session% / week% / Fable week% / tokens. `min-width` (not
+   the old 46px) keeps the box a stable size across realistic token counts so
+   it doesn't drift into the scrollbar's reserved clearance (see .scrollbar) —
+   100px fits the token line up to ~7 characters ("999.5k", "12.3M", …) at any
+   font-size setting; an outlier longer than that still grows the box rather
+   than clipping, right-aligned via `align-items: flex-end` for the % lines. */
 .usage-badge.multi {
-  height: auto; min-width: 46px; padding: 6px 10px;
+  height: auto; min-width: 100px; padding: 6px 10px;
   flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px;
   line-height: 1.18;
 }
