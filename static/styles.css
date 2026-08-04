@@ -41,11 +41,11 @@ body { font-size: 1rem; }
 }
 #boot.hide { opacity: 0; pointer-events: none; }
 .boot-orb {
-  width: 50px; height: 50px; border-radius: 28%; /* rounded square, matches favicon */
-  background: linear-gradient(135deg, color-mix(in srgb, var(--accent) 82%, #fff), var(--accent));
-  box-shadow: 0 8px 24px color-mix(in srgb, var(--accent) 45%, transparent);
-  animation: bootSpin 1.5s cubic-bezier(.6,.05,.3,.95) infinite, bootHue 3.2s linear infinite;
+  width: 60px; height: 60px; /* the Agentron mark itself, spinning + colour-shifting */
+  color: var(--accent);
+  animation: bootSpin 1.6s cubic-bezier(.6,.05,.3,.95) infinite, bootHue 3.2s linear infinite;
 }
+.boot-orb svg { width: 100%; height: 100%; display: block; }
 @keyframes bootSpin { to { transform: rotate(360deg); } }
 @keyframes bootHue { from { filter: hue-rotate(0deg); } to { filter: hue-rotate(360deg); } }
 

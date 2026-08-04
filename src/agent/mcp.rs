@@ -216,30 +216,25 @@ async fn spawn_server(name: &str, sc: &ServerCfg) -> Result<Server> {
 /// the call waiting on its `id`. When the stream closes, fail all pending calls
 /// so none hang.
 async fn reader_loop(name: String, mut reader: Lines<BufReader<ChildStdout>>, pending: Pending) {
-    loop {
-        match reader.next_line().await {
-            Ok(Some(l)) => {
-                let l = l.trim();
-                if l.is_empty() {
-                    continue;
-                }
-                let Ok(v) = serde_json::from_str::<Value>(l) else {
-                    continue;
-                };
-                let Some(id) = v.get("id").and_then(Value::as_u64) else {
-                    continue; // notification (no id) — nothing to route
-                };
-                let waiter = pending.lock().await.remove(&id);
-                if let Some(tx) = waiter {
-                    let msg = if v.get("error").is_some() {
-                        Err(v["error"].to_string())
-                    } else {
-                        Ok(v)
-                    };
-                    let _ = tx.send(msg);
-                }
-            }
-            Ok(None) | Err(_) => break, // stream closed
+    while let Ok(Some(l)) = reader.next_line().await {
+        let l = l.trim();
+        if l.is_empty() {
+            continue;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(l) else {
+            continue;
+        };
+        let Some(id) = v.get("id").and_then(Value::as_u64) else {
+            continue; // notification (no id) — nothing to route
+        };
+        let waiter = pending.lock().await.remove(&id);
+        if let Some(tx) = waiter {
+            let msg = if v.get("error").is_some() {
+                Err(v["error"].to_string())
+            } else {
+                Ok(v)
+            };
+            let _ = tx.send(msg);
         }
     }
     let mut p = pending.lock().await;

@@ -419,6 +419,7 @@ async fn write_control_response(
 
 /// The keeper's background task: owns the process, pumps stdout to viewers, and
 /// applies commands. Runs until the process exits or all handles are dropped.
+#[allow(clippy::too_many_arguments)]
 async fn run_actor(
     mut child: tokio::process::Child,
     mut stdin: tokio::process::ChildStdin,

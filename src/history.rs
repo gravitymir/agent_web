@@ -454,14 +454,10 @@ fn extract_text(v: &Value) -> Option<String> {
     if let Some(arr) = content.as_array() {
         let mut out = String::new();
         for block in arr {
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(t) = block.get("text").and_then(Value::as_str) {
-                        out.push_str(t);
-                    }
+            if let Some("text") = block.get("type").and_then(Value::as_str) {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    out.push_str(t);
                 }
-                // tool_use blocks are surfaced separately (see extract_tools).
-                _ => {}
             }
         }
         if out.is_empty() {
@@ -484,13 +480,10 @@ fn extract_native_text(v: &Value) -> Option<String> {
     if let Some(arr) = content.as_array() {
         let mut out = String::new();
         for block in arr {
-            match block.get("type").and_then(Value::as_str) {
-                Some("text") => {
-                    if let Some(t) = block.get("text").and_then(Value::as_str) {
-                        out.push_str(t);
-                    }
+            if let Some("text") = block.get("type").and_then(Value::as_str) {
+                if let Some(t) = block.get("text").and_then(Value::as_str) {
+                    out.push_str(t);
                 }
-                _ => {}
             }
         }
         if out.is_empty() {

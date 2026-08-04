@@ -547,7 +547,7 @@ fn glob_tool(input: &Value, workspace: &Path) -> ToolOutput {
         }
         Err(e) => return ToolOutput::err(format!("Glob: invalid pattern: {e}")),
     }
-    matches.sort_by(|a, b| b.0.cmp(&a.0));
+    matches.sort_by_key(|b| std::cmp::Reverse(b.0));
     let list: Vec<String> = matches.into_iter().take(300).map(|(_, p)| p).collect();
     if list.is_empty() {
         ToolOutput::ok("(no files matched)")
@@ -643,8 +643,10 @@ fn url_encode(s: &str) -> String {
 /// Very small HTML→text: drop script/style, strip tags, decode a few entities,
 /// collapse whitespace.
 fn html_to_text(html: &str) -> String {
-    let drop = regex::Regex::new(r"(?is)<(script|style)[^>]*>.*?</\s*\1\s*>").unwrap();
-    let no_scripts = drop.replace_all(html, " ");
+    let drop_script = regex::Regex::new(r"(?is)<script[^>]*>.*?</\s*script\s*>").unwrap();
+    let drop_style = regex::Regex::new(r"(?is)<style[^>]*>.*?</\s*style\s*>").unwrap();
+    let no_scripts = drop_script.replace_all(html, " ");
+    let no_scripts = drop_style.replace_all(&no_scripts, " ");
     let tag = regex::Regex::new(r"(?s)<[^>]+>").unwrap();
     let text = tag.replace_all(&no_scripts, " ");
     let text = text
@@ -828,9 +830,7 @@ mod tests {
 
     #[test]
     fn caps_gate_groups() {
-        let mut c = Caps::default();
-        c.modify = false;
-        c.run = false;
+        let c = Caps { modify: false, run: false, ..Default::default() };
         assert!(!c.allows("Write"));
         assert!(!c.allows("Edit"));
         assert!(!c.allows("Bash"));
@@ -846,20 +846,13 @@ mod tests {
         // picking a clarifying question's answer can pick the wrong one, so it
         // always goes to the interactive permission card regardless of caps.
         assert!(!Caps::default().allows("AskUserQuestion"));
-        let mut c = Caps::default();
-        c.read = false;
-        c.modify = false;
-        c.run = false;
-        c.web_fetch = false;
-        c.web_search = false;
+        let c = Caps { read: false, modify: false, run: false, web_fetch: false, web_search: false };
         assert!(!c.allows("AskUserQuestion"));
     }
 
     #[test]
     fn schemas_filtered_by_caps() {
-        let mut c = Caps::default();
-        c.run = false;
-        c.web_search = false;
+        let c = Caps { run: false, web_search: false, ..Default::default() };
         let names: Vec<String> = schemas(&c)
             .iter()
             .filter_map(|t| t["name"].as_str().map(str::to_string))

@@ -225,7 +225,7 @@ async fn handle_client(
             // next `send_user_message` below would go to a keeper whose actor task
             // already exited — the channel send silently no-ops (closed receiver),
             // so the message vanishes with no error and no server-side trace.
-            if keeper.as_ref().map_or(true, |k| k.is_finished()) {
+            if keeper.as_ref().is_none_or(|k| k.is_finished()) {
                 *keeper = None;
                 let resume = session_id.is_some() && !new_chat;
                 match state.sessions.get_or_spawn(session_id, resume, model, provider) {

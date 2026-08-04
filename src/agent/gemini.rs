@@ -39,6 +39,7 @@ use crate::agent::provider::Provider;
 /// events through `on_event` — same contract as `client::stream`, so
 /// `Engine::run_turn`'s retry loop and `Accumulator` need no branching beyond
 /// picking which of the two functions to call (see `provider::Kind`).
+#[allow(clippy::too_many_arguments)]
 pub async fn stream(
     provider: &Provider,
     client: &reqwest::Client,
