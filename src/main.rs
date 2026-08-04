@@ -234,6 +234,21 @@ async fn list_chats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
                 }
                 chat.icon = m.icon;
                 chat.duration_ms = m.duration_ms;
+                // Per-model breakdown, sorted by total tokens desc.
+                let mut models: Vec<history::ModelContribution> = m
+                    .models
+                    .into_iter()
+                    .map(|(model, s)| history::ModelContribution {
+                        model,
+                        input_tokens: s.input_tokens,
+                        output_tokens: s.output_tokens,
+                        duration_ms: s.duration_ms,
+                    })
+                    .collect();
+                models.sort_by(|a, b| {
+                    (b.input_tokens + b.output_tokens).cmp(&(a.input_tokens + a.output_tokens))
+                });
+                chat.models = models;
             }
         }
     }

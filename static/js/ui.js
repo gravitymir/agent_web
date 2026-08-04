@@ -836,6 +836,8 @@ export function renderChatList(chats) {
       duration_ms: c.duration_ms || 0,
       contextTokens: c.last_context_tokens || 0,
       contextLimit: c.context_limit || 0,
+      models: c.models || [],
+      model: c.model || "",
     };
     state.chatEngine[c.id] = c.engine || "cli";
     const item = document.createElement("div");

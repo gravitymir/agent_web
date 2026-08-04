@@ -378,14 +378,49 @@ fn parse_control_request(line: &str) -> Option<ControlRequest> {
 /// from history on demand, but elapsed time only ever exists in this event).
 /// Cheap substring pre-filter first since this runs on every emitted line,
 /// most of which are high-frequency streaming deltas, not `result` frames.
-fn track_turn_duration(line: &str, session_id: &str, meta: &Mutex<MetaStore>) {
-    if !line.contains(r#""type":"result""#) {
-        return;
-    }
-    let Ok(v) = serde_json::from_str::<Value>(line) else { return };
-    let Some(ms) = v.get("duration_ms").and_then(Value::as_u64) else { return };
-    if let Ok(mut m) = meta.lock() {
-        let _ = m.add_duration(session_id, ms);
+/// Watches a session's event stream and records each finished turn's
+/// `(model, input, output, duration)` into the meta store. Stateful because a
+/// CLI turn's model comes from the `assistant` event (`message.model`) that
+/// precedes its `result`; the native engine stamps the model on the result
+/// itself. This is what powers the per-model breakdown + "named" Agentron, and
+/// it attributes each turn to whatever model actually answered — so switching
+/// engines/models mid-chat splits the contribution automatically.
+#[derive(Default)]
+struct TurnTracker {
+    model: String,
+}
+
+impl TurnTracker {
+    fn observe(&mut self, line: &str, session_id: &str, meta: &Mutex<MetaStore>) {
+        // Only `assistant` (carries the model) and `result` (carries the stats)
+        // lines matter — skip the per-token delta flood without parsing it.
+        let is_assistant = line.contains(r#""type":"assistant""#);
+        let is_result = line.contains(r#""type":"result""#);
+        if !is_assistant && !is_result {
+            return;
+        }
+        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+        if is_assistant {
+            if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
+                if !m.is_empty() {
+                    self.model = m.to_string();
+                }
+            }
+            return;
+        }
+        // result event:
+        let ms = v.get("duration_ms").and_then(Value::as_u64).unwrap_or(0);
+        let model = v
+            .get("model")
+            .and_then(Value::as_str)
+            .filter(|s| !s.is_empty())
+            .map(str::to_string)
+            .unwrap_or_else(|| self.model.clone());
+        let input = v.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let output = v.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        if let Ok(mut m) = meta.lock() {
+            let _ = m.record_turn(session_id, &model, input, output, ms);
+        }
     }
 }
 
@@ -439,6 +474,8 @@ async fn run_actor(
     // keyed by request_id, so answering it can echo that input back (plus
     // `AskUserQuestion`'s `answers`) without trusting the client to round-trip it.
     let mut pending_controls: HashMap<String, Value> = HashMap::new();
+    // Per-turn model/token/duration attribution (see `TurnTracker`).
+    let mut tracker = TurnTracker::default();
 
     loop {
         tokio::select! {
@@ -547,7 +584,7 @@ async fn run_actor(
                             }).to_string());
                         }
                         None => {
-                            track_turn_duration(&l, &session_id, &meta);
+                            tracker.observe(&l, &session_id, &meta);
                             emit(&scrollback, &events, l);
                         }
                     }
@@ -602,8 +639,11 @@ async fn run_native_actor(
     let sb = scrollback.clone();
     let ev = events.clone();
     let sid = session_id.clone();
+    let tracker = Arc::new(Mutex::new(TurnTracker::default()));
     let emitter = crate::agent::Emit::new(Arc::new(move |line: String| {
-        track_turn_duration(&line, &sid, &meta);
+        if let Ok(mut t) = tracker.lock() {
+            t.observe(&line, &sid, &meta);
+        }
         emit(&sb, &ev, line);
     }));
     let interrupt = Arc::new(AtomicBool::new(false));
@@ -713,7 +753,7 @@ mod control_request_tests {
 
 #[cfg(test)]
 mod turn_duration_tests {
-    use super::{track_turn_duration, MetaStore};
+    use super::{MetaStore, TurnTracker};
     use std::sync::Mutex;
 
     fn temp_store(name: &str) -> Mutex<MetaStore> {
@@ -725,19 +765,46 @@ mod turn_duration_tests {
     #[test]
     fn accumulates_duration_from_a_result_line() {
         let meta = temp_store("accumulates");
+        let mut t = TurnTracker::default();
         let line = r#"{"type":"result","duration_ms":1500,"num_turns":3}"#;
-        track_turn_duration(line, "sess-1", &meta);
-        track_turn_duration(line, "sess-1", &meta);
+        t.observe(line, "sess-1", &meta);
+        t.observe(line, "sess-1", &meta);
         assert_eq!(meta.lock().unwrap().get("sess-1").unwrap().duration_ms, 3000);
     }
 
     #[test]
     fn ignores_lines_that_are_not_a_result_event() {
         let meta = temp_store("ignores");
-        track_turn_duration(r#"{"type":"assistant","message":{}}"#, "sess-2", &meta);
-        track_turn_duration("not json at all", "sess-2", &meta);
-        // A result line with no duration_ms must not create an entry either.
-        track_turn_duration(r#"{"type":"result","num_turns":1}"#, "sess-2", &meta);
+        let mut t = TurnTracker::default();
+        t.observe(r#"{"type":"assistant","message":{}}"#, "sess-2", &meta);
+        t.observe("not json at all", "sess-2", &meta);
+        // A result with no duration and no tokens must not create an entry.
+        t.observe(r#"{"type":"result","num_turns":1}"#, "sess-2", &meta);
         assert!(meta.lock().unwrap().get("sess-2").is_none());
+    }
+
+    #[test]
+    fn attributes_tokens_and_time_per_model() {
+        let meta = temp_store("per_model");
+        let mut t = TurnTracker::default();
+        // Native-style: the model is stamped on the result event.
+        t.observe(
+            r#"{"type":"result","model":"gemini / gemini-pro-latest","usage":{"input_tokens":100,"output_tokens":20},"duration_ms":5000}"#,
+            "s", &meta,
+        );
+        // CLI-style: the model comes from the preceding assistant event; the
+        // result carries only stats. Simulates switching models mid-chat.
+        t.observe(r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#, "s", &meta);
+        t.observe(
+            r#"{"type":"result","usage":{"input_tokens":10,"output_tokens":5},"duration_ms":3000}"#,
+            "s", &meta,
+        );
+        let m = meta.lock().unwrap();
+        let e = m.get("s").unwrap();
+        assert_eq!(e.duration_ms, 8000); // total across both models
+        let g = e.models.get("gemini / gemini-pro-latest").unwrap();
+        assert_eq!((g.input_tokens, g.output_tokens, g.duration_ms), (100, 20, 5000));
+        let c = e.models.get("claude-opus-4-8").unwrap();
+        assert_eq!((c.input_tokens, c.output_tokens, c.duration_ms), (10, 5, 3000));
     }
 }

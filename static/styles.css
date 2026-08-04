@@ -990,7 +990,7 @@ body.drag-over::after {
 /* Usage detail drawer (opened by clicking the token badge). */
 .usage-overlay { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, 0.25); }
 .usage-panel {
-  position: fixed; top: 0; right: 0; height: 100%; width: 320px; z-index: 58;
+  position: fixed; top: 0; right: 0; height: 100%; width: 480px; max-width: 92vw; z-index: 58;
   background: var(--bg-elev); border-left: 1px solid var(--border);
   box-shadow: -4px 0 24px var(--shadow);
   transform: translateX(100%); transition: transform .28s ease;
@@ -1007,9 +1007,13 @@ body.drag-over::after {
   color: var(--text-dim);
 }
 .usage-section-head .usage-ic { color: var(--accent); }
+/* Plain grey separator where a section header used to be (header text removed). */
+.usage-divider { border-top: 1px solid var(--border); margin: 2px 0 12px; }
 .usage-ic { flex-shrink: 0; display: inline-flex; align-items: center; color: var(--accent); }
-/* Larger panel icons (~2×) — row icons, section-head icons and the Agentron row. */
-#usage-detail .usage-ic svg { width: 30px; height: 30px; }
+/* Panel icons sized in rem so they scale with the text-size setting (which sets
+   the root font-size). Row icons ~30px, section-head icons ~15px at the default. */
+#usage-detail .usage-ic svg { width: 1.9rem; height: 1.9rem; }
+#usage-detail .usage-section-head .usage-ic { width: 0.95rem; height: 0.95rem; }
 .usage-limits .usage-lim { margin-bottom: 12px; }
 .usage-limits .usage-lim:last-child { margin-bottom: 0; }
 
@@ -1023,6 +1027,40 @@ body.drag-over::after {
 .usage-row .v { font-weight: 600; font-variant-numeric: tabular-nums; white-space: nowrap; }
 .usage-row.total .k, .usage-row.total .v { font-size: 1.05rem; color: var(--text); }
 .usage-row.total .usage-ic { color: var(--accent); }
+
+/* Expandable "Всего токенов" row → per-model breakdown. */
+.usage-row.expandable { cursor: pointer; user-select: none; }
+.usage-row.expandable .v { display: inline-flex; align-items: center; gap: 6px; }
+/* Same visual as the scroll-to-bottom button — a white circle with a double
+   chevron and a soft shadow — so the "opens downward" affordance reads identically
+   in both places. */
+.usage-chevrons {
+  display: inline-flex; align-items: center; justify-content: center; flex-shrink: 0;
+  width: 34px; height: 34px;
+  background: var(--bg-elev); color: var(--text-dim);
+  border: 1px solid var(--border); border-radius: 50%;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.12);
+  transition: transform .2s ease, color .15s, border-color .15s, background .15s;
+}
+.usage-chevrons svg { width: 18px; height: 18px; }
+.usage-row.expandable:hover .usage-chevrons { color: var(--accent); border-color: var(--accent); }
+.usage-row.expanded .usage-chevrons { transform: rotate(180deg); }
+.usage-models { display: none; padding: 4px 0 8px 39px; }
+.usage-models.open { display: block; }
+/* Two-line model row: name + % on top, the share bar, then tokens · time · Ag. */
+.usage-model-row { padding: 9px 0; }
+.usage-model-row + .usage-model-row { border-top: 1px solid var(--border); }
+.umr-top { display: flex; justify-content: space-between; align-items: baseline; gap: 10px; margin-bottom: 6px; }
+.umr-name {
+  min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  color: var(--text); font-size: 0.85rem; font-weight: 600;
+}
+.umr-pct { flex-shrink: 0; color: var(--text); font-weight: 700; font-variant-numeric: tabular-nums; }
+.umr-bar { height: 6px; background: var(--border); border-radius: 3px; overflow: hidden; }
+.umr-fill { height: 100%; background: var(--accent); border-radius: 3px; }
+.umr-stats {
+  margin-top: 6px; color: var(--text-dim); font-size: 0.8rem; font-variant-numeric: tabular-nums;
+}
 .usage-note { color: var(--text-dim); font-size: 0.8rem; line-height: 1.5; margin-top: 14px; font-style: italic; }
 .usage-sub { color: var(--text-dim); font-size: 0.78rem; margin-top: 2px; }
 
@@ -1038,7 +1076,7 @@ body.drag-over::after {
 .settings-panel.open { transform: translateX(0); }
 .settings-header { padding: 18px 20px; border-bottom: 1px solid var(--border); }
 .settings-header h2 { margin: 0; font-size: 1.067rem; }
-.settings-body { padding: 18px 20px; overflow-y: auto; }
+.settings-body { padding: 5px; overflow-y: auto; }
 .setting-group { margin-bottom: 22px; }
 .setting-label { font-size: 0.867rem; color: var(--text-dim); margin-bottom: 8px; }
 .setting-check {

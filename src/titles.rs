@@ -11,6 +11,18 @@ use std::path::PathBuf;
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
 
+/// One model's cumulative contribution to a chat — the raw material for the
+/// per-model breakdown and the "named" Agentron (`Agₘ = durationₘ × tokensₘ`).
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct ModelStat {
+    #[serde(default)]
+    pub input_tokens: u64,
+    #[serde(default)]
+    pub output_tokens: u64,
+    #[serde(default)]
+    pub duration_ms: u64,
+}
+
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct ChatMeta {
     #[serde(default)]
@@ -25,6 +37,12 @@ pub struct ChatMeta {
     /// itself, only the time axis needs a sidecar).
     #[serde(default)]
     pub duration_ms: u64,
+    /// Per-model contribution, keyed by the model string (`"gemini / …"`,
+    /// `"claude-opus-4-8"`, …). Accumulated forward as the chat runs, so a chat
+    /// that switches engines/models mid-way records each model's share. Old
+    /// chats predate this and stay empty (no retroactive split is possible).
+    #[serde(default)]
+    pub models: HashMap<String, ModelStat>,
 }
 
 pub struct MetaStore {
@@ -60,25 +78,44 @@ impl MetaStore {
                 Some(i)
             }
         });
-        let duration_ms = self.map.get(&id).map(|m| m.duration_ms).unwrap_or(0);
+        // Preserve the accumulated duration AND per-model breakdown — set() must
+        // never drop stats just because the title/icon were cleared.
+        let (duration_ms, models) = self
+            .map
+            .get(&id)
+            .map(|m| (m.duration_ms, m.models.clone()))
+            .unwrap_or_default();
 
-        if title.is_empty() && icon.is_none() && duration_ms == 0 {
+        if title.is_empty() && icon.is_none() && duration_ms == 0 && models.is_empty() {
             self.map.remove(&id);
         } else {
-            self.map.insert(id, ChatMeta { title, icon, duration_ms });
+            self.map.insert(id, ChatMeta { title, icon, duration_ms, models });
         }
         self.save()
     }
 
-    /// Add `ms` to a chat's cumulative turn duration, creating a blank entry
-    /// (no title/icon) if none exists yet. A no-op for `ms == 0` so a chat
-    /// that never finishes a turn doesn't leave an empty entry behind.
-    pub fn add_duration(&mut self, id: &str, ms: u64) -> Result<()> {
-        if ms == 0 {
+    /// Record one finished turn: adds `ms` to the chat's total duration and, when
+    /// a model is known, folds `(input, output, ms)` into that model's bucket.
+    /// A no-op for a zero-duration turn (so a never-finished turn leaves nothing).
+    pub fn record_turn(
+        &mut self,
+        id: &str,
+        model: &str,
+        input: u64,
+        output: u64,
+        ms: u64,
+    ) -> Result<()> {
+        if ms == 0 && input == 0 && output == 0 {
             return Ok(());
         }
         let entry = self.map.entry(id.to_string()).or_default();
         entry.duration_ms = entry.duration_ms.saturating_add(ms);
+        if !model.is_empty() {
+            let m = entry.models.entry(model.to_string()).or_default();
+            m.input_tokens = m.input_tokens.saturating_add(input);
+            m.output_tokens = m.output_tokens.saturating_add(output);
+            m.duration_ms = m.duration_ms.saturating_add(ms);
+        }
         self.save()
     }
 
@@ -112,13 +149,13 @@ mod tests {
     }
 
     #[test]
-    fn add_duration_accumulates_and_is_a_noop_for_zero() {
+    fn record_turn_accumulates_and_is_a_noop_when_empty() {
         let mut m = temp_store("accumulates");
-        assert_eq!(m.get("a"), None); // nothing yet — no entry created for 0ms
-        m.add_duration("a", 0).unwrap();
+        assert_eq!(m.get("a"), None); // nothing yet — no entry for an empty turn
+        m.record_turn("a", "", 0, 0, 0).unwrap();
         assert_eq!(m.get("a"), None);
-        m.add_duration("a", 1000).unwrap();
-        m.add_duration("a", 2500).unwrap();
+        m.record_turn("a", "", 0, 0, 1000).unwrap();
+        m.record_turn("a", "", 0, 0, 2500).unwrap();
         assert_eq!(m.get("a").unwrap().duration_ms, 3500);
     }
 
@@ -126,7 +163,7 @@ mod tests {
     fn clearing_title_and_icon_keeps_accumulated_duration() {
         let mut m = temp_store("keeps_duration");
         m.set("b".into(), "Some title".into(), Some("🚀".into())).unwrap();
-        m.add_duration("b", 5000).unwrap();
+        m.record_turn("b", "", 0, 0, 5000).unwrap();
         // Clearing title/icon must not silently drop the Agentron total.
         m.set("b".into(), "".into(), None).unwrap();
         let entry = m.get("b").unwrap();

@@ -50,7 +50,7 @@ export const IOSSVG = {
   // Stopwatch: outline sibling of the Agentron mark (clock face ring + hands,
   // side buttons, top-right crown) drawn in the same line style as the other
   // icons — used as a selectable chat icon.
-  stopwatch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="13" r="6.5"/><path d="M10.5 9 L10.5 13 L13.4 14.8"/><path d="M4.3 10.8 a1.3 2.3 0 0 0 0 4.6"/><path d="M16.7 10.8 a1.3 2.3 0 0 1 0 4.6"/><path d="M15.2 7.9 L16.4 6.7"/><circle cx="17.5" cy="5.4" r="1.7"/></svg>',
+  stopwatch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><g transform="translate(-1.65 -2.27) scale(1.23)" stroke-width="1.46"><circle cx="10.5" cy="13" r="6.5"/><path d="M10.5 9 L10.5 13 L13.4 14.8"/><path d="M4.3 10.8 a1.3 2.3 0 0 0 0 4.6"/><path d="M16.7 10.8 a1.3 2.3 0 0 1 0 4.6"/><path d="M15.2 7.9 L16.4 6.7"/><circle cx="17.5" cy="5.4" r="1.7"/></g></svg>',
   // Agentron: a filled stopwatch — clock face (ring + hands) with two side
   // buttons and a top-right crown; the "agent work × time" unit. Matches the
   // logo/favicon art; drawn via a mask so the ring gap, hands and crown hole are

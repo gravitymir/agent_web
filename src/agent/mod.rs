@@ -167,6 +167,7 @@ impl Engine {
 
         let started = Instant::now();
         let mut turn_tokens = 0u64;
+        let mut turn_input = 0u64;
         let mut steps = 0u64;
 
         tracing::info!(session = %self.session_id, "agent started answering");
@@ -252,6 +253,7 @@ impl Engine {
             }
 
             turn_tokens += acc.output_tokens;
+            turn_input += acc.input_tokens;
             self.stored.output_tokens += acc.output_tokens;
             // Input / cache accumulate like the CLI's per-turn usage; last_context
             // is the CURRENT window fill (this call's prompt), overwritten each step.
@@ -324,7 +326,8 @@ impl Engine {
 
         emit.line(json!({
             "type": "result",
-            "usage": { "output_tokens": turn_tokens },
+            "model": self.stored.model,
+            "usage": { "input_tokens": turn_input, "output_tokens": turn_tokens },
             "duration_ms": started.elapsed().as_millis() as u64,
             "num_turns": steps
         }).to_string());

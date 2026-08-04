@@ -15,6 +15,17 @@ use serde_json::Value;
 
 use crate::agent::store;
 
+/// One model's cumulative share of a chat's work. Overlaid from `MetaStore` by
+/// `main.rs::list_chats` (empty in the store-built summary). Drives the per-model
+/// breakdown and the "named" Agentron in the usage panel.
+#[derive(Debug, Serialize)]
+pub struct ModelContribution {
+    pub model: String,
+    pub input_tokens: u64,
+    pub output_tokens: u64,
+    pub duration_ms: u64,
+}
+
 /// Summary of one chat, for the sidebar list.
 #[derive(Debug, Serialize)]
 pub struct ChatSummary {
@@ -53,6 +64,15 @@ pub struct ChatSummary {
     /// (`cwi_native/*.json`). The sidebar always lists both; a chat whose engine
     /// differs from the active `CWI_ENGINE` is shown read-only ("frozen").
     pub engine: &'static str,
+    /// The chat's model string (`"gemini / …"` / `"claude-opus-4-8"`), best-effort
+    /// from the transcript. Lets the UI label a single-model chat's breakdown even
+    /// before the forward-recorded `models` split exists.
+    #[serde(default)]
+    pub model: String,
+    /// Per-model contribution — empty here; overlaid from `MetaStore` in
+    /// `list_chats`, sorted by tokens desc.
+    #[serde(default)]
+    pub models: Vec<ModelContribution>,
 }
 
 /// A tool call made by the assistant, with its full arguments.
@@ -157,6 +177,7 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
     let mut turns = 0usize;
+    let mut model = String::new(); // last assistant model seen (Claude Code stamps it)
     // Current context-window fill, not a running total: overwritten (not
     // summed) by each assistant line's own usage, so after the loop it holds
     // the *last* one — i.e. how large the conversation was on the most recent
@@ -189,6 +210,11 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
             message_count += 1;
             if ty == Some("assistant") {
                 turns += 1;
+                if let Some(mdl) = v.get("message").and_then(|m| m.get("model")).and_then(Value::as_str) {
+                    if !mdl.is_empty() {
+                        model = mdl.to_string();
+                    }
+                }
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                     // output_tokens includes the thinking budget.
@@ -227,6 +253,8 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
         last_context_tokens,
         context_limit: 200_000, // Claude via the CLI
         engine: "cli",
+        model,
+        models: Vec::new(),
     })
 }
 
@@ -284,6 +312,8 @@ fn summarize_native_file(path: &Path, id: String) -> Option<ChatSummary> {
         last_context_tokens: stored.last_context_tokens,
         context_limit: context_limit_for_model(&stored.model),
         engine: "native",
+        model: stored.model.clone(),
+        models: Vec::new(),
     })
 }
 

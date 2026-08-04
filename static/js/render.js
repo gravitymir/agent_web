@@ -1169,13 +1169,53 @@ export function fmtFull(n) {
   return String(Math.round(n || 0)).replace(/\B(?=(\d{3})+(?!\d))/g, " ");
 }
 
+// Whether the per-model breakdown under "Всего токенов" is expanded. Module-level
+// so it survives the frequent re-renders of the usage panel.
+let modelsExpanded = false;
+
+// Double down-chevron: the "click to expand" affordance on the total-tokens row.
+// Identical to the scroll-to-bottom button's chevron (see index.html) so the two
+// "moves/opens downward" controls read the same.
+const DOUBLE_CHEVRON =
+  '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round"><path d="m7 13 5 5 5-5"/><path d="m7 6 5 5 5-5"/></svg>';
+
+// The exact model string ("gemini / gemini-pro-latest", "claude-opus-4-8") is what
+// the backend recorded; show the model id (drop the "provider / " prefix).
+function prettyModel(s) {
+  const str = String(s || "").trim();
+  if (!str) return "неизвестная модель";
+  const slash = str.indexOf(" / ");
+  return slash >= 0 ? str.slice(slash + 3) : str;
+}
+
+// Human duration with hours: "42 с" / "26 мин" / "1 ч 15 мин".
+function fmtDur(ms) {
+  const s = Math.round((ms || 0) / 1000);
+  if (s < 60) return `${s} с`;
+  const m = Math.round(s / 60);
+  if (m < 60) return `${m} мин`;
+  const h = Math.floor(m / 60);
+  const rm = m % 60;
+  return rm ? `${h} ч ${rm} мин` : `${h} ч`;
+}
+
 export function renderUsageDetail() {
   const u = state.chatUsage[state.sessionId] || {};
   const live = state.current ? state.current.tokens || 0 : 0;
   const output = (u.tokens || 0) + live;
   const input = u.input_tokens || 0;
   const total = output + input;
-  const agentron = computeAgentron(u.duration_ms, total);
+  // Effort time for the Agentron. Chats WITH a real per-model split use the
+  // tracked time as-is. Legacy chats (no split — they predate per-turn timing, or
+  // recorded only a tiny active duration) floor it to ~25s per model turn, so the
+  // Agentron reads as a meaningful non-zero instead of a flat "0". This estimate
+  // is display-only (nothing is persisted) and applies uniformly to the total row
+  // and the synthesized breakdown below so they stay consistent.
+  const hasRealModels = (u.models || []).length > 0;
+  const effDuration = hasRealModels
+    ? u.duration_ms || 0
+    : Math.max(u.duration_ms || 0, (u.turns || 0) * 25_000);
+  const agentron = computeAgentron(effDuration, total);
 
   // Subscription limits section (moved here from settings) — shown when known.
   const g = state.usage;
@@ -1193,13 +1233,14 @@ export function renderUsageDetail() {
   // total — see history.rs::last_context_tokens).
   const ctxLimit = u.contextLimit || CONTEXT_WINDOW;
   const ctxPct = contextPercent(u.contextTokens, ctxLimit);
+  // Label + percent on the first line, the fill numbers on the second — no
+  // separate section header, no trailing "токенов".
   const context = `<div class="usage-section usage-context">
-       <div class="usage-section-head">${iIcon("microscope", 15, "usage-ic")}<span>Контекст чата</span></div>
-       <div class="usage-row">
+       <div class="usage-row usage-context-row">
          <span class="usage-ic">${contextRing(ctxPct, 28, 3)}</span>
          <div class="usage-row-main">
-           <div class="k">Заполнено на ${Math.round(ctxPct)}%</div>
-           <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(ctxLimit)} токенов, по последнему ходу</div>
+           <div class="k">Контекст чата ${Math.round(ctxPct)}%</div>
+           <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(ctxLimit)}</div>
          </div>
        </div>
      </div>`;
@@ -1213,19 +1254,84 @@ export function renderUsageDetail() {
        <div class="v">${v}</div>
      </div>`;
 
+  // Per-model breakdown (recorded forward; empty for chats that predate it). The
+  // percentage is by tokens WITHIN the breakdown, so it always sums to 100% even
+  // if it differs slightly from the headline total's token-counting method.
+  const models = (u.models || [])
+    .map((m) => ({
+      model: m.model,
+      tokens: (m.input_tokens || 0) + (m.output_tokens || 0),
+      duration_ms: m.duration_ms || 0,
+    }))
+    .filter((m) => m.tokens > 0 || m.duration_ms > 0)
+    .sort((a, b) => b.tokens - a.tokens);
+  // No forward-recorded split yet (chat predates the feature) → synthesize ONE
+  // bucket from the chat's own real totals, so the breakdown shows everywhere. A
+  // single-model chat genuinely IS 100% one model; nothing is fabricated (real
+  // tokens + real duration → the same Agentron as the total row).
+  if (models.length === 0 && total > 0) {
+    const fallbackModel =
+      u.model || (state.chatEngine && state.chatEngine[state.sessionId] === "native" ? "модель" : "Claude");
+    models.push({ model: fallbackModel, tokens: total, duration_ms: effDuration });
+  }
+  const modelsTotal = models.reduce((s, m) => s + m.tokens, 0);
+  const hasBreakdown = models.length > 0;
+
+  // "Всего токенов" — clickable (double chevron) when a per-model split exists.
+  const totalRow = `<div class="usage-row total${hasBreakdown ? " expandable" : ""}${
+    hasBreakdown && modelsExpanded ? " expanded" : ""
+  }"${hasBreakdown ? ' data-models-toggle="1"' : ""}>
+       <span class="usage-ic">${iIcon("calculator", 16)}</span>
+       <div class="usage-row-main"><div class="k">Всего токенов</div><div class="usage-sub">вход + выход${
+         hasBreakdown ? " · по моделям" : ""
+       }</div></div>
+       <div class="v">${fmtFull(total)}${
+         hasBreakdown ? `<span class="usage-chevrons">${DOUBLE_CHEVRON}</span>` : ""
+       }</div>
+     </div>`;
+
+  const modelsBlock = hasBreakdown
+    ? `<div class="usage-models${modelsExpanded ? " open" : ""}">${models
+        .map((m) => {
+          const pct = modelsTotal ? Math.round((m.tokens / modelsTotal) * 100) : 0;
+          const ag = fmtAgentron(computeAgentron(m.duration_ms, m.tokens));
+          return `<div class="usage-model-row">
+             <div class="umr-top">
+               <span class="umr-name" title="${escapeHtml(m.model)}">${escapeHtml(prettyModel(m.model))}</span>
+               <span class="umr-pct">${pct}%</span>
+             </div>
+             <div class="umr-bar"><div class="umr-fill" style="width:${pct}%"></div></div>
+             <div class="umr-stats">${fmtFull(m.tokens)} токенов · ${fmtDur(m.duration_ms)} · ${ag} ${agMark()}</div>
+           </div>`;
+        })
+        .join("")}</div>`
+    : "";
+
   el.usageDetail.innerHTML =
     limits +
     context +
     `<div class="usage-section">
-       <div class="usage-section-head">${iIcon("chart", 15, "usage-ic")}<span>Токены этого чата</span></div>` +
-    row("calculator", "Всего токенов", fmtFull(total), "вход + выход", "total") +
+       <div class="usage-divider"></div>` +
+    totalRow +
+    modelsBlock +
     row("robot", "Ответы модели (output)", fmtFull(output), "размышления + ответ вместе") +
     row("person", "Входные (input)", fmtFull(input)) +
     row("bolt", "Из кэша", fmtFull(u.cache_read || 0), "дешевле обычного входа") +
     row("archive", "Создание кэша", fmtFull(u.cache_creation || 0)) +
     row("bubble", "Ходов модели", fmtFull(u.turns || 0)) +
-    row("stopwatch", "Agentron", `${fmtAgentron(agentron)} ${agMark()}`) +
+    row("stopwatch", "Agentron", `${fmtAgentron(agentron)} ${agMark()}`, `время в чате: ${fmtDur(effDuration)}`) +
     `</div>`;
+
+  // Toggle the breakdown open/closed (persisted in `modelsExpanded`).
+  const toggle = el.usageDetail.querySelector("[data-models-toggle]");
+  if (toggle) {
+    toggle.addEventListener("click", () => {
+      modelsExpanded = !modelsExpanded;
+      toggle.classList.toggle("expanded", modelsExpanded);
+      const mb = el.usageDetail.querySelector(".usage-models");
+      if (mb) mb.classList.toggle("open", modelsExpanded);
+    });
+  }
 }
 
 export function setUsage(open) {
