@@ -968,7 +968,7 @@ body.drag-over::after {
    reads as supplementary rather than competing with it for attention. */
 .usage-badge.multi .ub-ag { font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 0; }
 /* Agentron unit mark — the clock-antenna icon inline at text height (in place of "Ag"). */
-.ag-mark { display: inline-block; vertical-align: -0.16em; line-height: 0; color: var(--accent); }
+.ag-mark { display: inline-block; vertical-align: -0.16em; line-height: 0; color: inherit; }
 .ag-mark svg { width: 1.15em; height: 1.15em; }
 .usage-badge.multi .ub-ag .ag-mark svg { width: 1.35em; height: 1.35em; }
 /* Context-fill ring + percent, as its own line under Agentron. */

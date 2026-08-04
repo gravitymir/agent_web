@@ -853,6 +853,51 @@ export function scrollToBottom() {
   updateScrollToBottomButton();
 }
 
+// --- Smooth "docking" scroll to bottom (the ↓ button only) --------------------
+// A single eased glide to the bottom: fast at the start, decelerating as it nears
+// the end (each frame covers a shrinking fraction of what's left), but with a
+// minimum-speed floor so the final approach stays brisk — it visibly brakes and
+// then docks, instead of crawling asymptotically. It retargets the live bottom
+// every frame (content may still be streaming). `scrollAnimRaf` tracks the loop;
+// `programmaticScroll` tells the scroll listener to leave follow-mode alone while
+// WE drive scrollTop (otherwise a mid-glide position would flip it off). A real
+// user gesture (wheel/touch) cancels the glide so it never fights the user.
+let scrollAnimRaf = 0;
+let programmaticScroll = false;
+
+function stopScrollAnim() {
+  if (scrollAnimRaf) cancelAnimationFrame(scrollAnimRaf);
+  scrollAnimRaf = 0;
+  programmaticScroll = false;
+}
+
+function dockStep() {
+  const m = el.messages;
+  const target = m.scrollHeight - m.clientHeight; // the live bottom
+  const remaining = target - m.scrollTop;
+  if (remaining <= 1) {
+    m.scrollTop = target;
+    stopScrollAnim();
+    state.followBottom = true;
+    scheduleScrollbar();
+    updateScrollToBottomButton();
+    return;
+  }
+  // 18%/frame → ease-out; floor (≈3.5px, capped by what's left) keeps the final
+  // dock from crawling — halved from the initial tuning for a gentler stop.
+  m.scrollTop += Math.max(remaining * 0.18, Math.min(remaining, 3.5));
+  scheduleScrollbar();
+  scrollAnimRaf = requestAnimationFrame(dockStep);
+}
+
+function smoothScrollToBottom() {
+  if (distanceFromBottom() <= 1) return scrollToBottom(); // already there
+  state.followBottom = true; // this gesture re-enables auto-follow
+  updateScrollToBottomButton();
+  programmaticScroll = true;
+  if (!scrollAnimRaf) scrollAnimRaf = requestAnimationFrame(dockStep);
+}
+
 // While the user is within this many px of the bottom we keep following new
 // output; scroll up past it and auto-follow turns off so they can read earlier
 // messages. `state.followBottom` is maintained by the scroll listener below.
@@ -917,6 +962,9 @@ export function scheduleScrollbar() {
 }
 
 el.messages.addEventListener("scroll", () => {
+  // Our own docking glide drives scrollTop; don't let its mid-flight positions
+  // flip follow-mode off — smoothScrollToBottom owns `state.followBottom` here.
+  if (programmaticScroll) { updateScrollbar(); return; }
   // The user's scroll position is the single source of truth for follow mode:
   // within FOLLOW_THRESHOLD of the bottom → keep following; scrolled up → stop.
   // (A programmatic scrollToBottom lands at ~0 distance, so it keeps follow on.)
@@ -924,10 +972,14 @@ el.messages.addEventListener("scroll", () => {
   updateScrollbar();
   updateScrollToBottomButton();
 }, { passive: true });
+// A real user gesture cancels an in-flight docking glide so it never fights them.
+["wheel", "touchstart", "pointerdown"].forEach((ev) =>
+  el.messages.addEventListener(ev, () => { if (scrollAnimRaf) stopScrollAnim(); }, { passive: true })
+);
 window.addEventListener("resize", () => { updateScrollbar(); updateScrollToBottomButton(); });
 el.scrollToBottomBtn?.addEventListener("click", () => {
   el.scrollToBottomBtn.blur();
-  scrollToBottom();
+  smoothScrollToBottom();
 });
 // Content grows during streaming / on chat load without a scroll event.
 new MutationObserver(scheduleScrollbar).observe(el.messages, {
@@ -987,16 +1039,23 @@ export function computeAgentron(durationMs, tokens) {
   return hours * mTokens;
 }
 
-// Only tenths are meaningful at this scale — anything below shows as a flat
-// "0" instead of a noisy near-zero fraction.
+// Agentron is a large unit (1 Ag ≈ 1 hour of active turn-time × 1M tokens), so
+// realistic chats land well under 1. Show two decimals below 1 (so a real 0.03
+// reads as "0.03", not a flat "0"), one decimal up to 100, whole numbers above.
+// Only a genuine ~0 collapses to "0".
 export function fmtAgentron(ag) {
-  return ag < 0.1 ? "0" : ag.toFixed(1);
+  ag = ag || 0;
+  if (ag < 0.005) return "0";
+  if (ag < 1) return ag.toFixed(2);
+  if (ag < 100) return ag.toFixed(1);
+  return Math.round(ag).toString();
 }
 
-// The Agentron unit mark — the clock-antenna icon rendered inline at text height,
-// used as the unit symbol in place of the text "Ag".
+// The Agentron unit mark — the outline stopwatch rendered inline at text height,
+// used as the unit symbol in place of the text "Ag". Uses the LINE version (not
+// the filled `agentron`) so it reads like a light text glyph next to numbers.
 function agMark() {
-  return `<span class="ag-mark" title="Agentron">${iIcon("agentron", 16, "")}</span>`;
+  return `<span class="ag-mark" title="Agentron">${iIcon("stopwatch", 16, "")}</span>`;
 }
 
 // ---------------------------------------------------------------------------
@@ -1051,22 +1110,24 @@ export function updateUsageBadge() {
   const totalTokens = base + live + ((u && u.input_tokens) || 0);
   const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
   const ctxPct = contextPercent(u && u.contextTokens, u && u.contextLimit);
-  const g = state.usage; // subscription limits (session/week/fable %), refreshed rarely
-  if (g) {
-    const pct = (o) => (o && o.percent != null ? o.percent : 0) + "%";
-    el.usageBadge.classList.add("multi");
-    el.usageBadge.innerHTML =
-      `<span class="ub-pct" title="Сессия (5 ч)">${pct(g.session)}</span>` +
+  // Always show the multi-line badge with the per-chat units (tokens, Agentron,
+  // context %). The subscription %s (session/week/Fable) exist only in CLI mode
+  // with a Claude subscription — prepended when available. The badge no longer
+  // collapses to a bare token count on the native engine (no /api/usage data).
+  const g = state.usage;
+  const pct = (o) => (o && o.percent != null ? o.percent : 0) + "%";
+  const subLines = g
+    ? `<span class="ub-pct" title="Сессия (5 ч)">${pct(g.session)}</span>` +
       `<span class="ub-pct" title="Неделя (все модели)">${pct(g.week)}</span>` +
-      `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>` +
-      `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>` +
-      `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} ${agMark()}</span>` +
-      `<span class="ub-ctx" title="Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%">` +
-      `${contextRing(ctxPct, 14, 2.2)}<span>${Math.round(ctxPct)}%</span></span>`;
-  } else {
-    el.usageBadge.classList.remove("multi");
-    el.usageBadge.textContent = tokens;
-  }
+      `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>`
+    : "";
+  el.usageBadge.classList.add("multi");
+  el.usageBadge.innerHTML =
+    subLines +
+    `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>` +
+    `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} ${agMark()}</span>` +
+    `<span class="ub-ctx" title="Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%">` +
+    `${contextRing(ctxPct, 14, 2.2)}<span>${Math.round(ctxPct)}%</span></span>`;
   if (el.usagePanel.classList.contains("open")) renderUsageDetail();
 }
 
@@ -1115,9 +1176,6 @@ export function renderUsageDetail() {
   const input = u.input_tokens || 0;
   const total = output + input;
   const agentron = computeAgentron(u.duration_ms, total);
-  // Ag ÷ steps — how much work it took per model round-trip; only meaningful
-  // once there's at least one full turn to divide by.
-  const perTurn = u.turns ? agentron / u.turns : null;
 
   // Subscription limits section (moved here from settings) — shown when known.
   const g = state.usage;
@@ -1166,13 +1224,7 @@ export function renderUsageDetail() {
     row("bolt", "Из кэша", fmtFull(u.cache_read || 0), "дешевле обычного входа") +
     row("archive", "Создание кэша", fmtFull(u.cache_creation || 0)) +
     row("bubble", "Ходов модели", fmtFull(u.turns || 0)) +
-    row(
-      "agentron",
-      "Agentron",
-      `${fmtAgentron(agentron)} ${agMark()}`,
-      "объём работы: часы × млн токенов" +
-        (perTurn != null ? ` · ${perTurn.toFixed(2)} ${agMark()}/ход — эффективность` : "")
-    ) +
+    row("stopwatch", "Agentron", `${fmtAgentron(agentron)} ${agMark()}`) +
     `</div>`;
 }
 
