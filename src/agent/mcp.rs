@@ -184,7 +184,7 @@ async fn spawn_server(name: &str, sc: &ServerCfg) -> Result<Server> {
         "params": {
             "protocolVersion": "2024-11-05",
             "capabilities": {},
-            "clientInfo": { "name": "claude_web_interface", "version": "0.1" }
+            "clientInfo": { "name": "agent_web", "version": "0.1" }
         }
     });
     init_request(&mut stdin, &mut reader, 1, init).await?;

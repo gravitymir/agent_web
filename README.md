@@ -1,4 +1,4 @@
-# claude_web_interface
+# Agent Web
 
 <img src="static/agentron.svg" width="72" height="72" align="right" alt="Логотип Agentron">
 
@@ -65,7 +65,7 @@ cargo run                       # dev-сборка, слушает http://127.0.
 
 ```bash
 cargo build --release
-./target/release/claude_web_interface
+./target/release/agent_web
 ```
 
 Откройте <http://127.0.0.1:8787>.

@@ -377,6 +377,10 @@ export function renderToolBody(t, input) {
   if (name === "Write") {
     t.meta.innerHTML =
       `${escapeHtml(shortPath(path || ""))} <span class="diff-add">+${nLines(input.content)}</span>`;
+    // Put the written content in the body so the card is expandable and you can
+    // actually see what was saved (capped like other code bodies, collapsed by
+    // default). Without this the body was empty → no chevron → content hidden.
+    if (input.content) toolCode(t.body, input.content);
     return;
   }
   if (name === "Grep" || name === "Glob") {
@@ -654,7 +658,11 @@ function finalizeStatusLine(cur) {
 // the UI bookkeeping) — used for "exit", which fires on ANY process death
 // (explicit interrupt, a crash, or the whole server shutting down for a
 // restart) and never actually means "here's your answer".
-export function finalizeTurn({ notify = true } = {}) {
+// `error: true` marks a failed turn (auth/no-key/HTTP error): no stats footer is
+// shown and the turn is not counted — if nothing was rendered the empty bubble is
+// dropped, leaving only the system error message. Callers pair it with a
+// `showSystem(..., true)` explaining what went wrong.
+export function finalizeTurn({ notify = true, error = false } = {}) {
   if (state.statusTimer) {
     clearInterval(state.statusTimer);
     state.statusTimer = null;
@@ -671,16 +679,26 @@ export function finalizeTurn({ notify = true } = {}) {
       state.current.answerEl.querySelectorAll(".cursor").forEach((elm) => elm.classList.remove("cursor"));
     }
     state.current.msgEl.classList.remove("streaming");
-    finalizeStatusLine(state.current);
-    if (state.current.answerEl) addFoldIfLong(state.current.answerEl);
-    // Fold this turn's tokens into the chat total so the badge doesn't dip
-    // before the authoritative refresh lands.
-    if (state.sessionId) {
-      const u = (state.chatUsage[state.sessionId] =
-        state.chatUsage[state.sessionId] || {
-          tokens: 0, input_tokens: 0, cache_read: 0, cache_creation: 0, turns: 0,
-        });
-      u.tokens += state.current.tokens || 0;
+    if (error) {
+      // Failed turn: drop the stats footer, and don't fold its (zero) tokens in.
+      // If nothing was produced, drop the empty assistant bubble entirely so only
+      // the system error message remains.
+      if (state.current.statusEl) state.current.statusEl.remove();
+      const ans = state.current.answerEl;
+      const empty = (!ans || ans.children.length === 0) && state.current.thinkStart == null;
+      if (empty) state.current.msgEl.remove();
+    } else {
+      finalizeStatusLine(state.current);
+      if (state.current.answerEl) addFoldIfLong(state.current.answerEl);
+      // Fold this turn's tokens into the chat total so the badge doesn't dip
+      // before the authoritative refresh lands.
+      if (state.sessionId) {
+        const u = (state.chatUsage[state.sessionId] =
+          state.chatUsage[state.sessionId] || {
+            tokens: 0, input_tokens: 0, cache_read: 0, cache_creation: 0, turns: 0,
+          });
+        u.tokens += state.current.tokens || 0;
+      }
     }
   }
   state.current = null;
@@ -689,8 +707,8 @@ export function finalizeTurn({ notify = true } = {}) {
   updateUsageBadge();
   setFaviconState("idle");
   // Reattaching after a reload replays past turns through this same function —
-  // only a turn that just finished live should chime/notify.
-  if (!state.replayMode && notify) {
+  // only a turn that just finished live should chime/notify (never on error).
+  if (!state.replayMode && notify && !error) {
     if (settings.sound) playCompletionChime();
     if (settings.notify) notifyTurnComplete((el.title.textContent || "").trim(), answerPreview);
   }
@@ -804,9 +822,10 @@ export function estimateTokens(text) {
   return Math.max(1, Math.round(text.length / 4));
 }
 
-export function showSystem(text, target = el.messages) {
+export function showSystem(text, target = el.messages, isError = false) {
   clearEmptyState();
-  const { bodyEl } = makeMessage("system", target);
+  const { msgEl, bodyEl } = makeMessage("system", target);
+  if (isError) msgEl.classList.add("error");
   const content = document.createElement("div");
   content.className = "content";
   content.textContent = text;

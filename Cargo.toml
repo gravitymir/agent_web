@@ -1,5 +1,5 @@
 [package]
-name = "claude_web_interface"
+name = "agent_web"
 version = "0.1.0"
 edition = "2021"
 

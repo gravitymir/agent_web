@@ -1177,7 +1177,13 @@ export async function init() {
   // the last-open chat's transcript — then reveal the finished UI in one pass, so
   // it never flashes the empty "+ new chat" page or switches mid-load.
   try {
-    await Promise.all([loadChatList(), loadProviders()]);
+    // Resolve the active engine FIRST (sets state.engineNative), THEN render the
+    // chat list — so cross-engine chats are marked read-only (🔒) from the very
+    // first paint. Loading them in parallel left a window where an incompatible
+    // chat rendered as normal (no lock) and could be acted on before the engine
+    // resolved.
+    await loadProviders();
+    await loadChatList();
     await restoreLastChat();
   } catch (e) {}
   refreshComposerState();

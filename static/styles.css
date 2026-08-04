@@ -189,7 +189,9 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   flex-shrink: 0; display: inline-flex; align-items: center; justify-content: center;
   color: var(--text-dim); transition: color .15s ease, opacity .15s ease;
 }
-.chat-icon svg { width: 18px; height: 18px; }
+.chat-icon svg { width: 1.25em; height: 1.25em; } /* em, so it scales with the text-size setting */
+/* Header capsule icon: size in em too, so it tracks the text-size setting. */
+.title-capsule svg { width: 1.2em; height: 1.2em; vertical-align: -.15em; }
 .chat-item:hover .chat-icon,
 .chat-item.active .chat-icon { color: var(--text); }
 .title-capsule .ios-icon.inline,
@@ -391,6 +393,9 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   text-align: center;
 }
 .msg.system .content { color: #9a9a97; }
+/* Error variant: a failed turn (auth / missing key / HTTP error). */
+.msg.system.error { background-color: #fbe4e0; }
+.msg.system.error .content { color: #b4361f; font-weight: 500; }
 .msg .body { min-width: 0; }
 .msg .role { font-size: 0.8rem; color: var(--text-dim); margin-bottom: 4px; }
 .msg .content { line-height: 1.6; word-wrap: break-word; overflow-wrap: anywhere; font-size: 1rem; }

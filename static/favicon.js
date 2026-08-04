@@ -1,26 +1,30 @@
-// Dynamic favicon / tab icon based on the open chat's state.
-// Draws the Agentron mark (cream) on a rounded-square badge whose colour signals
-// the response mode; the mark spins while the agent is active so the tab reads as
-// "alive" at a glance. Server still serves /favicon.svg as the static fallback.
+// Dynamic favicon / tab icon: the Agentron stopwatch itself — no background
+// square — recoloured to signal what the agent is doing right now. The mark is
+// asymmetric so it doesn't spin; instead the whole stopwatch changes colour per
+// event. The ring gap, clock hands and crown hole are punched to transparency,
+// so on a normal tab the mark reads exactly like the logo. Server still serves
+// /favicon.svg as the static fallback.
 
 const canvasSize = 32;
 let faviconLink = null;
-let animationId = null;
-let lastState = null;
-let phase = 0;
 
-// Per-state look: badge colour + how fast the clock hands turn (rad per ms;
-// 0 = still). idle rests (done/ready); the working states tick, tool also pulses.
-// Badge colours are deliberately deep so the white mark hits high contrast on
-// every state (WCAG contrast vs #fff, all >= ~4.5): green 5.3, amber 4.7, red
-// 6.7, blue 7.1 — maximum separation between the square and the logo.
+// Colour per event. Green = the agent finished (idle/ready). The working states
+// each get their own hue so a glance at the tab tells you the current activity:
+//   thinking  — reasoning            (purple)
+//   read      — reading files        (turquoise)
+//   search    — grep / glob / web    (yellow)
+//   write     — writing / editing    (lime)
+//   tool      — bash / other tools   (orange)
+//   output    — streaming the answer (light blue)
 const STATES = {
-  idle:     { bg: "#0b7d3d", spin: 0,      pulse: false },
-  thinking: { bg: "#c0521a", spin: 0.0060, pulse: false },
-  tool:     { bg: "#b02418", spin: 0.0050, pulse: true  },
-  output:   { bg: "#1857a8", spin: 0.0035, pulse: false },
+  idle:     "#16a34a", // green  — done / ready
+  thinking: "#8b5cf6", // purple
+  read:     "#14b8a6", // turquoise
+  search:   "#eab308", // yellow
+  write:    "#84cc16", // lime
+  tool:     "#f97316", // orange
+  output:   "#38bdf8", // light blue
 };
-const MARK = "#ffffff"; // pure white mark — highest contrast on every badge colour
 
 function getFaviconLink() {
   if (faviconLink) return faviconLink;
@@ -36,141 +40,69 @@ function setFavicon(href) {
   link.href = href;
 }
 
-function roundRect(ctx, x, y, w, h, r) {
-  ctx.beginPath();
-  if (ctx.roundRect) {
-    ctx.roundRect(x, y, w, h, r);
-  } else {
-    ctx.moveTo(x + r, y);
-    ctx.arcTo(x + w, y, x + w, y + h, r);
-    ctx.arcTo(x + w, y + h, x, y + h, r);
-    ctx.arcTo(x, y + h, x, y, r);
-    ctx.arcTo(x, y, x + w, y, r);
-    ctx.closePath();
-  }
-}
+// The stopwatch mark in a 0..100 space — same geometry as the SVG logo. Body,
+// ears and crown are filled in the state colour; the ring gap, hands and crown
+// hole are then erased (destination-out) so they are transparent cutouts.
+const BODY = { x: 48.75, y: 58.69, r: 34.75 };
+const GAP  = { r: 26.42, w: 4.6 };
+const DONUT = { x: 85.52, y: 17.04, r: 10.47, hole: 5.24 };
+const HAND_HOUR = { x: 48.75, y: 42.27 };   // tip at 12
+const HAND_MIN  = { x: 63.03, y: 71.54 };    // tip at ~4:30
 
-const FACE = { x: 11, y: 13, r: 7 };   // clock face centre + radius (24-unit space)
-const THETA_REST = 0.74;               // parked antenna leans up-right (the brand pose)
-
-// The antenna orbits the skull in its own rhythm — mostly counter-clockwise, but
-// speeding up, easing off, pausing, and now and then nudging the other way. `phase`
-// is elapsed ms. Over one period it makes exactly ONE net counter-clockwise turn,
-// and the wiggle terms vanish at the seam, so theta(0) === theta(P) (mod 2pi):
-// the loop is joinless. Starts from THETA_REST so it blends out of the idle pose.
-function antennaAngle(phase) {
+function drawMark(ctx, color) {
   const TAU = Math.PI * 2;
-  const P = 11000;                          // one leisurely orbit
-  const u = (phase % P) / P;                // 0..1
-  // -TAU*u = one CCW revolution; the sines are the rhythm (zero at u=0 and u=1).
-  const wiggle = 0.9 * Math.sin(TAU * u) + 0.5 * Math.sin(2 * TAU * u) + 0.25 * Math.sin(3 * TAU * u);
-  return THETA_REST - TAU * u - wiggle;
-}
 
-// The Agentron mark in its native 24x24 coordinate space — same geometry as the
-// SVG in ios-icons.js. The head + ears are fixed; the antenna orbits the skull at
-// angle `theta` (0 = straight up, + = right); the hands turn independently (minute
-// 60x the hour) so the clock reads as realistically running.
-function traceMark(ctx, minuteRad, hourRad, theta) {
-  const TAU = Math.PI * 2;
-  const s = Math.sin(theta), c = Math.cos(theta);
-  const at = (dist) => [FACE.x + dist * s, FACE.y - dist * c];   // point up the antenna axis
-  const base = at(FACE.r + 0.05), tip = at(FACE.r + 4.05);
-
-  ctx.beginPath(); ctx.arc(FACE.x, FACE.y, FACE.r, 0, TAU); ctx.stroke();  // head
-  ctx.beginPath(); ctx.ellipse(4.5, 13, 1.4, 2.5, 0, Math.PI / 2, Math.PI * 1.5); ctx.stroke();  // left ear
-  ctx.beginPath(); ctx.ellipse(17.5, 13, 1.4, 2.5, 0, -Math.PI / 2, Math.PI / 2); ctx.stroke();  // right ear
-
-  ctx.beginPath(); ctx.moveTo(base[0], base[1]);                           // antenna stalk
-  ctx.lineTo(FACE.x + (FACE.r + 2.2) * s, FACE.y - (FACE.r + 2.2) * c); ctx.stroke();
-  ctx.beginPath(); ctx.arc(tip[0], tip[1], 1.8, 0, TAU); ctx.stroke();     // antenna tip
-
-  ctx.save();
-  ctx.translate(FACE.x, FACE.y);
-  ctx.rotate(hourRad);
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(0, -4); ctx.stroke();      // hour hand
-  ctx.restore();
-  ctx.save();
-  ctx.translate(FACE.x, FACE.y);
-  ctx.rotate(minuteRad);
-  ctx.beginPath(); ctx.moveTo(0, 0); ctx.lineTo(2.7, 1.6); ctx.stroke();   // minute hand
-  ctx.restore();
-}
-
-// Centred on the clock FACE so the orbiting antenna sweeps symmetrically. The
-// bound is the antenna tip's outer edge at its farthest reach (face + 4.05 stalk
-// + 1.8 tip + ~1.05 stroke ≈ 13.9 units): 13.9 * s <= ~15.3 keeps ~0.7px clear of
-// the 16px canvas radius at every orbit angle. The head fills the middle; the
-// state colour shows as a ring around it, and the antenna reaches the edges.
-const MARK_SCALE = 1.1;
-
-function drawIcon(ctx, cfg, phase) {
-  const c = canvasSize / 2;
-  ctx.clearRect(0, 0, canvasSize, canvasSize);
-
-  // Badge: rounded square in the state colour, gently breathing for "tool".
-  const pulseMs = cfg.pulse ? phase : 0;
-  const size = 31 + (pulseMs ? Math.sin(pulseMs * 0.008) * 1.6 : 0);
-  const half = size / 2;
-  ctx.fillStyle = cfg.bg;
-  roundRect(ctx, c - half, c - half, size, size, size * 0.26);
-  ctx.fill();
-
-  // Motion: minute hand at cfg.spin, hour hand 60x slower (a real running clock);
-  // antenna in its own orbiting rhythm. All still when the state is at rest.
-  const minuteRad = phase * cfg.spin;
-  const hourRad = minuteRad / 60;
-  const theta = cfg.spin ? antennaAngle(phase) : THETA_REST;
-
-  ctx.save();
-  ctx.translate(c, c);
-  ctx.scale(MARK_SCALE, MARK_SCALE);
-  ctx.translate(-FACE.x, -FACE.y);
-  ctx.strokeStyle = MARK;
-  ctx.lineWidth = 2.1;
+  // Solid stopwatch in the state colour.
+  ctx.fillStyle = color;
+  ctx.strokeStyle = color;
   ctx.lineCap = "round";
   ctx.lineJoin = "round";
-  traceMark(ctx, minuteRad, hourRad, theta);
-  ctx.restore();
+  ctx.beginPath(); ctx.ellipse(13.65, 61.3, 9.88, 15.11, 0, 0, TAU); ctx.fill();   // left button
+  ctx.beginPath(); ctx.ellipse(83.85, 61.3, 9.88, 15.11, 0, 0, TAU); ctx.fill();   // right button
+  ctx.lineWidth = 6.43;                                                            // crown stem
+  ctx.beginPath(); ctx.moveTo(70.65, 33.22); ctx.lineTo(78.74, 25.25); ctx.stroke();
+  ctx.beginPath(); ctx.arc(BODY.x, BODY.y, BODY.r, 0, TAU); ctx.fill();            // face disc
+  ctx.beginPath(); ctx.arc(DONUT.x, DONUT.y, DONUT.r, 0, TAU); ctx.fill();         // crown ring
+
+  // Erase the negative space to transparency.
+  ctx.globalCompositeOperation = "destination-out";
+  ctx.strokeStyle = "#000";
+  ctx.fillStyle = "#000";
+  ctx.lineWidth = GAP.w;
+  ctx.beginPath(); ctx.arc(BODY.x, BODY.y, GAP.r, 0, TAU); ctx.stroke();           // ring gap
+  ctx.beginPath(); ctx.arc(DONUT.x, DONUT.y, DONUT.hole, 0, TAU); ctx.fill();      // crown hole
+  ctx.lineWidth = 6;
+  ctx.beginPath();                                                                 // hands
+  ctx.moveTo(HAND_HOUR.x, HAND_HOUR.y);
+  ctx.lineTo(BODY.x, BODY.y);
+  ctx.lineTo(HAND_MIN.x, HAND_MIN.y);
+  ctx.stroke();
+  ctx.globalCompositeOperation = "source-over";
 }
 
-function makeIcon(type, phase = 0) {
+// No square, so the mark can fill the frame: fit the 0..100 art (centred on
+// ~50,50) to ~31px of the 32px canvas.
+const MARK_SCALE = 0.33;
+
+function makeIcon(color) {
   const canvas = document.createElement("canvas");
   canvas.width = canvasSize;
   canvas.height = canvasSize;
   const ctx = canvas.getContext("2d");
-  drawIcon(ctx, STATES[type] || STATES.idle, phase);
+  ctx.clearRect(0, 0, canvasSize, canvasSize);
+  const c = canvasSize / 2;
+  ctx.save();
+  ctx.translate(c, c);
+  ctx.scale(MARK_SCALE, MARK_SCALE);
+  ctx.translate(-50, -50);
+  drawMark(ctx, color);
+  ctx.restore();
   return canvas.toDataURL("image/png");
 }
 
 export function setFaviconState(type) {
-  lastState = type;
-  phase = 0;
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
-
-  const cfg = STATES[type] || STATES.idle;
-
-  if (cfg.spin || cfg.pulse) {
-    let last = performance.now();
-    const tick = (now) => {
-      phase += now - last;
-      last = now;
-      setFavicon(makeIcon(type, phase));
-      animationId = requestAnimationFrame(tick);
-    };
-    setFavicon(makeIcon(type, 0));
-    animationId = requestAnimationFrame(tick);
-  } else {
-    setFavicon(makeIcon(type, 0));
-  }
+  setFavicon(makeIcon(STATES[type] || STATES.idle));
 }
 
-export function stopFaviconAnimation() {
-  if (animationId) {
-    cancelAnimationFrame(animationId);
-    animationId = null;
-  }
-}
+// Kept for API compatibility; the favicon no longer animates.
+export function stopFaviconAnimation() {}

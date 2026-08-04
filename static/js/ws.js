@@ -219,8 +219,9 @@ export function handleEvent(evt) {
       case "no_session":
         break; // nothing live to attach to; keep whatever is shown
       case "error":
-        showSystem(`Ошибка: ${evt.message}`);
-        finalizeTurn();
+        // Surface the error in-chat and don't count the turn (no stats footer).
+        showSystem(turnErrorMessage(evt.message), undefined, true);
+        finalizeTurn({ notify: false, error: true });
         break;
       case "permission_request":
         // Rendered regardless of replay: an unanswered request is still
@@ -250,7 +251,7 @@ export function handleEvent(evt) {
       if (state.current) {
         renderToolCalls(state.current, evt);
         const n = countBlocks(evt, "tool_use");
-        if (n) { state.current.runningTasks += n; updateStatus(); setFaviconState("tool"); }
+        if (n) { state.current.runningTasks += n; updateStatus(); setFaviconState(toolFaviconState(firstToolName(evt))); }
       }
       // Context-window fill: each assistant message's own usage reflects the
       // conversation size as of THAT api call (not summed — a later, smaller
@@ -279,10 +280,16 @@ export function handleEvent(evt) {
       break;
 
     case "result":
-      if (evt.total_cost_usd != null || evt.duration_ms != null) {
-        addMeta(evt);
+      if (resultIsError(evt)) {
+        // Failed turn: show the error, drop the stats footer, don't count it.
+        showSystem(turnErrorMessage(evt.result || evt.error || evt.message), undefined, true);
+        finalizeTurn({ notify: false, error: true });
+      } else {
+        if (evt.total_cost_usd != null || evt.duration_ms != null) {
+          addMeta(evt);
+        }
+        finalizeTurn();
       }
-      finalizeTurn();
       break;
   }
 }
@@ -290,6 +297,46 @@ export function handleEvent(evt) {
 export function countBlocks(evt, type) {
   const content = evt.message && evt.message.content;
   return Array.isArray(content) ? content.filter((b) => b.type === type).length : 0;
+}
+
+// Map a tool name to a favicon activity state (colour). Unknown tools fall back
+// to the generic "tool" colour.
+export function toolFaviconState(name) {
+  switch (name) {
+    case "Read": case "NotebookRead": case "WebFetch":
+      return "read";
+    case "Grep": case "Glob": case "WebSearch": case "LS":
+      return "search";
+    case "Write": case "Edit": case "MultiEdit": case "NotebookEdit":
+      return "write";
+    default:
+      return "tool";
+  }
+}
+
+function firstToolName(evt) {
+  const content = evt.message && evt.message.content;
+  if (!Array.isArray(content)) return null;
+  const b = content.find((x) => x.type === "tool_use");
+  return b ? b.name : null;
+}
+
+// Turn a raw backend/agent error into a clear, user-facing message. Auth / missing
+// key failures get a dedicated explanation since that's the common case.
+function turnErrorMessage(raw) {
+  const s = (raw == null ? "" : String(raw)).trim();
+  if (/oauth|authenticat|unauthorized|\b401\b|api[_ -]?key|token has expired|re-?authenticate|no api key/i.test(s)) {
+    return "Ошибка авторизации: нет действующего ключа API или токен истёк. " +
+      "Проверьте ключ в настройках (или переменную окружения CWI_AGENT_*_API_KEY) и переавторизуйтесь.";
+  }
+  return s ? `Ошибка: ${s}` : "Ошибка: запрос завершился неуспешно.";
+}
+
+// A `result` event that represents a failed turn (Claude Code sets is_error /
+// an "error…" subtype; our native agent may too).
+function resultIsError(evt) {
+  return evt.is_error === true ||
+    (typeof evt.subtype === "string" && evt.subtype.indexOf("error") !== -1);
 }
 
 export function handleStreamEvent(ev) {
@@ -305,7 +352,7 @@ export function handleStreamEvent(ev) {
         // The full parameters arrive with the `assistant` event; here we just
         // reflect that a tool is running in the live status line.
         cur.status = `выполняет ${block.name || "tool"}…`;
-        setFaviconState("tool");
+        setFaviconState(toolFaviconState(block.name));
       } else if (block.type === "thinking") {
         ensureThinking(cur);
         cur.status = "размышляет…";

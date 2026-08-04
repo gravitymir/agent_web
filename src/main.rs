@@ -101,9 +101,29 @@ async fn main() -> anyhow::Result<()> {
         .init();
 
     let config = Config::from_env();
-    tracing::info!(?config, "starting claude_web_interface");
+    tracing::info!(?config, "starting agent_web");
     tracing::info!("workspace: {}", config.workspace_abs().display());
     tracing::info!("session dir: {}", config.session_dir().display());
+
+    // Startup auth sanity-check. In native mode a missing API key means every
+    // request will fail with an auth error — warn loudly up front instead of only
+    // when the first turn dies. (CLI mode authenticates via the claude OAuth token,
+    // whose expiry surfaces on the first /api/models call.)
+    if config.native_engine {
+        let p = agent::provider::Provider::from_env();
+        if p.has_key() {
+            tracing::info!("native engine: provider '{}', model '{}'", p.name, p.model);
+        } else {
+            tracing::warn!(
+                "no API key configured for native provider '{}': set CWI_AGENT_API_KEY \
+                 or the provider-specific CWI_AGENT_*_API_KEY in your .env — requests will \
+                 fail with an authorization error until then",
+                p.name
+            );
+        }
+    } else {
+        tracing::info!("engine: Claude Code CLI (auth via the claude OAuth token)");
+    }
 
     let meta_path = config
         .projects_root

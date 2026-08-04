@@ -47,9 +47,15 @@ export const IOSSVG = {
   rocket: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M4.5 16.5c-1.5 1.26-2 5-2 5s3.74-.5 5-2c.71-.84.7-2.13-.09-2.91a2.18 2.18 0 0 0-2.91-.09z"/><path d="M12 15l-3-3a22 22 0 0 1 2-3.95A12.88 12.88 0 0 1 22 2c0 2.72-.78 7.5-6 11a22.35 22.35 0 0 1-4 2z"/><path d="M9 12H4s.55-3.03 2-4c1.62-1.08 5 0 5 0"/><path d="M12 15v5s3.03-.55 4-2c1.08-1.62 0-5 0-5"/></svg>',
   help: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10"/><path d="M9.09 9a3 3 0 0 1 5.83 1c0 2-3 3-3 3"/><line x1="12" y1="17" x2="12.01" y2="17"/></svg>',
   shield: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 22s8-4 8-10V5l-8-3-8 3v7c0 6 8 10 8 10z"/></svg>',
-  // Agentron: a clock face (hour + minute hands) with a right-leaning antenna
-  // (~35°) — the "agent work × time" unit.
-  agentron: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="13" r="7"/><path d="M4.5 10.5a1.4 2.5 0 0 0 0 5"/><path d="M17.5 10.5a1.4 2.5 0 0 1 0 5"/><path d="M11 13V9"/><path d="M11 13l2.7 1.6"/><path d="M15.5 7.6l1.4-1.7"/><circle cx="18.1" cy="4.5" r="1.8"/></svg>',
+  // Stopwatch: outline sibling of the Agentron mark (clock face ring + hands,
+  // side buttons, top-right crown) drawn in the same line style as the other
+  // icons — used as a selectable chat icon.
+  stopwatch: '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="10.5" cy="13" r="6.5"/><path d="M10.5 9 L10.5 13 L13.4 14.8"/><path d="M4.3 10.8 a1.3 2.3 0 0 0 0 4.6"/><path d="M16.7 10.8 a1.3 2.3 0 0 1 0 4.6"/><path d="M15.2 7.9 L16.4 6.7"/><circle cx="17.5" cy="5.4" r="1.7"/></svg>',
+  // Agentron: a filled stopwatch — clock face (ring + hands) with two side
+  // buttons and a top-right crown; the "agent work × time" unit. Matches the
+  // logo/favicon art; drawn via a mask so the ring gap, hands and crown hole are
+  // transparent cutouts and the shape takes currentColor.
+  agentron: '<svg viewBox="0 0 100 100"><mask id="agm" maskUnits="userSpaceOnUse" x="0" y="0" width="100" height="100"><rect width="100" height="100" fill="#000"/><g fill="#fff" stroke="#fff" stroke-linecap="round" stroke-linejoin="round"><ellipse cx="13.65" cy="61.3" rx="9.88" ry="15.11"/><ellipse cx="83.85" cy="61.3" rx="9.88" ry="15.11"/><line x1="70.65" y1="33.22" x2="78.74" y2="25.25" stroke-width="6.43"/><circle cx="48.75" cy="58.69" r="34.75"/><circle cx="85.52" cy="17.04" r="10.47"/></g><g fill="#000" stroke="#000" stroke-linecap="round" stroke-linejoin="round"><circle cx="48.75" cy="58.69" r="26.42" fill="none" stroke-width="3.09"/><circle cx="85.52" cy="17.04" r="5.24"/><path d="M48.75 42.27 L48.75 58.69 L63.03 71.54" fill="none" stroke-width="5"/></g></mask><rect width="100" height="100" fill="currentColor" mask="url(#agm)"/></svg>',
 };
 
 // Render an iOS SVG icon at a given pixel size (default 20) with optional class.

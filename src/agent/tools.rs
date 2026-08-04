@@ -296,6 +296,88 @@ mod truncate_tests {
     }
 }
 
+#[cfg(test)]
+mod resolve_tests {
+    //! Sandbox containment: `resolve` must keep every path inside the workspace.
+    //! Cases distilled from manual exploration of Windows path edge cases (drive
+    //! letters, root-relative paths, and the shared-prefix sibling trap). The
+    //! synthetic workspaces don't exist on disk, so `resolve`'s symlink guard
+    //! (which canonicalizes real paths) is skipped and the check stays purely
+    //! lexical and deterministic.
+    use super::{normalize, resolve};
+    use std::path::{Path, PathBuf};
+
+    fn ws() -> PathBuf {
+        if cfg!(windows) {
+            PathBuf::from(r"C:\nonexistent\agent_ws")
+        } else {
+            PathBuf::from("/nonexistent/agent_ws")
+        }
+    }
+
+    #[test]
+    fn nested_relative_stays_inside() {
+        let w = ws();
+        let got = resolve(&w, "src/agent/tools.rs").expect("in-workspace path allowed");
+        assert!(got.starts_with(normalize(&w)));
+    }
+
+    #[test]
+    fn curdir_segments_ok() {
+        assert!(resolve(&ws(), "./src/./main.rs").is_ok());
+    }
+
+    #[test]
+    fn dotdot_back_into_workspace_ok() {
+        // Escapes then re-enters: the net path is still inside.
+        assert!(resolve(&ws(), "src/../Cargo.toml").is_ok());
+    }
+
+    #[test]
+    fn parent_traversal_escape_rejected() {
+        assert!(resolve(&ws(), "../../../etc/passwd").is_err());
+    }
+
+    #[test]
+    fn sibling_sharing_name_prefix_rejected() {
+        // The string-prefix trap: "<ws>_hacked" shares a textual prefix with the
+        // workspace but is a DIFFERENT directory. Component-wise `starts_with`
+        // must reject it (a naive string `starts_with` would wrongly allow it).
+        let w = ws();
+        let attack = format!("{}_hacked", w.to_string_lossy());
+        let attack = Path::new(&attack).join("loot.txt");
+        assert!(
+            resolve(&w, &attack.to_string_lossy()).is_err(),
+            "sibling dir sharing a name prefix must not count as inside the workspace"
+        );
+    }
+
+    #[test]
+    fn normalize_collapses_dotdot() {
+        assert_eq!(normalize(Path::new("a/b/../c")), PathBuf::from("a").join("c"));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_absolute_drive_path_rejected() {
+        assert!(resolve(&ws(), r"C:\Windows\System32").is_err());
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_root_relative_path_rejected() {
+        // `\Windows` is absolute on Windows (root of the current drive) — it must
+        // not be mistaken for a path inside the workspace.
+        assert!(resolve(&ws(), r"\Windows\System32").is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unix_absolute_outside_rejected() {
+        assert!(resolve(&ws(), "/etc/passwd").is_err());
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Bash / shell
 // ---------------------------------------------------------------------------

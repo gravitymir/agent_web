@@ -116,8 +116,8 @@ pub fn claude_config_dir() -> PathBuf {
 /// Claude Code encodes a project's absolute path into a directory name by
 /// replacing every non-alphanumeric character with `-`.
 ///
-/// e.g. `C:\Users\gravi\Documents\rust\claude_web_interface`
-///   -> `C--Users-gravi-Documents-rust-claude-web-interface`
+/// e.g. `C:\Users\gravi\Documents\rust\agent_web`
+///   -> `C--Users-gravi-Documents-rust-agent-web`
 pub fn encode_project_dir(path: &std::path::Path) -> String {
     let s = path.to_string_lossy();
     // Strip the Windows verbatim prefix `\\?\` that canonicalize adds.
@@ -135,8 +135,8 @@ mod tests {
     #[test]
     fn encodes_non_alnum_to_dash() {
         assert_eq!(
-            encode_project_dir(Path::new(r"C:\Users\gravi\claude_web_interface")),
-            "C--Users-gravi-claude-web-interface"
+            encode_project_dir(Path::new(r"C:\Users\gravi\agent_web")),
+            "C--Users-gravi-agent-web"
         );
         assert_eq!(encode_project_dir(Path::new("/home/u/my proj")), "-home-u-my-proj");
     }

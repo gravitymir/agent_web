@@ -94,6 +94,7 @@ export const el = {
 
 // Icon palette for new chats — iOS-style monochrome SVG keys (see ios-icons.js).
 export const ICONS = [
+  "stopwatch",
   "document","chat","bug","rocket","pencil","gear","brain","chart","search","lightbulb",
   "folder","globe","flask","lock","archive","pin","target","server","puzzle","book",
   "check","image","film","music","robot","bubble","microscope","calculator","calendar","star",
