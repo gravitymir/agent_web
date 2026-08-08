@@ -1,0 +1,11 @@
+# Keep the build context small and — critically — keep secrets OUT of the image.
+.env
+guest.env
+target
+.git
+.gitignore
+chats
+workspace
+guest-workspace
+*.log
+docs

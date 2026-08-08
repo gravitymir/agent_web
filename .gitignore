@@ -2,3 +2,9 @@
 .claude/settings.local.json
 # Local secrets: native-engine provider keys (commit `.env.example` instead).
 .env
+# Guest container secrets (commit `guest.env.example` instead).
+guest.env
+# Runtime data dirs (portable storage / workspaces).
+/chats
+/workspace
+/guest-workspace
