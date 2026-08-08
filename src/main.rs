@@ -1,4 +1,5 @@
 mod agent;
+mod banner;
 mod claude;
 mod config;
 mod history;
@@ -7,6 +8,7 @@ mod models;
 mod session;
 mod titles;
 mod usage;
+mod wizard;
 mod ws;
 
 use std::sync::{Arc, Mutex};
@@ -95,25 +97,27 @@ fn load_env_file() {
 async fn main() -> anyhow::Result<()> {
     load_env_file();
 
+    // Interactive engine/port picker (only on a TTY; skipped for pipes/services
+    // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
+    wizard::run();
+
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())
         .init();
 
     let config = Config::from_env();
-    tracing::info!(?config, "starting agent_web");
-    tracing::info!("workspace: {}", config.workspace_abs().display());
-    tracing::info!("session dir: {}", config.session_dir().display());
+    // The banner is the launch summary (engine, port, paths, settings). Don't also
+    // log the full Config — it just duplicates the banner and clutters the terminal.
+    banner::print_startup(&config);
 
-    // Startup auth sanity-check. In native mode a missing API key means every
+    // The one thing worth a log line: in native mode a missing API key means every
     // request will fail with an auth error — warn loudly up front instead of only
     // when the first turn dies. (CLI mode authenticates via the claude OAuth token,
     // whose expiry surfaces on the first /api/models call.)
     if config.native_engine {
         let p = agent::provider::Provider::from_env();
-        if p.has_key() {
-            tracing::info!("native engine: provider '{}', model '{}'", p.name, p.model);
-        } else {
+        if !p.has_key() {
             tracing::warn!(
                 "no API key configured for native provider '{}': set CWI_AGENT_API_KEY \
                  or the provider-specific CWI_AGENT_*_API_KEY in your .env — requests will \
@@ -121,8 +125,6 @@ async fn main() -> anyhow::Result<()> {
                 p.name
             );
         }
-    } else {
-        tracing::info!("engine: Claude Code CLI (auth via the claude OAuth token)");
     }
 
     let meta_path = config
