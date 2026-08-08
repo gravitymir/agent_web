@@ -1126,49 +1126,93 @@ export function fmtTokens(n) {
 
 // The badge shows the open chat's running token total (base from the backend +
 // the live tokens of a turn in progress). Hidden when no chat is open.
+// The active-engine label, shown as the badge header. CLI = the Claude
+// subscription → "Cloud <plan>" (e.g. "Cloud Max"); native → the provider's
+// display name (e.g. "Gemini"). Empty until the engine resolves.
+function engineLabel() {
+  if (state.engineNative == null) return "";
+  if (state.engineNative) {
+    const p = state.providers.find((x) => x.id === settings.provider);
+    return (p && p.name) || settings.provider || "native";
+  }
+  const g = state.usage;
+  const plan = g && g.plan ? String(g.plan) : "";
+  const nice = plan ? " " + plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase() : "";
+  return "Cloud" + nice;
+}
+function engineHeaderHtml() {
+  const label = engineLabel();
+  return label
+    ? `<div class="ub-head"><span class="ub-dot"></span><span>${escapeHtml(label)}</span></div>`
+    : "";
+}
+// One "label … value" row (label left, value right, spread space-between).
+function ubRow(k, v, cls, title) {
+  return (
+    `<div class="ub-row"${title ? ` title="${escapeHtml(title)}"` : ""}>` +
+    `<span class="ub-k">${k}</span><span class="ub-v ${cls || ""}">${v}</span></div>`
+  );
+}
+
 export function updateUsageBadge() {
+  const header = engineHeaderHtml();
   const open = !!state.sessionId;
-  el.usageBadge.hidden = !open;
-  if (!open) return;
+  // No chat open → keep just the engine header visible (no per-chat stats yet).
+  if (!open) {
+    el.usageBadge.classList.toggle("multi", !!header);
+    el.usageBadge.hidden = !header;
+    el.usageBadge.innerHTML = header;
+    return;
+  }
   const u = state.chatUsage[state.sessionId];
   const live = state.current ? state.current.tokens || 0 : 0;
   const totalTokens = processedTokens(u, live); // input+output+cache (1:1 with logs)
   const tokens = fmtTokens(totalTokens);
+  const cacheTokens = fmtTokens((u && (u.cache_read || 0) + (u.cache_creation || 0)) || 0);
   const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
-  const ctxPct = contextPercent(u && u.contextTokens, u && u.contextLimit);
-  // Always show the multi-line badge with the per-chat units (tokens, Agentron,
-  // context %). The subscription %s (session/week/Fable) exist only in CLI mode
-  // with a Claude subscription — prepended when available. The badge no longer
-  // collapses to a bare token count on the native engine (no /api/usage data).
-  const g = state.usage;
-  const pct = (o) => (o && o.percent != null ? o.percent : 0) + "%";
-  const subLines = g
-    ? `<span class="ub-pct" title="Сессия (5 ч)">${pct(g.session)}</span>` +
-      `<span class="ub-pct" title="Неделя (все модели)">${pct(g.week)}</span>` +
-      `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>`
-    : "";
+  const ctxLimit = (u && u.contextLimit) || CONTEXT_WINDOW;
+  const ctxPct = contextPercent(u && u.contextTokens, ctxLimit);
   const lvl = ctxLevel(ctxPct);
   const ctxTitle =
     lvl === "danger"
-      ? `Контекст ${Math.round(ctxPct)}% — почти полон, стоит сжать (см. настройки)`
+      ? `Context ${Math.round(ctxPct)}% — almost full, consider compacting (see settings)`
       : lvl === "warn"
-      ? `Контекст ${Math.round(ctxPct)}% — уже большой`
-      : `Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%`;
+      ? `Context ${Math.round(ctxPct)}% — already large`
+      : `Context fill (last turn): ${Math.round(ctxPct)}%`;
+  // Subscription %s (5-hour session / weekly / Fable weekly) exist only in CLI
+  // mode with a Claude subscription. Native has no /api/usage data → skip them.
+  const g = state.usage;
+  const pct = (o) => (o && o.percent != null ? Math.round(o.percent) : 0) + "%";
+  let html = header;
+  if (g) {
+    html += ubRow("5h", pct(g.session), "", "Session — 5-hour window");
+    html += ubRow("week", pct(g.week), "", "Week — all models");
+    html += ubRow("Fable", pct(g.fable), "ub-dim", "Week — Fable");
+  }
+  html += ubRow("tokens", tokens, "", "Processed by the model (input + output + cache)");
+  html += ubRow(
+    "Agentron",
+    `${ag} ${agMark()}`,
+    "",
+    "Agentron — agentic work volume (hours × million tokens)"
+  );
+  html += ubRow("Max context", fmtTokens(ctxLimit), "ub-dim", "Model/engine max context window");
+  html += ubRow("context", `${Math.round(ctxPct)}%`, `ub-ctx ${lvl}`, ctxTitle);
+  html += ubRow("context cache", cacheTokens, "ub-dim", "Cached context tokens (cache read + create)");
   el.usageBadge.classList.add("multi");
-  el.usageBadge.innerHTML =
-    subLines +
-    `<span class="ub-tok" title="Обработано моделью в этом чате (вход + выход + кэш)">${tokens}</span>` +
-    `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} ${agMark()}</span>` +
-    `<span class="ub-ctx ub-ctx-num ${lvl}" title="${ctxTitle}">${Math.round(ctxPct)}%</span>`;
-  // On the direct-API/Gemini engine, clicking the context % opens the context
-  // settings (thresholds + summarization). CLI: leave the default (usage panel).
+  el.usageBadge.innerHTML = html;
+  // Native/Gemini: clicking the context row opens the context settings
+  // (thresholds + summarization). CLI: leave the default (open usage panel).
   if (state.engineNative) {
-    const ctxEl = el.usageBadge.querySelector(".ub-ctx");
-    if (ctxEl)
-      ctxEl.addEventListener("click", (e) => {
+    const ctxRow = el.usageBadge.querySelector(".ub-ctx");
+    const row = ctxRow && ctxRow.closest(".ub-row");
+    if (row) {
+      row.classList.add("clickable");
+      row.addEventListener("click", (e) => {
         e.stopPropagation();
         setSettings(true);
       });
+    }
   }
   if (el.usagePanel.classList.contains("open")) renderUsageDetail();
 }
@@ -1187,23 +1231,86 @@ export async function loadUsage() {
   if (el.usagePanel.classList.contains("open")) renderUsageDetail();
 }
 
-// One "Label … NN%" row with a thin progress bar. `compact` drops the reset line.
-function limRow(label, o, compact) {
+// ---- Reset countdown ------------------------------------------------------
+// The CLI reports resets as a wall-clock string like "Aug 8, 9pm (Europe/Dublin)"
+// (no year, timezone in parens). We turn it into a live "time left" countdown.
+const MONTHS = { jan: 0, feb: 1, mar: 2, apr: 3, may: 4, jun: 5, jul: 6, aug: 7, sep: 8, oct: 9, nov: 10, dec: 11 };
+
+// Offset (ms) of an IANA timezone from UTC at the given instant: tzWall - utc.
+function tzOffset(utcMs, tz) {
+  const dtf = new Intl.DateTimeFormat("en-US", {
+    timeZone: tz, hour12: false,
+    year: "numeric", month: "2-digit", day: "2-digit",
+    hour: "2-digit", minute: "2-digit", second: "2-digit",
+  });
+  const p = {};
+  for (const part of dtf.formatToParts(new Date(utcMs))) p[part.type] = part.value;
+  const asUTC = Date.UTC(+p.year, +p.month - 1, +p.day, +p.hour % 24, +p.minute, +p.second);
+  return asUTC - utcMs;
+}
+
+// A wall-clock time in `tz` (or browser-local when tz is unknown) → UTC instant.
+function wallToInstant(y, mo, d, h, mi, tz) {
+  if (!tz) return new Date(y, mo, d, h, mi).getTime();
+  const guessUTC = Date.UTC(y, mo, d, h, mi);
+  return guessUTC - tzOffset(guessUTC, tz); // one pass; DST edges are negligible for a countdown
+}
+
+// "Aug 8, 9pm (Europe/Dublin)" → absolute instant (ms), picking this year (or
+// next, if the date has already passed — e.g. a "Jan" reset seen in December).
+function parseResetInstant(s) {
+  const m = /([A-Za-z]{3,})\s+(\d{1,2}),\s*(\d{1,2})(?::(\d{2}))?\s*([ap]m)?\s*(?:\(([^)]+)\))?/i.exec(s || "");
+  if (!m) return null;
+  const mon = MONTHS[m[1].slice(0, 3).toLowerCase()];
+  if (mon == null) return null;
+  let hour = +m[3];
+  const ap = (m[5] || "").toLowerCase();
+  if (ap === "pm" && hour < 12) hour += 12;
+  if (ap === "am" && hour === 12) hour = 0;
+  const day = +m[2], min = m[4] ? +m[4] : 0, tz = m[6] || undefined;
+  const now = Date.now();
+  const year = new Date(now).getFullYear();
+  let inst = wallToInstant(year, mon, day, hour, min, tz);
+  if (inst < now - 36e5) inst = wallToInstant(year + 1, mon, day, hour, min, tz);
+  return inst;
+}
+
+// Duration → "3d 4h 12m" (weekly, withDays) or "4h 12m" (5-hour window).
+function fmtUntil(ms, withDays) {
+  if (ms <= 0) return "now";
+  let mins = Math.floor(ms / 60000);
+  const days = Math.floor(mins / 1440); mins -= days * 1440;
+  const hours = Math.floor(mins / 60); mins -= hours * 60;
+  const parts = [];
+  if (withDays && days) parts.push(days + "d");
+  const hh = withDays ? hours : days * 24 + hours;
+  if (hh) parts.push(hh + "h");
+  parts.push(mins + "m");
+  return parts.join(" ");
+}
+
+// One "Label … NN%  <time-to-reset>" row (no progress bar). `withDays` adds the
+// day count to the countdown (weekly windows); off for the 5-hour window.
+function limRow(label, o, withDays) {
   if (!o) return "";
   const pct = Math.max(0, Math.min(100, Math.round(o.percent || 0)));
   const cls = pct >= 90 ? " hot" : pct >= 70 ? " warm" : "";
-  const reset = !compact && o.resets
-    ? `<div class="usage-reset">сброс: ${escapeHtml(o.resets)}</div>` : "";
+  const inst = o.resets ? parseResetInstant(o.resets) : null;
+  const left = inst != null ? fmtUntil(inst - Date.now(), withDays) : "";
+  const leftHtml = left
+    ? `<span class="usage-lim-reset" title="resets ${escapeHtml(o.resets || "")}">${escapeHtml(left)}</span>`
+    : "";
   return `<div class="usage-lim">
-    <div class="usage-lim-top"><span>${label}</span><span>${pct}%</span></div>
-    <div class="usage-track"><div class="usage-fill${cls}" style="width:${pct}%"></div></div>
-    ${reset}
+    <div class="usage-lim-top">
+      <span class="usage-lim-label">${escapeHtml(label)}</span>
+      <span class="usage-lim-vals"><span class="usage-lim-pct${cls}">${pct}%</span>${leftHtml}</span>
+    </div>
   </div>`;
 }
 
 function subscriptionHeading(g) {
   const plan = g.plan ? " " + escapeHtml(String(g.plan).toUpperCase()) : "";
-  return `Подписка${plan}`;
+  return `Subscription${plan}`;
 }
 
 // Full n with thousands separators, e.g. 1 234 567.
@@ -1269,9 +1376,9 @@ export function renderUsageDetail() {
   const limits = g
     ? `<div class="usage-section usage-limits">
          <div class="usage-section-head">${iIcon("target", 15, "usage-ic")}<span>${subscriptionHeading(g)}</span></div>
-         ${limRow("Сессия (5 ч)", g.session, false)}
-         ${limRow("Неделя", g.week, false)}
-         ${limRow("Неделя (Fable)", g.fable, false)}
+         ${limRow("5 hours", g.session, false)}
+         ${limRow("Week", g.week, true)}
+         ${limRow("Week (Fable)", g.fable, true)}
        </div>`
     : "";
 

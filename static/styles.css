@@ -165,15 +165,17 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 
 /* Subscription usage/limits block in the settings panel. */
 .usage-info { display: flex; flex-direction: column; gap: 13px; }
-.usage-lim-top { display: flex; justify-content: space-between; font-size: .82rem; margin-bottom: 5px; }
-.usage-track {
-  height: 7px; border-radius: 4px; overflow: hidden;
-  background: color-mix(in srgb, var(--text-dim) 22%, transparent);
+/* One limit row: label (left) … percent + time-to-reset (right). No bar. */
+.usage-lim-top {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 12px;
+  font-size: .82rem;
 }
-.usage-fill { height: 100%; border-radius: 4px; background: var(--accent); transition: width .35s ease; }
-.usage-fill.warm { background: #d9a441; }
-.usage-fill.hot { background: #c0392b; }
-.usage-reset { font-size: .72rem; color: var(--text-dim); margin-top: 4px; }
+.usage-lim-label { color: var(--text); }
+.usage-lim-vals { display: flex; align-items: baseline; gap: 8px; white-space: nowrap; }
+.usage-lim-pct { font-weight: 700; font-variant-numeric: tabular-nums; }
+.usage-lim-pct.warm { color: #d9a441; }
+.usage-lim-pct.hot { color: #c0392b; }
+.usage-lim-reset { font-size: .74rem; color: var(--text-dim); font-variant-numeric: tabular-nums; }
 /* Read-only chat: hide the whole input row + attach preview, keep the banner. */
 .composer.readonly .composer-row,
 .composer.readonly .attach-preview { display: none; }
@@ -223,24 +225,6 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   transition: max-width .2s ease, background .2s ease;
 }
 /* Active-engine indicator: small fixed pill, top-left, informational only. */
-.engine-badge {
-  position: fixed; top: 12px; left: 12px; z-index: 40;
-  display: inline-flex; align-items: center; gap: 7px;
-  padding: 6px 12px; border-radius: 20px;
-  background: color-mix(in srgb, var(--bg-elev) 30%, transparent);
-  -webkit-backdrop-filter: blur(10px); backdrop-filter: blur(10px);
-  border: 1px solid var(--border); box-shadow: 0 2px 12px var(--shadow);
-  font-size: 0.78rem; font-weight: 600; color: var(--text-dim);
-  white-space: nowrap; pointer-events: none; user-select: none;
-}
-.engine-badge[hidden] { display: none; }
-.engine-badge .eng-dot {
-  width: 8px; height: 8px; border-radius: 50%;
-  background: var(--accent); flex-shrink: 0;
-  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
-}
-.engine-badge .eng-kind { color: var(--text); }
-
 /* Hover: keep the same width, just grow downward to reveal the full title. */
 .title-capsule:hover {
   white-space: normal; text-overflow: clip;
@@ -969,37 +953,45 @@ body.drag-over::after {
 .usage-badge:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .usage-badge:active { transform: translateY(0); }
 .usage-badge[hidden] { display: none; }
-/* Four-line variant: session% / week% / Fable week% / tokens. `min-width` (not
-   the old 46px) keeps the box a stable size across realistic token counts so
-   it doesn't drift into the scrollbar's reserved clearance (see .scrollbar) —
-   100px fits the token line up to ~7 characters ("999.5k", "12.3M", …) at any
-   font-size setting; an outlier longer than that still grows the box rather
-   than clipping, right-aligned via `align-items: flex-end` for the % lines. */
+/* Table variant: one row per metric — label (left) … value (right), spread with
+   space-between. The box grows to fit its widest row (e.g. "контекст кэш");
+   `min-width` keeps it stable at small values without drifting into the
+   scrollbar's reserved clearance (see .scrollbar). A header row carries the
+   active-engine label ("Cloud Max" / "Gemini"). */
 .usage-badge.multi {
-  height: auto; min-width: 100px; padding: 6px 10px;
-  flex-direction: column; align-items: flex-end; justify-content: center; gap: 1px;
-  line-height: 1.18;
+  height: auto; min-width: 118px; padding: 7px 11px;
+  flex-direction: column; align-items: stretch; justify-content: center; gap: 2px;
+  line-height: 1.25; text-align: left; white-space: nowrap;
 }
-.usage-badge.multi .ub-pct { font-size: .72rem; }
-.usage-badge.multi .ub-dim { color: color-mix(in srgb, var(--text-dim) 65%, transparent); }
-.usage-badge.multi .ub-tok { font-size: .8rem; color: var(--text); margin-top: 2px; }
-/* Agentron — a secondary, "fun stat" line under the main token count, so it
-   reads as supplementary rather than competing with it for attention. */
-.usage-badge.multi .ub-ag { font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 0; }
-/* Agentron unit mark — the clock-antenna icon inline at text height (in place of "Ag"). */
+.usage-badge.multi .ub-head {
+  display: flex; align-items: center; gap: 6px;
+  margin-bottom: 3px; padding-bottom: 4px; border-bottom: 1px solid var(--border);
+  font-size: .74rem; font-weight: 700; color: var(--text);
+}
+.usage-badge.multi .ub-dot {
+  width: 8px; height: 8px; border-radius: 50%; flex-shrink: 0;
+  background: var(--accent);
+  box-shadow: 0 0 6px color-mix(in srgb, var(--accent) 60%, transparent);
+}
+.usage-badge.multi .ub-row {
+  display: flex; align-items: baseline; justify-content: space-between; gap: 16px;
+}
+.usage-badge.multi .ub-k { font-size: .68rem; font-weight: 500; color: var(--text-dim); }
+.usage-badge.multi .ub-v {
+  font-size: .74rem; font-weight: 600; color: var(--text); font-variant-numeric: tabular-nums;
+}
+.usage-badge.multi .ub-dim.ub-v,
+.usage-badge.multi .ub-row.ub-dim .ub-v { color: color-mix(in srgb, var(--text-dim) 70%, transparent); }
+.usage-badge.multi .ub-row.clickable { cursor: pointer; }
+.usage-badge.multi .ub-row.clickable:hover .ub-k { color: var(--accent); }
+/* Agentron unit mark — the clock-antenna icon inline at text height, after the
+   value (like "%" trails a number). */
 .ag-mark { display: inline-block; vertical-align: -0.16em; line-height: 0; color: inherit; }
 .ag-mark svg { width: 1.15em; height: 1.15em; }
-.usage-badge.multi .ub-ag .ag-mark svg { width: 1.35em; height: 1.35em; }
-/* Context-fill ring + percent, as its own line under Agentron. */
-.usage-badge.multi .ub-ctx {
-  display: flex; align-items: center; gap: 4px;
-  font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 2px;
-}
-/* Context shown as a plain % number (not a ring); colour by severity. */
-.usage-badge.multi .ub-ctx-num { font-weight: 700; font-variant-numeric: tabular-nums; }
-.ub-ctx.warn, .usage-ctx-pct.warn, .ctx-hint.warn { color: #e0a417; } /* amber */
-.ub-ctx.danger, .usage-ctx-pct.danger, .ctx-hint.danger { color: #d94a3d; } /* red */
-.usage-badge.multi .ub-ctx { cursor: pointer; }
+.usage-badge.multi .ub-v .ag-mark svg { width: 1.25em; height: 1.25em; }
+/* Context row value coloured by severity. */
+.ub-v.warn, .usage-ctx-pct.warn, .ctx-hint.warn { color: #e0a417; } /* amber */
+.ub-v.danger, .usage-ctx-pct.danger, .ctx-hint.danger { color: #d94a3d; } /* red */
 
 /* Big context percent in the usage panel. */
 .usage-ctx-pct {

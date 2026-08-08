@@ -757,29 +757,12 @@ export async function loadProviders() {
   renderEngineBadge();
 }
 
-// Persistent top-left indicator of the active engine, shown from startup. CLI
-// mode reads "CLI · Claude Code"; native mode adds the provider and model.
+// The active-engine label now lives as the header of the usage badge (top-right):
+// "Cloud <plan>" in subscription/CLI mode, the provider name (e.g. "Gemini") in
+// native mode. Kept as a named export so its existing callers just refresh the
+// merged badge whenever the engine/provider/model changes.
 export function renderEngineBadge() {
-  const badge = document.getElementById("engine-badge");
-  if (!badge) return;
-  if (state.engineNative == null) {
-    badge.hidden = true; // engine not resolved yet (/api/providers pending/failed)
-    return;
-  }
-  let kind, detail;
-  if (state.engineNative) {
-    const p = state.providers.find((x) => x.id === settings.provider);
-    kind = "native";
-    detail = (p && p.name) || settings.provider || "";
-    if (settings.model) detail += (detail ? " / " : "") + settings.model;
-  } else {
-    kind = "CLI";
-    detail = "Claude Code";
-  }
-  badge.innerHTML =
-    `<span class="eng-dot"></span><span class="eng-kind">${escapeHtml(kind)}</span>` +
-    (detail ? `<span class="eng-detail">· ${escapeHtml(detail)}</span>` : "");
-  badge.hidden = false;
+  updateUsageBadge();
 }
 
 export function populateProviders() {
