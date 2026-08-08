@@ -478,6 +478,7 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   font-size: 0.866rem; outline: none;
 }
 .chat-search:focus { border-color: var(--accent); }
+.chat-search[hidden] { display: none; }
 
 /* Current-chat controls (export MD / JSON, delete) — a floating chip fixed to
    the bottom-right of the chat area, to the right of the centred composer. */

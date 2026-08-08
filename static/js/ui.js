@@ -497,7 +497,12 @@ export function openNewChatModal() {
   el.chatName.value = "";
   el.modalCreate.disabled = true;
   el.modalOverlay.hidden = false;
+  // Focus the name field. Try immediately, then again on a macrotask: focusing
+  // in the same tick the overlay is unhidden often doesn't take (the input isn't
+  // focusable until layout updates). setTimeout (not rAF) fires even when the tab
+  // isn't compositing, so the focus lands reliably.
   el.chatName.focus();
+  setTimeout(() => el.chatName.focus(), 0);
 }
 
 export function closeNewChatModal() {
@@ -951,6 +956,14 @@ export function renderChatList(chats) {
   redecorateChatList();
   refreshComposerState();
   updateUsageBadge();
+  // Search box only makes sense with something to search: show it when there's
+  // more than one chat; hide (and clear) it for 0 or 1 so a stale filter can't
+  // hide the lone chat.
+  if (el.chatSearch) {
+    const many = chats.length > 1;
+    el.chatSearch.hidden = !many;
+    if (!many) el.chatSearch.value = "";
+  }
   filterChats(); // re-apply any active search filter after a refresh
 }
 
