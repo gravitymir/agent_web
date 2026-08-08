@@ -537,6 +537,7 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 }
 .tool-meta .diff-add { color: #57ab5a; font-weight: 600; }
 .tool-meta .diff-del { color: #e5534b; font-weight: 600; }
+.tool-meta .tool-empty { color: var(--text-dim); font-weight: 500; font-style: italic; }
 .tool-body { padding: 0 10px 8px; }
 .tool-body:empty { display: none; }
 .tool-desc { color: var(--text-dim); font-size: 0.82rem; margin: 0 0 6px; }

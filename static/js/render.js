@@ -313,7 +313,7 @@ export function renderToolCard(cur, name, input) {
   head.className = "tool-head";
   const nameEl = document.createElement("span");
   nameEl.className = "tool-name";
-  nameEl.innerHTML = `${iIcon('gear', 14, 'inline')} ${escapeHtml(name)}`;
+  nameEl.innerHTML = `${iIcon(toolIcon(name), 14, 'inline')} ${escapeHtml(name)}`;
   const meta = document.createElement("span");
   meta.className = "tool-meta";
   head.appendChild(nameEl);
@@ -342,6 +342,26 @@ export function renderToolCard(cur, name, input) {
   // scrollToBottomIfPinned) — no separate post-append measurement that could
   // disagree if the user is scrolling away just as the card appears.
   scrollToBottomIfPinned();
+}
+
+// A distinct icon per tool so the card shows at a glance WHICH tool ran —
+// especially a terminal glyph for Bash (a console command) vs a file/pencil for
+// Write/Edit. Unknown tools keep the neutral gear.
+function toolIcon(name) {
+  switch (name) {
+    case "Bash": return "terminal";
+    case "Write": return "file";
+    case "Edit":
+    case "MultiEdit": return "pencil";
+    case "Read": return "book";
+    case "Grep": return "search";
+    case "Glob": return "folder";
+    case "Task": return "robot";
+    case "WebFetch":
+    case "WebSearch": return "globe";
+    case "TodoWrite": return "check";
+    default: return "gear";
+  }
 }
 
 export function renderToolBody(t, input) {
@@ -375,8 +395,13 @@ export function renderToolBody(t, input) {
     return;
   }
   if (name === "Write") {
-    t.meta.innerHTML =
-      `${escapeHtml(shortPath(path || ""))} <span class="diff-add">+${nLines(input.content)}</span>`;
+    const n = nLines(input.content);
+    // No "+0" for an empty file — it's noise. Show a muted "пустой" hint instead
+    // so the card still says what happened (an empty file was created).
+    const tag = n
+      ? ` <span class="diff-add">+${n}</span>`
+      : ` <span class="tool-empty">пустой</span>`;
+    t.meta.innerHTML = `${escapeHtml(shortPath(path || ""))}${tag}`;
     // Put the written content in the body so the card is expandable and you can
     // actually see what was saved (capped like other code bodies, collapsed by
     // default). Without this the body was empty → no chevron → content hidden.
