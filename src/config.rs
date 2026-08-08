@@ -68,11 +68,17 @@ impl Config {
         let bind_addr =
             std::env::var("CWI_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
 
+        // Workspace = the code the agent works on. Default (portable): a fixed
+        // `workspace/` next to the exe — stable regardless of which directory the
+        // exe is launched from — instead of the volatile cwd. Created if missing.
         let workspace_dir = std::env::var("CWI_WORKSPACE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                exe_dir()
+                    .map(|d| d.join("workspace"))
+                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
             });
+        let _ = std::fs::create_dir_all(&workspace_dir);
 
         let claude_bin = std::env::var("CWI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
 
@@ -139,9 +145,21 @@ pub fn claude_config_dir() -> PathBuf {
             return PathBuf::from(dir);
         }
     }
+    // Portable default: a `chats/` dir next to the exe (independent of cwd), so a
+    // deployed folder keeps its own isolated chats. Falls back to `~/.claude`
+    // only if the exe location can't be determined.
+    if let Some(d) = exe_dir() {
+        return d.join("chats");
+    }
     dirs::home_dir()
         .unwrap_or_else(|| PathBuf::from("."))
         .join(".claude")
+}
+
+/// Directory containing the running executable (its parent). `None` if it can't
+/// be determined. Used to anchor portable defaults (workspace/, chats/, static/).
+pub fn exe_dir() -> Option<PathBuf> {
+    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
 }
 
 /// Claude Code encodes a project's absolute path into a directory name by

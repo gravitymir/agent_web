@@ -122,6 +122,16 @@ async fn main() -> anyhow::Result<()> {
     // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
     wizard::run();
 
+    // Portable storage: when CLAUDE_CONFIG_DIR isn't set, pin it to the resolved
+    // default (a `chats/` dir next to the exe) and EXPORT it, so the spawned
+    // `claude` CLI subprocess inherits the same isolated dir and never falls back
+    // to the user's own ~/.claude. Created up front so it always exists.
+    if std::env::var("CLAUDE_CONFIG_DIR").map_or(true, |v| v.trim().is_empty()) {
+        let dir = config::claude_config_dir();
+        let _ = std::fs::create_dir_all(&dir);
+        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+    }
+
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())
