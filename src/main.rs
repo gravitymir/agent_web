@@ -1,4 +1,5 @@
 mod agent;
+mod auth;
 mod banner;
 mod claude;
 mod config;
@@ -71,6 +72,8 @@ pub struct AppState {
     pub meta: Arc<Mutex<MetaStore>>,
     /// Live per-session keeper processes.
     pub sessions: Arc<SessionManager>,
+    /// Optional built-in access gate (CWI_AUTH); a no-op when disabled.
+    pub auth: Arc<auth::Auth>,
 }
 
 /// Load `KEY=VALUE` lines from an env file (default `.env`, override with
@@ -118,19 +121,28 @@ fn load_env_file() {
 async fn main() -> anyhow::Result<()> {
     load_env_file();
 
-    // Interactive engine/port picker (only on a TTY; skipped for pipes/services
-    // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
-    wizard::run();
-
     // Portable storage: when CLAUDE_CONFIG_DIR isn't set, pin it to the resolved
     // default (a `chats/` dir next to the exe) and EXPORT it, so the spawned
     // `claude` CLI subprocess inherits the same isolated dir and never falls back
-    // to the user's own ~/.claude. Created up front so it always exists.
+    // to the user's own ~/.claude. Done before the `guest` CLI and the wizard so
+    // both see the same resolved dir.
     if std::env::var("CLAUDE_CONFIG_DIR").map_or(true, |v| v.trim().is_empty()) {
         let dir = config::claude_config_dir();
         let _ = std::fs::create_dir_all(&dir);
         std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
     }
+
+    // `agent_web guest <new|list|revoke>` — manage built-in access codes, then
+    // exit. Handled before the wizard so it never triggers the interactive menu.
+    let argv: Vec<String> = std::env::args().collect();
+    if argv.get(1).map(|s| s == "guest").unwrap_or(false) {
+        auth::run_cli(&argv[2..]);
+        return Ok(());
+    }
+
+    // Interactive engine/port picker (only on a TTY; skipped for pipes/services
+    // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
+    wizard::run();
 
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
@@ -175,10 +187,15 @@ async fn main() -> anyhow::Result<()> {
     };
 
     let meta = Arc::new(Mutex::new(MetaStore::load(meta_path)));
+    let gate = Arc::new(auth::Auth::load());
+    if gate.enabled {
+        tracing::info!("access gate ENABLED (CWI_AUTH) — every route requires a valid session");
+    }
     let state = Arc::new(AppState {
         config: config.clone(),
         meta: meta.clone(),
         sessions: SessionManager::new(config.clone(), mcp, meta),
+        auth: gate,
     });
 
     let static_dir = config.static_dir.clone();
@@ -194,7 +211,10 @@ async fn main() -> anyhow::Result<()> {
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
         .route("/ws", get(ws_upgrade))
+        .route("/login", get(auth::login_get).post(auth::login_post))
         .fallback_service(ServeDir::new(static_dir))
+        // Access gate (no-op unless CWI_AUTH): guards every route above, incl. /ws.
+        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::gate))
         .layer(axum::middleware::from_fn(add_security_headers))
         .layer(TraceLayer::new_for_http())
         .with_state(state);

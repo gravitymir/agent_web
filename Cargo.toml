@@ -23,3 +23,9 @@ walkdir = "2"
 regex = "1"
 # Interactive startup menu (arrow-key engine/port picker); only used on a TTY.
 dialoguer = { version = "0.11", default-features = false }
+# Built-in access gate (optional, CWI_AUTH=1): HMAC-signed session cookies +
+# hashed one-time access codes. Pure-Rust so the musl/container build stays clean.
+hmac = "0.12"
+sha2 = "0.10"
+rand = "0.8"
+hex = "0.4"
