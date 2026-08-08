@@ -488,6 +488,9 @@ export function selectIcon(cell, icon) {
   modalIcon = icon;
   el.iconGrid.querySelectorAll(".icon-cell.selected").forEach((n) => n.classList.remove("selected"));
   cell.classList.add("selected");
+  // Move focus to the name field so the user can keep typing right after picking
+  // an icon (the click otherwise leaves focus on the icon cell).
+  el.chatName.focus();
 }
 
 export function openNewChatModal() {
