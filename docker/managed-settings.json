@@ -14,23 +14,13 @@
       "Read(~/**)",
       "Read(//etc/**)",
       "Read(//root/**)",
-      "Read(//chats/**)",
-      "Glob(//proc/**)",
-      "Grep(//proc/**)",
-      "Glob(//chats/**)",
-      "Grep(//chats/**)"
+      "Read(//chats/**)"
     ],
     "allow": [
       "Read(./**)",
       "Edit(./**)",
-      "Write(./**)",
-      "Glob(./**)",
-      "Grep(./**)",
       "Read(//workspace/**)",
-      "Edit(//workspace/**)",
-      "Write(//workspace/**)",
-      "Glob(//workspace/**)",
-      "Grep(//workspace/**)"
+      "Edit(//workspace/**)"
     ]
   },
   "allowManagedPermissionRulesOnly": true,
