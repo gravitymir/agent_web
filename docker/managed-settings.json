@@ -1,0 +1,40 @@
+{
+  "permissions": {
+    "defaultMode": "dontAsk",
+    "deny": [
+      "Bash",
+      "PowerShell",
+      "WebFetch",
+      "WebSearch",
+      "mcp__*",
+      "AskUserQuestion",
+      "Read(//proc/**)",
+      "Read(//sys/**)",
+      "Read(//dev/**)",
+      "Read(~/**)",
+      "Read(//etc/**)",
+      "Read(//root/**)",
+      "Read(//chats/**)",
+      "Glob(//proc/**)",
+      "Grep(//proc/**)",
+      "Glob(//chats/**)",
+      "Grep(//chats/**)"
+    ],
+    "allow": [
+      "Read(./**)",
+      "Edit(./**)",
+      "Write(./**)",
+      "Glob(./**)",
+      "Grep(./**)",
+      "Read(//workspace/**)",
+      "Edit(//workspace/**)",
+      "Write(//workspace/**)",
+      "Glob(//workspace/**)",
+      "Grep(//workspace/**)"
+    ]
+  },
+  "allowManagedPermissionRulesOnly": true,
+  "allowManagedMcpServersOnly": true,
+  "disableBypassPermissionsMode": "disable",
+  "disableSideloadFlags": true
+}
