@@ -995,6 +995,21 @@ body.drag-over::after {
   display: flex; align-items: center; gap: 4px;
   font-size: .68rem; color: var(--text-dim); font-weight: 500; margin-top: 2px;
 }
+/* Context shown as a plain % number (not a ring); colour by severity. */
+.usage-badge.multi .ub-ctx-num { font-weight: 700; font-variant-numeric: tabular-nums; }
+.ub-ctx.warn, .usage-ctx-pct.warn, .ctx-hint.warn { color: #e0a417; } /* amber */
+.ub-ctx.danger, .usage-ctx-pct.danger, .ctx-hint.danger { color: #d94a3d; } /* red */
+.usage-badge.multi .ub-ctx { cursor: pointer; }
+
+/* Big context percent in the usage panel. */
+.usage-ctx-pct {
+  flex-shrink: 0; min-width: 2.6em; text-align: center;
+  font-size: 1.35rem; font-weight: 700; color: var(--accent);
+  font-variant-numeric: tabular-nums;
+}
+.usage-context-row.clickable { cursor: pointer; border-radius: 10px; }
+.usage-context-row.clickable:hover { background: color-mix(in srgb, var(--text) 6%, transparent); }
+.ctx-hint { font-weight: 600; margin-top: 2px; }
 
 /* Context-window fill ring: a clockwise-filling circle (see render.js::contextRing),
    same idea as the interactive CLI's own context gauge. Track is a faint full
@@ -1103,6 +1118,19 @@ body.drag-over::after {
   font-size: 0.933rem; color: var(--text); user-select: none;
 }
 .setting-check input { width: 18px; height: 18px; accent-color: var(--accent); cursor: pointer; flex-shrink: 0; }
+
+/* Context-management controls (sliders + auto toggle). */
+.ctx-controls { margin-top: 12px; display: flex; flex-direction: column; gap: 12px; }
+.ctx-controls.disabled { opacity: 0.45; pointer-events: none; }
+.ctx-range { display: flex; flex-direction: column; gap: 5px; cursor: pointer; }
+.ctx-range-label { font-size: 0.867rem; color: var(--text-dim); }
+.ctx-range-label b { color: var(--accent); font-variant-numeric: tabular-nums; }
+.ctx-range input[type="range"] { width: 100%; accent-color: var(--accent); cursor: pointer; }
+.ctx-more {
+  align-self: flex-start; background: transparent; border: none; padding: 0;
+  color: var(--accent); font-size: 0.85rem; cursor: pointer; text-decoration: underline;
+}
+.ctx-more:disabled { color: var(--text-dim); cursor: default; text-decoration: none; }
 
 .seg { display: inline-flex; gap: 0; border: 1px solid var(--border); border-radius: 9px; overflow: hidden; }
 .seg-btn {

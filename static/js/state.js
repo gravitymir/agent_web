@@ -78,6 +78,16 @@ export const el = {
   autosend: document.getElementById("autosend-check"),
   sound: document.getElementById("sound-check"),
   notify: document.getElementById("notify-check"),
+  // Context-management settings (direct-API / Gemini engine only)
+  ctxSection: document.getElementById("ctx-section"),
+  ctxMgmt: document.getElementById("ctx-mgmt-check"),
+  ctxControls: document.getElementById("ctx-controls"),
+  ctxNudge: document.getElementById("ctx-nudge"),
+  ctxNudgeVal: document.getElementById("ctx-nudge-val"),
+  ctxCompress: document.getElementById("ctx-compress"),
+  ctxCompressVal: document.getElementById("ctx-compress-val"),
+  ctxAuto: document.getElementById("ctx-auto"),
+  ctxMore: document.getElementById("ctx-more"),
   // modal
   modalOverlay: document.getElementById("modal-overlay"),
   iconGrid: document.getElementById("icon-grid"),

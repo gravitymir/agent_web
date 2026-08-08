@@ -1,6 +1,6 @@
 import { state, el, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings } from './ui.js';
+import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings } from './ui.js';
 import { setFaviconState } from '../favicon.js';
 import { playCompletionChime } from '../sound.js';
 import { notifyTurnComplete } from '../notify.js';
@@ -1039,6 +1039,23 @@ export function computeAgentron(durationMs, tokens) {
   return hours * mTokens;
 }
 
+// Total tokens the model actually processed for this chat — IDENTICAL to what
+// Claude Code's `.jsonl` logs (and ccusage) count: new input + output + the
+// re-sent context (cache_read) + cache writes (cache_creation). Cache dominates
+// (often ~95%+) because every step re-sends the whole accumulated context, so
+// this is far larger than input+output alone. `live` is the in-flight turn's
+// output. This is the token axis of the Agentron unit.
+export function processedTokens(u, live) {
+  u = u || {};
+  return (
+    (u.tokens || 0) +
+    (live || 0) +
+    (u.input_tokens || 0) +
+    (u.cache_read || 0) +
+    (u.cache_creation || 0)
+  );
+}
+
 // Agentron is a large unit (1 Ag ≈ 1 hour of active turn-time × 1M tokens), so
 // realistic chats land well under 1. Show two decimals below 1 (so a real 0.03
 // reads as "0.03", not a flat "0"), one decimal up to 100, whole numbers above.
@@ -1069,6 +1086,16 @@ export const CONTEXT_WINDOW = 200_000;
 export function contextPercent(contextTokens, limit) {
   const lim = limit || CONTEXT_WINDOW;
   return Math.max(0, Math.min(100, ((contextTokens || 0) / lim) * 100));
+}
+
+// Severity of the context fill against the user's thresholds — drives the colour
+// and hints. Only active for the direct-API/Gemini engine with context management
+// on (Cloud CLI self-compacts, so no nudge there). "" = normal.
+export function ctxLevel(pct) {
+  if (!state.engineNative || !settings.ctxMgmt) return "";
+  if (pct >= settings.ctxCompress) return "danger";
+  if (pct >= settings.ctxNudge) return "warn";
+  return "";
 }
 
 // `size`/`stroke` in px. Starts at 12 o'clock and fills clockwise via a
@@ -1104,10 +1131,9 @@ export function updateUsageBadge() {
   el.usageBadge.hidden = !open;
   if (!open) return;
   const u = state.chatUsage[state.sessionId];
-  const base = (u && u.tokens) || 0;
   const live = state.current ? state.current.tokens || 0 : 0;
-  const tokens = fmtTokens(base + live);
-  const totalTokens = base + live + ((u && u.input_tokens) || 0);
+  const totalTokens = processedTokens(u, live); // input+output+cache (1:1 with logs)
+  const tokens = fmtTokens(totalTokens);
   const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
   const ctxPct = contextPercent(u && u.contextTokens, u && u.contextLimit);
   // Always show the multi-line badge with the per-chat units (tokens, Agentron,
@@ -1121,13 +1147,29 @@ export function updateUsageBadge() {
       `<span class="ub-pct" title="Неделя (все модели)">${pct(g.week)}</span>` +
       `<span class="ub-pct ub-dim" title="Неделя (Fable)">${pct(g.fable)}</span>`
     : "";
+  const lvl = ctxLevel(ctxPct);
+  const ctxTitle =
+    lvl === "danger"
+      ? `Контекст ${Math.round(ctxPct)}% — почти полон, стоит сжать (см. настройки)`
+      : lvl === "warn"
+      ? `Контекст ${Math.round(ctxPct)}% — уже большой`
+      : `Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%`;
   el.usageBadge.classList.add("multi");
   el.usageBadge.innerHTML =
     subLines +
-    `<span class="ub-tok" title="Токены в этом чате">${tokens}</span>` +
+    `<span class="ub-tok" title="Обработано моделью в этом чате (вход + выход + кэш)">${tokens}</span>` +
     `<span class="ub-tok ub-ag" title="Agentron — объём агентской работы (часы × млн токенов)">${ag} ${agMark()}</span>` +
-    `<span class="ub-ctx" title="Заполненность контекста (по последнему ходу): ${Math.round(ctxPct)}%">` +
-    `${contextRing(ctxPct, 14, 2.2)}<span>${Math.round(ctxPct)}%</span></span>`;
+    `<span class="ub-ctx ub-ctx-num ${lvl}" title="${ctxTitle}">${Math.round(ctxPct)}%</span>`;
+  // On the direct-API/Gemini engine, clicking the context % opens the context
+  // settings (thresholds + summarization). CLI: leave the default (usage panel).
+  if (state.engineNative) {
+    const ctxEl = el.usageBadge.querySelector(".ub-ctx");
+    if (ctxEl)
+      ctxEl.addEventListener("click", (e) => {
+        e.stopPropagation();
+        setSettings(true);
+      });
+  }
   if (el.usagePanel.classList.contains("open")) renderUsageDetail();
 }
 
@@ -1204,7 +1246,12 @@ export function renderUsageDetail() {
   const live = state.current ? state.current.tokens || 0 : 0;
   const output = (u.tokens || 0) + live;
   const input = u.input_tokens || 0;
-  const total = output + input;
+  const cacheRead = u.cache_read || 0;
+  const cacheCreation = u.cache_creation || 0;
+  const cache = cacheRead + cacheCreation;
+  // "Total" = everything the model processed (1:1 with the logs): the cache
+  // re-sends usually dwarf input+output. This is the Agentron token axis.
+  const total = output + input + cache;
   // Effort time for the Agentron. Chats WITH a real per-model split use the
   // tracked time as-is. Legacy chats (no split — they predate per-turn timing, or
   // recorded only a tiny active duration) floor it to ~25s per model turn, so the
@@ -1233,14 +1280,25 @@ export function renderUsageDetail() {
   // total — see history.rs::last_context_tokens).
   const ctxLimit = u.contextLimit || CONTEXT_WINDOW;
   const ctxPct = contextPercent(u.contextTokens, ctxLimit);
-  // Label + percent on the first line, the fill numbers on the second — no
-  // separate section header, no trailing "токенов".
+  const ctxLvl = ctxLevel(ctxPct);
+  const ctxHint =
+    ctxLvl === "danger"
+      ? `<div class="usage-sub ctx-hint danger">Контекст почти полон — сожмите старые ходы</div>`
+      : ctxLvl === "warn"
+      ? `<div class="usage-sub ctx-hint warn">Контекст уже большой</div>`
+      : "";
+  // Percent as a big coloured number (not a ring). On the direct-API/Gemini
+  // engine the row is clickable → context settings.
+  const ctxClickable = state.engineNative;
   const context = `<div class="usage-section usage-context">
-       <div class="usage-row usage-context-row">
-         <span class="usage-ic">${contextRing(ctxPct, 28, 3)}</span>
+       <div class="usage-row usage-context-row ${ctxLvl}${ctxClickable ? " clickable" : ""}"${
+    ctxClickable ? ' data-open-ctx="1" title="Открыть настройки контекста"' : ""
+  }>
+         <span class="usage-ctx-pct ${ctxLvl}">${Math.round(ctxPct)}%</span>
          <div class="usage-row-main">
-           <div class="k">Контекст чата ${Math.round(ctxPct)}%</div>
+           <div class="k">Контекст чата</div>
            <div class="usage-sub">${fmtFull(u.contextTokens || 0)} / ${fmtFull(ctxLimit)}</div>
+           ${ctxHint}
          </div>
        </div>
      </div>`;
@@ -1257,13 +1315,22 @@ export function renderUsageDetail() {
   // Per-model breakdown (recorded forward; empty for chats that predate it). The
   // percentage is by tokens WITHIN the breakdown, so it always sums to 100% even
   // if it differs slightly from the headline total's token-counting method.
-  const models = (u.models || [])
+  const rawModels = (u.models || [])
     .map((m) => ({
       model: m.model,
-      tokens: (m.input_tokens || 0) + (m.output_tokens || 0),
+      base: (m.input_tokens || 0) + (m.output_tokens || 0),
       duration_ms: m.duration_ms || 0,
     }))
-    .filter((m) => m.tokens > 0 || m.duration_ms > 0)
+    .filter((m) => m.base > 0 || m.duration_ms > 0);
+  const baseSum = rawModels.reduce((s, m) => s + m.base, 0);
+  // Cache isn't tracked per-model yet, so spread it across models by their
+  // input+output share — keeps the breakdown summing to the processed total.
+  const models = rawModels
+    .map((m) => ({
+      model: m.model,
+      tokens: m.base + (baseSum ? cache * (m.base / baseSum) : 0),
+      duration_ms: m.duration_ms,
+    }))
     .sort((a, b) => b.tokens - a.tokens);
   // No forward-recorded split yet (chat predates the feature) → synthesize ONE
   // bucket from the chat's own real totals, so the breakdown shows everywhere. A
@@ -1282,7 +1349,7 @@ export function renderUsageDetail() {
     hasBreakdown && modelsExpanded ? " expanded" : ""
   }"${hasBreakdown ? ' data-models-toggle="1"' : ""}>
        <span class="usage-ic">${iIcon("calculator", 16)}</span>
-       <div class="usage-row-main"><div class="k">Всего токенов</div><div class="usage-sub">вход + выход${
+       <div class="usage-row-main"><div class="k">Всего обработано</div><div class="usage-sub">вход + выход + кэш${
          hasBreakdown ? " · по моделям" : ""
        }</div></div>
        <div class="v">${fmtFull(total)}${
@@ -1332,6 +1399,9 @@ export function renderUsageDetail() {
       if (mb) mb.classList.toggle("open", modelsExpanded);
     });
   }
+  // Clicking the context row (direct-API/Gemini) opens the context settings.
+  const ctxOpen = el.usageDetail.querySelector("[data-open-ctx]");
+  if (ctxOpen) ctxOpen.addEventListener("click", () => setSettings(true));
 }
 
 export function setUsage(open) {

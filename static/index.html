@@ -200,6 +200,28 @@
           <option value="haiku">Haiku 4.5</option>
         </select>
       </section>
+      <section class="setting-group" id="ctx-section" hidden>
+        <div class="setting-label">Контекст (Gemini)</div>
+        <label class="setting-check">
+          <input type="checkbox" id="ctx-mgmt-check" />
+          <span>Управлять контекстом</span>
+        </label>
+        <div class="ctx-controls" id="ctx-controls">
+          <label class="ctx-range">
+            <span class="ctx-range-label">Подсказка при <b id="ctx-nudge-val">65%</b></span>
+            <input type="range" id="ctx-nudge" min="40" max="85" step="5" value="65" />
+          </label>
+          <label class="ctx-range">
+            <span class="ctx-range-label">Сжатие при <b id="ctx-compress-val">95%</b></span>
+            <input type="range" id="ctx-compress" min="80" max="98" step="1" value="95" />
+          </label>
+          <label class="setting-check">
+            <input type="checkbox" id="ctx-auto" />
+            <span>Автосжатие (только по завершении хода)</span>
+          </label>
+          <button type="button" class="ctx-more" id="ctx-more">Что это и зачем?</button>
+        </div>
+      </section>
       <section class="setting-group">
         <div class="setting-label">Размер шрифта</div>
         <div class="seg seg-fill" id="fontsize-seg">

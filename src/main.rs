@@ -168,8 +168,8 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
+    // No "listening on" log — the banner's BIND line already shows the address.
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
-    tracing::info!("listening on http://{}", config.bind_addr);
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;

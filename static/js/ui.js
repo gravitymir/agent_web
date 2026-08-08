@@ -593,7 +593,20 @@ export const settings = {
   // Desktop notification when a turn finishes in a hidden tab. Off by default —
   // unlike sound, this needs an explicit OS permission grant.
   notify: localStorage.getItem("cwi_notify") === "1",
+  // Context management (direct-API / Gemini engine only). Master on by default,
+  // but auto-compaction off — so out of the box it only hints/offers, never acts.
+  // Thresholds are bounded so nonsense values (100% context, 1% nudge) can't be set.
+  ctxMgmt: localStorage.getItem("cwi_ctx_mgmt") !== "0",
+  ctxNudge: clampPct(+(localStorage.getItem("cwi_ctx_nudge") || 65), 40, 85),
+  ctxCompress: clampPct(+(localStorage.getItem("cwi_ctx_compress") || 95), 80, 98),
+  ctxAuto: localStorage.getItem("cwi_ctx_auto") === "1",
 };
+
+// Clamp a percent into [lo, hi]; NaN falls back to lo.
+function clampPct(v, lo, hi) {
+  if (!Number.isFinite(v)) return lo;
+  return Math.max(lo, Math.min(hi, Math.round(v)));
+}
 
 export function applySettings() {
   // Root font-size — the whole page is sized in rem, so it all scales.
@@ -602,8 +615,23 @@ export function applySettings() {
   el.autosend.checked = settings.autoSend;
   el.sound.checked = settings.sound;
   el.notify.checked = settings.notify;
+  el.ctxMgmt.checked = settings.ctxMgmt;
+  el.ctxAuto.checked = settings.ctxAuto;
+  el.ctxNudge.value = settings.ctxNudge;
+  el.ctxCompress.value = settings.ctxCompress;
+  syncCtxControls();
   markActive(el.fontSeg, "size", settings.fontSize);
   autoGrow(); // recompute the input height for the new font size
+}
+
+// Reflect ctx settings into the widgets: value labels + master toggle enabling
+// or dimming the sub-controls.
+export function syncCtxControls() {
+  el.ctxNudgeVal.textContent = settings.ctxNudge + "%";
+  el.ctxCompressVal.textContent = settings.ctxCompress + "%";
+  const off = !settings.ctxMgmt;
+  el.ctxControls.classList.toggle("disabled", off);
+  [el.ctxNudge, el.ctxCompress, el.ctxAuto, el.ctxMore].forEach((c) => (c.disabled = off));
 }
 
 el.autosend.addEventListener("change", () => {
@@ -633,6 +661,46 @@ el.notify.addEventListener("change", () => {
       ? "уведомления заблокированы в настройках сайта в браузере — разрешите их там и включите ещё раз."
       : "браузер не подтвердил разрешение (диалог закрыли без ответа).";
     showSystem(`Не удалось включить уведомления: ${why}`);
+  });
+});
+
+// --- Context management controls (direct-API / Gemini engine) --------------
+el.ctxMgmt.addEventListener("change", () => {
+  settings.ctxMgmt = el.ctxMgmt.checked;
+  localStorage.setItem("cwi_ctx_mgmt", settings.ctxMgmt ? "1" : "0");
+  syncCtxControls();
+});
+el.ctxAuto.addEventListener("change", () => {
+  settings.ctxAuto = el.ctxAuto.checked;
+  localStorage.setItem("cwi_ctx_auto", settings.ctxAuto ? "1" : "0");
+});
+el.ctxNudge.addEventListener("input", () => {
+  let v = clampPct(+el.ctxNudge.value, 40, 85);
+  if (v >= settings.ctxCompress) v = settings.ctxCompress - 5; // nudge stays below compress
+  settings.ctxNudge = v;
+  el.ctxNudge.value = v;
+  localStorage.setItem("cwi_ctx_nudge", String(v));
+  syncCtxControls();
+});
+el.ctxCompress.addEventListener("input", () => {
+  const v = clampPct(+el.ctxCompress.value, 80, 98);
+  settings.ctxCompress = v;
+  if (settings.ctxNudge >= v) {
+    settings.ctxNudge = Math.max(40, v - 5);
+    el.ctxNudge.value = settings.ctxNudge;
+    localStorage.setItem("cwi_ctx_nudge", String(settings.ctxNudge));
+  }
+  localStorage.setItem("cwi_ctx_compress", String(v));
+  syncCtxControls();
+});
+el.ctxMore.addEventListener("click", () => {
+  confirmChatAction({
+    title: "Управление контекстом",
+    message:
+      "Каждый ход агент заново шлёт модели весь накопленный контекст, поэтому чем длиннее чат, тем дороже каждый шаг (в токенах и лимитах). " +
+      "«Подсказка» предупредит, когда контекст заполнится. «Сжатие» сворачивает старые ходы в краткое резюме, чтобы дальше слать меньше. " +
+      "Сжатие выполняется только когда ход завершён — не посреди работы. Работает для прямого API (Gemini); у Cloud CLI своё авто-сжатие.",
+    confirmLabel: "Понятно",
   });
 });
 
@@ -677,11 +745,13 @@ export async function loadProviders() {
   refreshComposerState();
   if (!data.native) {
     el.providerSection.hidden = true;
+    el.ctxSection.hidden = true; // context mgmt is direct-API only; Cloud CLI self-compacts
     renderEngineBadge();
     loadModels(); // CLI mode: Claude models via the OAuth-backed endpoint
     return;
   }
   el.providerSection.hidden = false;
+  el.ctxSection.hidden = false;
   state.providers = data.providers || [];
   populateProviders();
   renderEngineBadge();

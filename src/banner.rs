@@ -84,11 +84,12 @@ pub fn print_startup(config: &Config) {
     // Auto-detect the logo width from the file, so agentron.txt can be swapped for
     // art of any size without touching this code.
     let art_w = art_lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
-    // Auto-detect the background glyph (the most common char — `@`, `█`, `●`, …) so
-    // any art style renders with a transparent background, no code change needed.
+    // Auto-detect the background glyph: the most common char overall (spaces
+    // included). For solid-fill art it's `@`/`█`/`●`; for art already drawn on
+    // spaces it's a space, so nothing gets erased. Either way the shape survives.
     let bg = {
         let mut counts: std::collections::HashMap<char, u32> = std::collections::HashMap::new();
-        for c in ART.chars().filter(|c| !c.is_whitespace()) {
+        for c in ART.chars().filter(|c| *c != '\n' && *c != '\r') {
             *counts.entry(c).or_insert(0) += 1;
         }
         counts.into_iter().max_by_key(|(_, n)| *n).map(|(c, _)| c)
