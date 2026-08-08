@@ -32,6 +32,37 @@ pub struct Config {
     pub static_dir: String,
 }
 
+/// Locate the frontend `static/` directory robustly, so the app serves the web
+/// UI no matter how it's launched (from the project root via `cargo run`, or by
+/// running the built exe from any working directory / a double-click).
+///
+/// Order: an explicit `CWI_STATIC_DIR` always wins; otherwise try the cwd, then
+/// next to the executable (bundled layout), then two levels up from the exe
+/// (`target/<profile>/agent_web.exe` → project root). The first candidate that
+/// actually contains `index.html` is used; fall back to `"static"`.
+fn resolve_static_dir() -> String {
+    if let Ok(s) = std::env::var("CWI_STATIC_DIR") {
+        return s;
+    }
+    let mut candidates: Vec<PathBuf> = vec![PathBuf::from("static")];
+    if let Ok(exe) = std::env::current_exe() {
+        if let Some(dir) = exe.parent() {
+            candidates.push(dir.join("static"));
+            candidates.push(dir.join("..").join("..").join("static"));
+        }
+    }
+    for c in &candidates {
+        if c.join("index.html").is_file() {
+            // Canonicalize so the banner shows a clean absolute path (no `..\..`);
+            // fall back to the raw path if canonicalization fails. The `\\?\`
+            // verbatim prefix Windows adds is stripped later for display.
+            let path = std::fs::canonicalize(c).unwrap_or_else(|_| c.clone());
+            return path.to_string_lossy().into_owned();
+        }
+    }
+    "static".to_string()
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let bind_addr =
@@ -54,7 +85,7 @@ impl Config {
             .map(|v| v.eq_ignore_ascii_case("native"))
             .unwrap_or(false);
 
-        let static_dir = std::env::var("CWI_STATIC_DIR").unwrap_or_else(|_| "static".to_string());
+        let static_dir = resolve_static_dir();
 
         Self {
             bind_addr,

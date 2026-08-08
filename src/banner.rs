@@ -77,7 +77,7 @@ pub fn print_startup(config: &Config) {
         ("BIND".into(), format!("http://{}", config.bind_addr)),
         ("WORKSPACE".into(), abbrev(&config.workspace_abs().display().to_string())),
         ("STORAGE".into(), abbrev(&config_dir.display().to_string())),
-        ("STATIC".into(), config.static_dir.clone()),
+        ("STATIC".into(), abbrev(&config.static_dir)),
     ]);
 
     let art_lines: Vec<&str> = ART.lines().collect();

@@ -77,8 +77,29 @@ pub struct AppState {
 /// `CWI_ENV_FILE`) into the process environment. Existing vars win, so the
 /// shell can still override the file.
 fn load_env_file() {
-    let path = std::env::var("CWI_ENV_FILE").unwrap_or_else(|_| ".env".to_string());
-    let Ok(content) = std::fs::read_to_string(&path) else { return };
+    // Resolve like the static dir: an explicit CWI_ENV_FILE wins; otherwise try
+    // the cwd, then next to the executable, then the dev `target/<profile>/`
+    // layout — so a deployed folder of `agent_web.exe + .env + static/` works no
+    // matter which directory the exe is launched from.
+    let candidates: Vec<std::path::PathBuf> = match std::env::var("CWI_ENV_FILE") {
+        Ok(p) => vec![std::path::PathBuf::from(p)],
+        Err(_) => {
+            let mut v = vec![std::path::PathBuf::from(".env")];
+            if let Ok(exe) = std::env::current_exe() {
+                if let Some(dir) = exe.parent() {
+                    v.push(dir.join(".env"));
+                    v.push(dir.join("..").join("..").join(".env"));
+                }
+            }
+            v
+        }
+    };
+    let Some(content) = candidates
+        .iter()
+        .find_map(|p| std::fs::read_to_string(p).ok())
+    else {
+        return;
+    };
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() || line.starts_with('#') {
