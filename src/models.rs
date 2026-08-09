@@ -10,11 +10,15 @@
 //! stale cache rather than nothing.
 
 use std::path::PathBuf;
+use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{anyhow, Context, Result};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
+
+/// Shared client for model-list fetches, reused across providers/calls.
+static MODELS_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(reqwest::Client::new);
 
 const CACHE_TTL_SECS: u64 = 24 * 60 * 60; // refresh at most once a day
 
@@ -130,11 +134,10 @@ pub fn parse_models(v: &Value) -> Vec<ModelInfo> {
 /// this ultimately fails).
 pub async fn fetch_model_list(url: &str, headers: &[(&str, String)]) -> Result<Vec<ModelInfo>> {
     const MAX_RETRY_WAIT_SECS: u64 = 5;
-    let client = reqwest::Client::new();
     let mut attempt = 0u32;
     loop {
         attempt += 1;
-        let mut req = client.get(url);
+        let mut req = MODELS_CLIENT.get(url);
         for (name, value) in headers {
             req = req.header(*name, value.clone());
         }

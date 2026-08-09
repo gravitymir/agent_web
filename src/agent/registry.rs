@@ -123,20 +123,21 @@ async fn models_for(p: &ProviderMeta) -> Vec<ModelInfo> {
     }
 }
 
-/// Build the full provider list for the settings UI.
+/// Build the full provider list for the settings UI. Each provider's model list
+/// is a live HTTP fetch, so run them concurrently — `/api/providers` is bounded
+/// by the slowest single provider, not their sum.
 pub async fn providers() -> Vec<ProviderInfo> {
-    let mut out = Vec::new();
-    for p in registry() {
+    let tasks = registry().into_iter().map(|p| async move {
         let has_key = !std::env::var(p.key_var).unwrap_or_default().is_empty();
         let models = models_for(&p).await;
-        out.push(ProviderInfo {
+        ProviderInfo {
             id: p.id.to_string(),
             name: p.name.to_string(),
             has_key,
             models,
-        });
-    }
-    out
+        }
+    });
+    futures_util::future::join_all(tasks).await
 }
 
 #[cfg(test)]

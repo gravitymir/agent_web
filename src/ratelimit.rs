@@ -10,6 +10,7 @@
 //! connections (the owner on loopback).
 
 use std::collections::{HashMap, VecDeque};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{LazyLock, Mutex};
 use std::time::{Duration, Instant};
 
@@ -24,10 +25,25 @@ use axum::{
 static BUCKETS: LazyLock<Mutex<HashMap<String, VecDeque<Instant>>>> =
     LazyLock::new(|| Mutex::new(HashMap::new()));
 
+/// Call counter to trigger the occasional stale-key sweep.
+static CALLS: AtomicUsize = AtomicUsize::new(0);
+/// Sweep the map every N calls (amortizes the O(n) retain).
+const SWEEP_EVERY: usize = 512;
+/// A key with no hit in this long is dead for any of our windows (all <= 60s) —
+/// drop it so idle IPs (thousands can share the Cloudflare edge) don't accumulate.
+const STALE: Duration = Duration::from_secs(300);
+
 /// Record a hit for `key`; return `false` if it exceeds `max` within `window`.
 fn allow(key: String, max: usize, window: Duration) -> bool {
     let now = Instant::now();
     let mut map = BUCKETS.lock().unwrap_or_else(|e| e.into_inner());
+
+    // Periodic prune: `pop_front` only trims within a live key, so a key that's
+    // never hit again would linger forever. Drop keys whose newest hit is stale.
+    if CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(SWEEP_EVERY) {
+        map.retain(|_, hits| hits.back().is_some_and(|&last| now.duration_since(last) < STALE));
+    }
+
     let hits = map.entry(key).or_default();
     while let Some(&front) = hits.front() {
         if now.duration_since(front) > window {

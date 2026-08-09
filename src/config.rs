@@ -10,6 +10,11 @@ pub struct Config {
     /// directory, so it defines which chats are visible. Defaults to the
     /// server's current working directory.
     pub workspace_dir: PathBuf,
+    /// Canonicalized `workspace_dir`, computed once at construction. The workspace
+    /// never changes at runtime, and `session_dir()` (hence `workspace_abs()`) is
+    /// hit on every chat request — so we canonicalize here instead of syscalling
+    /// per request.
+    workspace_abs: PathBuf,
     /// The `claude` executable to invoke. Defaults to `claude` on PATH.
     pub claude_bin: String,
     /// Permission mode passed to Claude Code. `acceptEdits`/`bypassPermissions`
@@ -62,6 +67,18 @@ fn resolve_static_dir() -> String {
     "static".to_string()
 }
 
+/// Canonicalize a path, warning once and falling back to the raw path on failure
+/// (silently using the raw path could point `session_dir()` at the wrong folder).
+fn canonicalize_or_warn(path: &std::path::Path) -> PathBuf {
+    match std::fs::canonicalize(path) {
+        Ok(p) => p,
+        Err(e) => {
+            tracing::warn!("canonicalize({}) failed: {e}; using the path as-is", path.display());
+            path.to_path_buf()
+        }
+    }
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let bind_addr =
@@ -78,6 +95,7 @@ impl Config {
                     .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
             });
         let _ = std::fs::create_dir_all(&workspace_dir);
+        let workspace_abs = canonicalize_or_warn(&workspace_dir);
 
         let claude_bin = std::env::var("CWI_CLAUDE_BIN").unwrap_or_else(|_| "claude".to_string());
 
@@ -95,6 +113,7 @@ impl Config {
         Self {
             bind_addr,
             workspace_dir,
+            workspace_abs,
             claude_bin,
             permission_mode,
             projects_root,
@@ -103,25 +122,10 @@ impl Config {
         }
     }
 
-    /// Absolute, normalized workspace path used both to run Claude and to
-    /// locate its session directory.
+    /// Absolute, normalized workspace path used both to run Claude and to locate
+    /// its session directory. Precomputed in `from_env` (workspace is immutable).
     pub fn workspace_abs(&self) -> PathBuf {
-        match std::fs::canonicalize(&self.workspace_dir) {
-            Ok(p) => p,
-            Err(e) => {
-                // Falling back to the raw path silently can point `session_dir()`
-                // at the wrong folder. Warn once (this is called per request, so
-                // don't spam) and carry on with the non-canonical path.
-                static WARN_ONCE: std::sync::Once = std::sync::Once::new();
-                WARN_ONCE.call_once(|| {
-                    tracing::warn!(
-                        "canonicalize({}) failed: {e}; using the path as-is",
-                        self.workspace_dir.display()
-                    );
-                });
-                self.workspace_dir.clone()
-            }
-        }
+        self.workspace_abs.clone()
     }
 
     /// The `~/.claude/projects/<encoded>` directory holding this workspace's
