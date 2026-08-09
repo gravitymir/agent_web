@@ -43,6 +43,17 @@ fn registry() -> Vec<ProviderMeta> {
             fallback: &["glm-5.2", "glm-4.6", "glm-5-turbo", "glm-4.5-air"],
         },
         ProviderMeta {
+            id: "qwen",
+            name: "Qwen (Alibaba)",
+            // The Anthropic endpoint (/apps/anthropic) has no model list, so we
+            // fetch from DashScope's OpenAI-compatible surface, which returns the
+            // expected `data[].id` shape. Same Bearer key works for both.
+            models_url: "https://dashscope-intl.aliyuncs.com/compatible-mode/v1/models",
+            auth: Auth::Bearer,
+            key_var: "CWI_AGENT_QWEN_API_KEY",
+            fallback: &["qwen3.8-max", "qwen3.7-max", "qwen3.7-plus", "qwen3.6-plus"],
+        },
+        ProviderMeta {
             id: "gemini",
             name: "Gemini (Google)",
             // Real endpoint, for reference — its `{"models":[{"name","displayName"}]}`
@@ -63,6 +74,23 @@ pub struct ProviderInfo {
     pub name: String,
     pub has_key: bool,
     pub models: Vec<ModelInfo>,
+}
+
+/// Heuristic: keep only text/chat LLM models in the settings dropdown. Provider
+/// `/models` endpoints (DashScope especially) also list image, video, audio,
+/// embedding and rerank models, which don't speak the chat Messages API —
+/// selecting one 400s every turn. Exclude by well-known id markers. Multimodal
+/// *chat* models (e.g. `qwen3-vl-…`) are kept; only single-purpose media/OCR/
+/// embedding/rerank ids are dropped.
+fn is_chat_model(id: &str) -> bool {
+    let m = id.to_ascii_lowercase();
+    const NON_CHAT: &[&str] = &[
+        "image", "ocr", "video", "t2v", "i2v", "t2i", "wanx", "wan2", "wan-",
+        "audio", "-tts", "tts-", "-asr", "asr-", "cosyvoice", "paraformer",
+        "sambert", "speech", "voice", "embedding", "-embed", "rerank",
+        "diffusion", "flux", "sdxl", "sd3",
+    ];
+    !NON_CHAT.iter().any(|k| m.contains(k))
 }
 
 /// Fetch a provider's model list from its OpenAI/Anthropic-style `/models`
@@ -87,7 +115,10 @@ async fn models_for(p: &ProviderMeta) -> Vec<ModelInfo> {
         Auth::GoogleApiKey => vec![("x-goog-api-key", key)],
     };
     match fetch_model_list(p.models_url, &headers).await {
-        Ok(list) if !list.is_empty() => list,
+        Ok(list) => {
+            let chat: Vec<ModelInfo> = list.into_iter().filter(|m| is_chat_model(&m.id)).collect();
+            if chat.is_empty() { fallback() } else { chat }
+        }
         _ => fallback(),
     }
 }
@@ -106,4 +137,28 @@ pub async fn providers() -> Vec<ProviderInfo> {
         });
     }
     out
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_chat_model;
+
+    #[test]
+    fn keeps_chat_models_drops_media_and_embeddings() {
+        // Chat / multimodal-chat models are kept.
+        for id in [
+            "qwen3.8-max", "qwen3.7-plus", "qwen-max", "qwen3-vl-235b-a22b-thinking",
+            "claude-opus-5", "kimi-k2.7-code", "glm-5.2", "gemini-pro-latest",
+        ] {
+            assert!(is_chat_model(id), "should keep {id}");
+        }
+        // Media / OCR / embedding / rerank models are dropped.
+        for id in [
+            "qwen-image-3.0-pro", "qwen-vl-ocr-2025-11-20", "wan2.5-t2v", "wanx-i2v",
+            "qwen-audio-turbo", "qwen-tts", "paraformer-realtime", "cosyvoice-v2",
+            "text-embedding-v4", "gte-rerank", "flux-schnell", "stable-diffusion-3",
+        ] {
+            assert!(!is_chat_model(id), "should drop {id}");
+        }
+    }
 }

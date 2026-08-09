@@ -44,7 +44,7 @@ pub fn print_startup(config: &Config) {
                 format!("{} / {}{}", p.name, p.model, flag),
                 format!("1;{ORANGE}"),
                 vec![
-                    ("THINKING".into(), if p.thinking { "вкл".into() } else { "выкл".into() }),
+                    ("THINKING".into(), if p.thinking { "ON".into() } else { "OFF".into() }),
                     ("MAX TOK".into(), p.max_tokens.to_string()),
                 ],
             )

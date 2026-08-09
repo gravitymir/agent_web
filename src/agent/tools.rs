@@ -6,11 +6,22 @@
 
 use std::path::{Component, Path, PathBuf};
 use std::process::Stdio;
+use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde::Deserialize;
 use serde_json::{json, Value};
 use tokio::io::AsyncReadExt;
+
+/// Shared HTTP client for the web tools — reused across calls so TLS connections
+/// pool instead of paying a fresh handshake per WebFetch/WebSearch.
+static WEB_CLIENT: LazyLock<reqwest::Client> = LazyLock::new(|| {
+    reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
+        .timeout(Duration::from_secs(30))
+        .build()
+        .expect("web client builds with static config")
+});
 
 /// Which tool groups the user has enabled (from the composer's tools/permissions
 /// panel). Missing fields default to enabled, so an old client that sends no
@@ -454,7 +465,13 @@ async fn bash(input: &Value, workspace: &Path) -> ToolOutput {
             ToolOutput { content: truncate(combined), is_error }
         }
         Ok((_, _, Err(e))) => ToolOutput::err(format!("Bash: {e}")),
-        Err(_) => ToolOutput::err(format!("Bash: timed out after {}s", BASH_TIMEOUT.as_secs())),
+        Err(_) => {
+            // Timed out: the `run` future (which borrowed `child`) has been
+            // dropped, but dropping a tokio Child does NOT kill it — the shell and
+            // whatever it spawned would keep running. Kill the whole tree.
+            crate::session::kill_process_tree(&mut child).await;
+            ToolOutput::err(format!("Bash: timed out after {}s", BASH_TIMEOUT.as_secs()))
+        }
     }
 }
 
@@ -723,14 +740,21 @@ fn url_encode(s: &str) -> String {
 }
 
 /// Very small HTML→text: drop script/style, strip tags, decode a few entities,
-/// collapse whitespace.
+/// collapse whitespace. Regexes are compiled once (this runs per fetched page).
 fn html_to_text(html: &str) -> String {
-    let drop_script = regex::Regex::new(r"(?is)<script[^>]*>.*?</\s*script\s*>").unwrap();
-    let drop_style = regex::Regex::new(r"(?is)<style[^>]*>.*?</\s*style\s*>").unwrap();
-    let no_scripts = drop_script.replace_all(html, " ");
-    let no_scripts = drop_style.replace_all(&no_scripts, " ");
-    let tag = regex::Regex::new(r"(?s)<[^>]+>").unwrap();
-    let text = tag.replace_all(&no_scripts, " ");
+    static DROP_SCRIPT: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?is)<script[^>]*>.*?</\s*script\s*>").unwrap());
+    static DROP_STYLE: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?is)<style[^>]*>.*?</\s*style\s*>").unwrap());
+    static TAG: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"(?s)<[^>]+>").unwrap());
+    static WS: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"[ \t\x0b\x0c\r]+").unwrap());
+    static NL: LazyLock<regex::Regex> =
+        LazyLock::new(|| regex::Regex::new(r"\n\s*\n\s*\n+").unwrap());
+    let no_scripts = DROP_SCRIPT.replace_all(html, " ");
+    let no_scripts = DROP_STYLE.replace_all(&no_scripts, " ");
+    let text = TAG.replace_all(&no_scripts, " ");
     let text = text
         .replace("&nbsp;", " ")
         .replace("&amp;", "&")
@@ -738,10 +762,8 @@ fn html_to_text(html: &str) -> String {
         .replace("&gt;", ">")
         .replace("&quot;", "\"")
         .replace("&#39;", "'");
-    let ws = regex::Regex::new(r"[ \t\x0b\x0c\r]+").unwrap();
-    let text = ws.replace_all(&text, " ");
-    let nl = regex::Regex::new(r"\n\s*\n\s*\n+").unwrap();
-    nl.replace_all(text.trim(), "\n\n").to_string()
+    let text = WS.replace_all(&text, " ");
+    NL.replace_all(text.trim(), "\n\n").to_string()
 }
 
 /// Block obvious SSRF targets: loopback, private, link-local, and internal
@@ -782,15 +804,7 @@ async fn web_fetch(input: &Value) -> ToolOutput {
     if is_blocked_host(url) {
         return ToolOutput::err("WebFetch: blocked host (loopback/private/internal)");
     }
-    let client = match reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return ToolOutput::err(format!("WebFetch: {e}")),
-    };
-    match client.get(url).send().await {
+    match WEB_CLIENT.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let ctype = resp
@@ -819,25 +833,21 @@ async fn web_search(input: &Value) -> ToolOutput {
         Some(q) => q,
         None => return ToolOutput::err("WebSearch: missing 'query'"),
     };
-    let client = match reqwest::Client::builder()
-        .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
-        .timeout(Duration::from_secs(30))
-        .build()
-    {
-        Ok(c) => c,
-        Err(e) => return ToolOutput::err(format!("WebSearch: {e}")),
-    };
     let url = format!("https://html.duckduckgo.com/html/?q={}", url_encode(query));
-    let html = match client.get(&url).send().await {
+    let html = match WEB_CLIENT.get(&url).send().await {
         Ok(r) => r.text().await.unwrap_or_default(),
         Err(e) => return ToolOutput::err(format!("WebSearch: {e}")),
     };
 
-    // Parse DuckDuckGo's HTML result list (best-effort).
-    let link_re =
-        regex::Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap();
-    let snip_re =
-        regex::Regex::new(r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#).unwrap();
+    // Parse DuckDuckGo's HTML result list (best-effort). Compiled once.
+    static LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap()
+    });
+    static SNIP_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
+        regex::Regex::new(r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#).unwrap()
+    });
+    let link_re = &*LINK_RE;
+    let snip_re = &*SNIP_RE;
     let snippets: Vec<String> = snip_re
         .captures_iter(&html)
         .map(|c| html_to_text(&c[1]))

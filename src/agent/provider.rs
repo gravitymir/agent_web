@@ -1,8 +1,9 @@
 //! Provider abstraction for the native agent engine.
 //!
 //! Any Anthropic-compatible `/v1/messages` endpoint works — Anthropic itself,
-//! Moonshot (Kimi), or Zhipu (GLM). A preset is chosen with `CWI_AGENT_PROVIDER`
-//! (`anthropic` | `kimi` | `glm` | `gemini`); individual fields can be overridden
+//! Moonshot (Kimi), Zhipu (GLM), or Alibaba (Qwen). A preset is chosen with
+//! `CWI_AGENT_PROVIDER` (`anthropic` | `kimi` | `glm` | `qwen` | `gemini`);
+//! individual fields can be overridden
 //! with `CWI_AGENT_BASE_URL`, `CWI_AGENT_MODEL`, `CWI_AGENT_API_KEY`, etc.
 //!
 //! Gemini is NOT wire-compatible with `/v1/messages` (different request/response
@@ -80,6 +81,20 @@ impl Provider {
                 None::<&str>,
                 Kind::AnthropicMessages,
             ),
+            // Alibaba Qwen via Model Studio (DashScope). Anthropic-compatible
+            // endpoint ends at `/apps/anthropic` — our `messages_url()` appends
+            // `/v1/messages`. Same wire format as Kimi/GLM (Bearer + Messages),
+            // so no translation module is needed. `-intl` is the international
+            // region; use `dashscope.aliyuncs.com` for China (override via
+            // CWI_AGENT_BASE_URL).
+            "qwen" | "dashscope" | "alibaba" => (
+                "https://dashscope-intl.aliyuncs.com/apps/anthropic",
+                "qwen3.8-max",
+                Auth::Bearer,
+                false,
+                None::<&str>,
+                Kind::AnthropicMessages,
+            ),
             // "-latest" aliases auto-track Google's current recommended release
             // instead of pinning an exact version that gets deprecated (Gemini
             // model ids churn quickly — see gemini.rs).
@@ -111,6 +126,7 @@ impl Provider {
         let key_var = match preset {
             "kimi" | "moonshot" => "CWI_AGENT_KIMI_API_KEY",
             "glm" | "zhipu" | "zai" => "CWI_AGENT_GLM_API_KEY",
+            "qwen" | "dashscope" | "alibaba" => "CWI_AGENT_QWEN_API_KEY",
             "gemini" | "google" => "CWI_AGENT_GEMINI_API_KEY",
             _ => "CWI_AGENT_CLAUDE_API_KEY",
         };

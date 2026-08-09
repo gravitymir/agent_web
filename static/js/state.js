@@ -13,6 +13,8 @@ export const state = {
   pendingFiles: [],  // attached text files awaiting send: {name, text, truncated}
   chatUsage: {},     // session_id -> {tokens,input_tokens,cache_read,cache_creation,turns,duration_ms,contextTokens}
   providers: [],     // native engine: [{id,name,has_key,models}]
+  activeProvider: "", // native engine: the server's configured provider (wizard/env)
+  activeModel: "",    // native engine: the server's configured model (preset/CWI_AGENT_MODEL)
   replayMode: false, // true while replaying a live session's scrollback
   transcript: null,  // {msgs,start} loaded from disk for the current chat
   engineNative: null, // active engine: true=native, false=cli, null=unknown yet

@@ -29,3 +29,9 @@ hmac = "0.12"
 sha2 = "0.10"
 rand = "0.8"
 hex = "0.4"
+
+# Smaller release binary: strip symbols + thin LTO (most of the size win without
+# the long full-LTO/1-codegen-unit compile times, since we rebuild often).
+[profile.release]
+strip = true
+lto = "thin"

@@ -6,7 +6,7 @@
 //!   agentctl                 # interactive menu
 //!   agentctl up              # start tunnel + guest container
 //!   agentctl down            # stop guest container (tunnel left running)
-//!   agentctl start|stop|status|list|build
+//!   agentctl start|drain|stop|status|list|build
 //!   agentctl code [label] [ttl]        # mint a magic link (default: guest 24h)
 //!   agentctl tunnel start|stop|status|autostart
 //!
@@ -36,6 +36,7 @@ fn main() {
         }
         Some("down") => stop(),
         Some("start") => start(&base),
+        Some("drain") => drain(),
         Some("stop") => stop(),
         Some("status") => status(),
         Some("list") => list_codes(),
@@ -70,7 +71,7 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "usage: agentctl [up|down|start|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>]"
+        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>]"
     );
 }
 
@@ -99,6 +100,7 @@ fn guest_menu(base: &PathBuf) {
         let running = container_running();
         let mut items: Vec<&str> = Vec::new();
         if running {
+            items.push("Drain (finish active turns, then safe to stop)");
             items.push("Stop container");
             items.push("Codes (list / new / revoke)");
         } else {
@@ -115,6 +117,7 @@ fn guest_menu(base: &PathBuf) {
             .unwrap_or(items.len() - 1);
         match items[sel] {
             "Start container" => start(base),
+            "Drain (finish active turns, then safe to stop)" => drain(),
             "Stop container" => stop(),
             "Codes (list / new / revoke)" => codes_menu(base),
             "Build image" => build(base),
@@ -209,6 +212,78 @@ fn stop() {
     } else {
         eprintln!("Nothing to stop (container not running?).");
     }
+}
+
+/// Graceful drain: tell the running app to stop accepting NEW turns (via SIGUSR1)
+/// and wait until every in-flight agent turn finishes, so `stop` won't cut a guest
+/// off mid-answer. Polls /api/health (exempt from the access gate) on the host
+/// loopback port; when `active_turns` hits zero it's safe to stop.
+fn drain() {
+    if !container_running() {
+        eprintln!("Guest container is not running — nothing to drain.");
+        return;
+    }
+    // Flip the app into draining mode. SIGUSR1 is caught by the app (unix only);
+    // `docker kill --signal` just delivers the signal, it does not stop the box.
+    println!("Draining: telling the app to refuse new turns and finish active ones...");
+    if !docker(&["kill", "--signal=SIGUSR1", CONTAINER])
+        .map(|s| s.success())
+        .unwrap_or(false)
+    {
+        eprintln!("Could not send the drain signal (SIGUSR1) to the container.");
+        return;
+    }
+
+    let url = format!("http://{HOST_PORT}/api/health");
+    // Poll for up to ~10 minutes; a single turn rarely runs longer, and the
+    // operator can Ctrl-C and re-run at any time (drain state is sticky).
+    const MAX_POLLS: u32 = 200;
+    const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
+    let mut last = u64::MAX;
+    for i in 0..MAX_POLLS {
+        std::thread::sleep(EVERY);
+        let Some(body) = http_get(&url) else {
+            eprintln!("  (health check unreachable — retrying)");
+            continue;
+        };
+        let json: serde_json::Value = match serde_json::from_str(&body) {
+            Ok(v) => v,
+            Err(_) => continue,
+        };
+        let draining = json.get("draining").and_then(serde_json::Value::as_bool).unwrap_or(false);
+        let active = json.get("active_turns").and_then(serde_json::Value::as_u64).unwrap_or(0);
+        if !draining {
+            // The app didn't pick up the signal (older build without the handler?).
+            eprintln!("  App is not in draining mode — is this build drain-aware? Aborting.");
+            return;
+        }
+        if active != last {
+            println!("  active turns: {active}");
+            last = active;
+        }
+        if active == 0 {
+            println!("\nDrained — no active turns. It's now safe to stop:");
+            println!("  agentctl stop");
+            return;
+        }
+        if i + 1 == MAX_POLLS {
+            eprintln!("\nStill {active} active turn(s) after waiting. Left in draining mode.");
+            eprintln!("Re-run `agentctl drain` to keep waiting, or `agentctl stop` to force.");
+        }
+    }
+}
+
+/// Minimal HTTP GET via the system `curl` (built in on Windows 11 and Linux).
+/// Returns the response body, or None on any failure.
+fn http_get(url: &str) -> Option<String> {
+    let out = Command::new("curl")
+        .args(["-s", "--max-time", "5", url])
+        .output()
+        .ok()?;
+    if !out.status.success() || out.stdout.is_empty() {
+        return None;
+    }
+    Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
 fn new_code(base: &PathBuf, label: &str, ttl: &str) {

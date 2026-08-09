@@ -5,9 +5,10 @@
 //! as `<id>.json` files under `~/.claude/cwi_native/`. Both backends are
 //! surfaced in the same chat list.
 
-use std::collections::HashSet;
-use std::path::Path;
-use std::time::UNIX_EPOCH;
+use std::collections::{HashMap, HashSet};
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use chrono::{DateTime, Utc};
 use serde::Serialize;
@@ -18,7 +19,7 @@ use crate::agent::store;
 /// One model's cumulative share of a chat's work. Overlaid from `MetaStore` by
 /// `main.rs::list_chats` (empty in the store-built summary). Drives the per-model
 /// breakdown and the "named" Agentron in the usage panel.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ModelContribution {
     pub model: String,
     pub input_tokens: u64,
@@ -27,7 +28,7 @@ pub struct ModelContribution {
 }
 
 /// Summary of one chat, for the sidebar list.
-#[derive(Debug, Serialize)]
+#[derive(Debug, Clone, Serialize)]
 pub struct ChatSummary {
     pub id: String,
     pub title: String,
@@ -111,6 +112,40 @@ pub fn list_chats(session_dir: &Path, native_dir: Option<&Path>) -> Vec<ChatSumm
     chats
 }
 
+/// Summaries are re-parsed from disk on every `/api/chats` call; a chat file
+/// only changes when a turn is written, so cache each parsed summary keyed by the
+/// file's modification time. Unchanged files (the common case) skip the full
+/// read+parse. (mtime granularity means a rewrite within the same clock tick
+/// could serve a stale summary — acceptable: turns are seconds apart.)
+static SUMMARY_CACHE: LazyLock<Mutex<HashMap<PathBuf, (SystemTime, ChatSummary)>>> =
+    LazyLock::new(|| Mutex::new(HashMap::new()));
+
+/// Return a cached summary when the file's mtime is unchanged; otherwise run
+/// `compute`, cache, and return it. Falls back to `compute` if the mtime is
+/// unreadable.
+fn cached_summary(
+    path: &Path,
+    id: String,
+    compute: impl FnOnce(&Path, String) -> Option<ChatSummary>,
+) -> Option<ChatSummary> {
+    let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else {
+        return compute(path, id);
+    };
+    if let Some((cached_mtime, sum)) =
+        SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(path)
+    {
+        if *cached_mtime == mtime {
+            return Some(sum.clone());
+        }
+    }
+    let sum = compute(path, id)?;
+    SUMMARY_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .insert(path.to_path_buf(), (mtime, sum.clone()));
+    Some(sum)
+}
+
 fn list_jsonl_chats(session_dir: &Path) -> Vec<ChatSummary> {
     let mut chats = Vec::new();
 
@@ -129,7 +164,7 @@ fn list_jsonl_chats(session_dir: &Path) -> Vec<ChatSummary> {
             None => continue,
         };
 
-        if let Some(summary) = summarize_jsonl_file(&path, id) {
+        if let Some(summary) = cached_summary(&path, id, summarize_jsonl_file) {
             chats.push(summary);
         }
     }
@@ -154,7 +189,7 @@ fn list_native_chats(native_dir: &Path) -> Vec<ChatSummary> {
             Some(s) => s.to_string(),
             None => continue,
         };
-        if let Some(summary) = summarize_native_file(&path, id) {
+        if let Some(summary) = cached_summary(&path, id, summarize_native_file) {
             chats.push(summary);
         }
     }
@@ -281,6 +316,8 @@ fn context_limit_for_model(model: &str) -> u64 {
     let m = model.to_ascii_lowercase();
     if m.contains("gemini") {
         1_048_576 // Gemini 2.5 / 3 Pro: ~1M
+    } else if m.contains("qwen") {
+        1_048_576 // Qwen3.x Max / Plus: ~1M
     } else if m.contains("kimi") {
         256_000
     } else {

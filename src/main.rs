@@ -6,6 +6,7 @@ mod config;
 mod history;
 mod ids;
 mod models;
+mod ratelimit;
 mod session;
 mod titles;
 mod usage;
@@ -216,6 +217,9 @@ async fn main() -> anyhow::Result<()> {
         // Access gate (no-op unless CWI_AUTH): guards every route above, incl. /ws.
         .layer(axum::middleware::from_fn_with_state(state.clone(), auth::gate))
         .layer(axum::middleware::from_fn(add_security_headers))
+        // Per-client HTTP rate limiting — outermost, so floods are rejected before
+        // any work (incl. /login brute-force, which the gate wouldn't stop).
+        .layer(axum::middleware::from_fn(ratelimit::limit))
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
@@ -228,6 +232,34 @@ async fn main() -> anyhow::Result<()> {
             loop {
                 let _ = usage::usage_json(&cfg).await;
                 tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            }
+        });
+    }
+
+    // Graceful drain: `agentctl drain` sends SIGUSR1 (`docker kill --signal`),
+    // which flips the flag so the WS layer refuses new turns while in-flight ones
+    // finish. The operator then polls /api/health until active_turns == 0 and
+    // stops the container. Unix only — SIGUSR1 doesn't exist on Windows, and drain
+    // targets the Linux guest container.
+    #[cfg(unix)]
+    {
+        let sessions = sessions.clone(); // the shutdown-cleanup handle (line above)
+        tokio::spawn(async move {
+            let mut sig = match tokio::signal::unix::signal(
+                tokio::signal::unix::SignalKind::user_defined1(),
+            ) {
+                Ok(s) => s,
+                Err(e) => {
+                    tracing::warn!("could not install SIGUSR1 drain handler: {e}");
+                    return;
+                }
+            };
+            while sig.recv().await.is_some() {
+                sessions.set_draining(true);
+                tracing::info!(
+                    active_turns = sessions.active_turns(),
+                    "drain requested (SIGUSR1) — refusing new turns; waiting for in-flight turns to finish"
+                );
             }
         });
     }
@@ -292,11 +324,15 @@ async fn shutdown_signal() {
     }
 }
 
-/// Liveness/version endpoint.
-async fn health() -> impl IntoResponse {
+/// Liveness/version endpoint. Also drives `agentctl drain`: `draining` reports
+/// whether new turns are being refused, and `active_turns` counts in-flight agent
+/// turns so the operator knows when it's safe to stop the container.
+async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(serde_json::json!({
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
+        "draining": state.sessions.is_draining(),
+        "active_turns": state.sessions.active_turns(),
     }))
 }
 
@@ -521,8 +557,14 @@ async fn get_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 
 async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     let providers = agent::registry::providers().await;
+    // The operator's configured provider (wizard / CWI_AGENT_PROVIDER) — the UI
+    // uses it as the authoritative default so the badge/dropdown match the running
+    // engine instead of a stale localStorage choice.
+    let active_provider = agent::provider::Provider::from_env();
     Json(serde_json::json!({
         "native": state.config.native_engine,
+        "active": active_provider.name,
+        "active_model": active_provider.model,
         "providers": providers,
     }))
 }

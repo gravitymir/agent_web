@@ -219,6 +219,14 @@ async fn handle_client(
                     return true;
                 }
             }
+            // Graceful drain: once `agentctl drain` flips the flag, we stop
+            // accepting NEW turns but let in-flight ones finish. Refuse here so the
+            // operator can safely `stop` once `active_turns` reaches zero.
+            if state.sessions.is_draining() {
+                let _ = send_control(ws_tx, json!({ "cwi": "error",
+                    "message": "Server is shutting down — not accepting new requests. Please try again shortly." })).await;
+                return true;
+            }
             // A cached keeper can be stale: `interrupt()` kills the CLI process
             // (see `SessionKeeper::interrupt`), which marks it `finished` without
             // ever clearing this connection's reference to it. Left unchecked, the

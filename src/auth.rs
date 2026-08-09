@@ -32,6 +32,20 @@ use crate::AppState;
 
 type HmacSha256 = Hmac<Sha256>;
 
+/// Write a secret file with owner-only permissions. On Unix the file is chmod'd
+/// to `0o600` (matters for the multi-user guest container); on other platforms
+/// this is a plain write. Best-effort — a failed chmod doesn't fail the write.
+fn write_private(path: &Path, contents: &[u8]) {
+    if fs::write(path, contents).is_err() {
+        return;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
+    }
+}
+
 /// Session cookie name.
 const COOKIE: &str = "cwi_session";
 
@@ -85,7 +99,7 @@ fn load_or_create_secret(dir: &Path) -> Vec<u8> {
     }
     let mut b = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut b);
-    let _ = fs::write(&p, hex::encode(&b));
+    write_private(&p, hex::encode(&b).as_bytes());
     b
 }
 
@@ -124,7 +138,7 @@ impl Auth {
 
     fn save_tokens(&self, t: &[Token]) {
         if let Ok(s) = serde_json::to_string_pretty(t) {
-            let _ = fs::write(&self.store, s);
+            write_private(&self.store, s.as_bytes());
         }
     }
 

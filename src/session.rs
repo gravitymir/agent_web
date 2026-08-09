@@ -70,6 +70,9 @@ pub struct SessionKeeper {
     events: broadcast::Sender<String>,
     scrollback: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    /// True while a turn is actively being processed (set by the actor on a user
+    /// turn, cleared when it completes). Drives `SessionManager::active_turns`.
+    busy: Arc<AtomicBool>,
     subscribers: AtomicUsize,
     idle_since: Mutex<Option<Instant>>,
 }
@@ -154,6 +157,9 @@ pub struct SessionManager {
     /// `duration_ms` here (see `track_turn_duration`), while HTTP handlers use
     /// it for title/icon. Shared so both sides see the same on-disk file.
     meta: Arc<Mutex<MetaStore>>,
+    /// Graceful-drain flag: when set, no NEW turns are accepted, but in-flight
+    /// turns run to completion (see `active_turns`). Toggled via SIGUSR1.
+    draining: Arc<AtomicBool>,
 }
 
 impl SessionManager {
@@ -167,9 +173,29 @@ impl SessionManager {
             sessions: Mutex::new(HashMap::new()),
             mcp,
             meta,
+            draining: Arc::new(AtomicBool::new(false)),
         });
         spawn_reaper(mgr.clone());
         mgr
+    }
+
+    /// Enter graceful-drain mode: refuse new turns, let running ones finish.
+    pub fn set_draining(&self, v: bool) {
+        self.draining.store(v, Ordering::Release);
+    }
+
+    pub fn is_draining(&self) -> bool {
+        self.draining.load(Ordering::Acquire)
+    }
+
+    /// How many live sessions are currently mid-turn (an agent actively working).
+    pub fn active_turns(&self) -> usize {
+        self.sessions
+            .lock()
+            .unwrap()
+            .values()
+            .filter(|k| !k.is_finished() && k.busy.load(Ordering::Acquire))
+            .count()
     }
 
     /// Return the live keeper for `id`, if one exists and is still running.
@@ -236,12 +262,14 @@ impl SessionManager {
             self.config.workspace_abs(),
             self.mcp.clone(),
         );
+        let busy = Arc::new(AtomicBool::new(false));
         tokio::spawn(run_native_actor(
             engine,
             cmd_rx,
             events.clone(),
             scrollback.clone(),
             finished.clone(),
+            busy.clone(),
             self.meta.clone(),
         ));
         Arc::new(SessionKeeper {
@@ -250,6 +278,7 @@ impl SessionManager {
             events,
             scrollback,
             finished,
+            busy,
             subscribers: AtomicUsize::new(0),
             idle_since: Mutex::new(Some(Instant::now())),
         })
@@ -268,6 +297,7 @@ impl SessionManager {
         let (events, _) = broadcast::channel::<String>(BROADCAST_CAP);
         let scrollback = Arc::new(Mutex::new(VecDeque::new()));
         let finished = Arc::new(AtomicBool::new(false));
+        let busy = Arc::new(AtomicBool::new(false));
         tokio::spawn(run_actor(
             child,
             stdin,
@@ -276,6 +306,7 @@ impl SessionManager {
             events.clone(),
             scrollback.clone(),
             finished.clone(),
+            busy.clone(),
             id.clone(),
             self.meta.clone(),
         ));
@@ -285,6 +316,7 @@ impl SessionManager {
             events,
             scrollback,
             finished,
+            busy,
             subscribers: AtomicUsize::new(0),
             idle_since: Mutex::new(Some(Instant::now())),
         }))
@@ -463,6 +495,7 @@ async fn run_actor(
     events: broadcast::Sender<String>,
     scrollback: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
     session_id: String,
     meta: Arc<Mutex<MetaStore>>,
 ) {
@@ -482,6 +515,7 @@ async fn run_actor(
             cmd = cmd_rx.recv() => match cmd {
                 Some(Cmd::User { text, images, caps }) => {
                     current_caps = caps;
+                    busy.store(true, Ordering::Release); // a turn is now in flight
                     // Echo the prompt (with any images) to all viewers, then feed it to Claude.
                     emit(
                         &scrollback,
@@ -584,6 +618,10 @@ async fn run_actor(
                             }).to_string());
                         }
                         None => {
+                            // A `{"type":"result"}` frame ends the turn → clear busy.
+                            if l.contains(r#""type":"result""#) {
+                                busy.store(false, Ordering::Release);
+                            }
                             tracker.observe(&l, &session_id, &meta);
                             emit(&scrollback, &events, l);
                         }
@@ -599,16 +637,18 @@ async fn run_actor(
         }
     }
 
+    busy.store(false, Ordering::Release); // process gone → no turn in flight
     finished.store(true, Ordering::Release);
     kill_process_tree(&mut child).await;
 }
 
-/// Kill the Claude child **and its descendants**. On Windows the child is a
-/// `cmd /C claude.cmd` wrapper, so `start_kill()` alone reaps only `cmd` and
-/// orphans the real `claude` (node) process — the turn would keep running and the
-/// Stop button would appear to do nothing. `taskkill /T` kills the whole tree.
-/// On Unix the child *is* `claude`, so `start_kill()` suffices.
-async fn kill_process_tree(child: &mut tokio::process::Child) {
+/// Kill a child process **and its descendants**. On Windows a wrapper process
+/// (e.g. `cmd /C claude.cmd`, or `powershell -Command …`) means `start_kill()`
+/// alone reaps only the wrapper and orphans the real work — the process would
+/// keep running and Stop/timeout would appear to do nothing. `taskkill /T` kills
+/// the whole tree. On Unix the child is the process itself, so `start_kill()`
+/// suffices. Shared by the CLI keeper and the native Bash tool's timeout path.
+pub(crate) async fn kill_process_tree(child: &mut tokio::process::Child) {
     #[cfg(windows)]
     if let Some(pid) = child.id() {
         let _ = tokio::process::Command::new("taskkill")
@@ -631,6 +671,7 @@ async fn run_native_actor(
     events: broadcast::Sender<String>,
     scrollback: Arc<Mutex<VecDeque<String>>>,
     finished: Arc<AtomicBool>,
+    busy: Arc<AtomicBool>,
     meta: Arc<Mutex<MetaStore>>,
 ) {
     let session_id = engine.session_id.clone();
@@ -655,6 +696,7 @@ async fn run_native_actor(
                     json!({ "cwi": "user", "text": text, "images": images }).to_string(),
                 );
                 interrupt.store(false, Ordering::SeqCst);
+                busy.store(true, Ordering::Release); // a turn is now in flight
                 tracing::info!(session = %session_id, "agent thinking");
                 let fut = engine.run_turn(text, images, caps, &emitter, &interrupt);
                 tokio::pin!(fut);
@@ -662,6 +704,7 @@ async fn run_native_actor(
                 loop {
                     tokio::select! {
                         _ = &mut fut => {
+                            busy.store(false, Ordering::Release); // turn finished
                             tracing::info!(session = %session_id, "agent answered");
                             break;
                         }

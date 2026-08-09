@@ -77,21 +77,21 @@ impl Engine {
     }
 
     fn user_message(&self, text: &str, images: &[ImageData]) -> Value {
-        if images.is_empty() {
-            json!({ "role": "user", "content": text })
-        } else {
-            let mut blocks: Vec<Value> = Vec::new();
-            if !text.is_empty() {
-                blocks.push(json!({ "type": "text", "text": text }));
-            }
-            for img in images {
-                blocks.push(json!({
-                    "type": "image",
-                    "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
-                }));
-            }
-            json!({ "role": "user", "content": blocks })
+        // Always use the content-block *array* form, never a bare string. Anthropic
+        // / Kimi / GLM accept both, but stricter Anthropic-compatible endpoints
+        // (Alibaba's Qwen/DashScope) reject string content with a 400
+        // ("content should be a valid list"). The array form is universal.
+        let mut blocks: Vec<Value> = Vec::new();
+        if !text.is_empty() {
+            blocks.push(json!({ "type": "text", "text": text }));
         }
+        for img in images {
+            blocks.push(json!({
+                "type": "image",
+                "source": { "type": "base64", "media_type": img.media_type, "data": img.data }
+            }));
+        }
+        json!({ "role": "user", "content": blocks })
     }
 
     /// Keep the conversation from growing past the model's context: drop the
@@ -130,7 +130,21 @@ impl Engine {
             "tools": self.tool_list(),
         });
         if self.provider.thinking {
-            body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            if self.provider.auth == provider::Auth::XApiKey {
+                // Anthropic first-party: adaptive thinking with a summarized display.
+                body["thinking"] = json!({ "type": "adaptive", "display": "summarized" });
+            } else if self.provider.max_tokens > 1024 {
+                // Anthropic-*compatible* third parties (Kimi / GLM / Qwen) only
+                // accept the standard enabled form; the "adaptive"/"summarized"
+                // shape makes strict endpoints (Qwen/DashScope) 400 the whole
+                // request (reported confusingly as a `messages` error). budget must
+                // be >= 1024 and strictly < max_tokens.
+                let budget = (self.provider.max_tokens / 2)
+                    .max(1024)
+                    .min(self.provider.max_tokens - 1);
+                body["thinking"] = json!({ "type": "enabled", "budget_tokens": budget });
+            }
+            // else (3rd-party, max_tokens <= 1024): omit — no room for a thinking budget.
         }
         body
     }
@@ -309,7 +323,9 @@ impl Engine {
                 results.push(json!({
                     "type": "tool_result",
                     "tool_use_id": id,
-                    "content": content,
+                    // Block-array form (not a bare string) for the same reason as
+                    // `user_message` — strict endpoints (Qwen/DashScope) require it.
+                    "content": [{ "type": "text", "text": content }],
                     "is_error": is_error
                 }));
             }
@@ -378,10 +394,40 @@ fn handle_stream_event(
     acc.on_event(&ev);
 }
 
+/// Rewrite any string `content` into the block-array form Anthropic-compatible
+/// endpoints accept universally. Strict endpoints (Alibaba's Qwen/DashScope)
+/// reject bare-string content with a 400 ("content should be a valid list").
+/// Applies to message content AND to `tool_result` blocks' inner content — so
+/// legacy chats written before this normalization keep working after resume.
+fn normalize_content(messages: &mut [Value]) {
+    for m in messages.iter_mut() {
+        match m.get("content") {
+            Some(Value::String(s)) => {
+                let s = s.clone();
+                m["content"] = json!([{ "type": "text", "text": s }]);
+            }
+            Some(Value::Array(_)) => {
+                if let Some(arr) = m["content"].as_array_mut() {
+                    for b in arr.iter_mut() {
+                        if b.get("type").and_then(Value::as_str) == Some("tool_result") {
+                            if let Some(Value::String(s)) = b.get("content") {
+                                let s = s.clone();
+                                b["content"] = json!([{ "type": "text", "text": s }]);
+                            }
+                        }
+                    }
+                }
+            }
+            _ => {}
+        }
+    }
+}
+
 /// Repair a stored conversation so every assistant `tool_use` is followed by a
 /// matching `tool_result` — a corrupted/legacy store (e.g. an interrupted turn)
 /// otherwise makes the provider reject every future request with a 400.
 fn sanitize_messages(messages: &mut Vec<Value>) {
+    normalize_content(messages); // legacy string content → block-array form
     let mut i = 0;
     while i < messages.len() {
         let tool_ids = tool_use_ids(&messages[i]);
@@ -400,7 +446,7 @@ fn sanitize_messages(messages: &mut Vec<Value>) {
                         json!({
                             "type": "tool_result",
                             "tool_use_id": id,
-                            "content": "(no result recorded — recovered)",
+                            "content": [{ "type": "text", "text": "(no result recorded — recovered)" }],
                             "is_error": true
                         })
                     })
@@ -627,8 +673,26 @@ impl Accumulator {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable, retry_delay, sanitize_messages, Accumulator, MAX_BACKOFF_SECS};
+    use super::{is_retryable, normalize_content, retry_delay, sanitize_messages, Accumulator, MAX_BACKOFF_SECS};
     use serde_json::{json, Value};
+
+    #[test]
+    fn normalize_rewrites_string_content_to_blocks() {
+        let mut msgs: Vec<Value> = vec![
+            json!({"role":"user","content":"hi"}),
+            json!({"role":"user","content":[{"type":"tool_result","tool_use_id":"t1","content":"ok"}]}),
+            json!({"role":"assistant","content":[{"type":"text","text":"already blocks"}]}),
+        ];
+        normalize_content(&mut msgs);
+        // Bare string → [{type:text,text}]
+        assert_eq!(msgs[0]["content"][0]["type"], "text");
+        assert_eq!(msgs[0]["content"][0]["text"], "hi");
+        // tool_result inner string content → [{type:text,text}]
+        assert_eq!(msgs[1]["content"][0]["content"][0]["type"], "text");
+        assert_eq!(msgs[1]["content"][0]["content"][0]["text"], "ok");
+        // Already-block content is left untouched.
+        assert_eq!(msgs[2]["content"][0]["text"], "already blocks");
+    }
 
     #[test]
     fn sanitize_inserts_missing_tool_result() {

@@ -15,6 +15,7 @@ const ENGINES: &[(&str, Option<&str>)] = &[
     ("Native — Anthropic API", Some("anthropic")),
     ("Native — Kimi (Moonshot)", Some("kimi")),
     ("Native — GLM (Z.ai)", Some("glm")),
+    ("Native — Qwen (Alibaba)", Some("qwen")),
     ("Native — Gemini (Google)", Some("gemini")),
 ];
 const PORTS: &[u16] = &[8787, 8788, 8789, 8790, 8791];

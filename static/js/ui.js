@@ -761,6 +761,8 @@ export async function loadProviders() {
   el.providerSection.hidden = false;
   el.ctxSection.hidden = false;
   state.providers = data.providers || [];
+  state.activeProvider = data.active || "";
+  state.activeModel = data.active_model || "";
   populateProviders();
   renderEngineBadge();
 }
@@ -781,9 +783,17 @@ export function populateProviders() {
         `<option value="${escapeHtml(p.id)}"${p.has_key ? "" : " disabled"}>${escapeHtml(p.name)}${p.has_key ? "" : " (нет ключа)"}</option>`
     )
     .join("");
+  // The server's configured provider (wizard / CWI_AGENT_PROVIDER) is
+  // authoritative — it must win over a stale localStorage choice so the
+  // dropdown/badge match the running engine (and the per-message provider we
+  // send). A UI switch still applies for that session and persists, but a
+  // reload snaps back to the server's default. Fall back to saved → first-keyed.
+  const activeOk = list.find((p) => p.id === state.activeProvider && p.has_key);
   const savedOk = list.find((p) => p.id === settings.provider && p.has_key);
   const firstKeyed = list.find((p) => p.has_key);
-  settings.provider = savedOk
+  settings.provider = activeOk
+    ? state.activeProvider
+    : savedOk
     ? settings.provider
     : firstKeyed
     ? firstKeyed.id
@@ -798,6 +808,17 @@ export function populateProviderModels() {
   el.model.innerHTML = models
     .map((m) => `<option value="${escapeHtml(m.id)}">${escapeHtml(m.display_name || m.id)}</option>`)
     .join("");
+  // For the server's configured provider, default to its configured model — the
+  // live /models list mixes chat, image, video and audio models, so the first
+  // entry (or a stale localStorage pick) can be a non-chat model like
+  // "qwen-image-*" that 400s the Messages API. The operator's chosen model wins.
+  if (
+    settings.provider === state.activeProvider &&
+    state.activeModel &&
+    models.some((m) => m.id === state.activeModel)
+  ) {
+    settings.model = state.activeModel;
+  }
   if ([...el.model.options].some((o) => o.value === settings.model)) {
     el.model.value = settings.model;
   } else if (el.model.options.length) {
