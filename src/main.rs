@@ -219,6 +219,19 @@ async fn main() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
+    // Keep the subscription-usage snapshot fresh while running so a guest
+    // container (which reads it via CWI_USAGE_FILE) shows current limits even
+    // when the owner is idle. Owner only — skip native mode and the guest itself.
+    if !config.native_engine && std::env::var("CWI_USAGE_FILE").is_err() {
+        let cfg = config.clone();
+        tokio::spawn(async move {
+            loop {
+                let _ = usage::usage_json(&cfg).await;
+                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
+            }
+        });
+    }
+
     // No "listening on" log — the banner's BIND line already shows the address.
     let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
     axum::serve(listener, app)

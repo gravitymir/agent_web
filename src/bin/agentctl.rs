@@ -163,9 +163,20 @@ fn start(base: &PathBuf) {
     let ws = base.join("guest-workspace");
     let _ = std::fs::create_dir_all(&ws);
 
+    // Owner usage snapshot (plan + limits) — mounted read-only so the guest badge
+    // can show them. Ensure the FILE exists (else Docker mounts a directory).
+    let snap = base.join("target").join("release").join("chats").join("usage_snapshot.json");
+    if let Some(dir) = snap.parent() {
+        let _ = std::fs::create_dir_all(dir);
+    }
+    if !snap.exists() {
+        let _ = std::fs::write(&snap, "{}");
+    }
+
     let _ = docker(&["rm", "-f", CONTAINER]); // ignore "no such container"
 
     let mount = format!("{}:/workspace", ws.display());
+    let snap_mount = format!("{}:/owner_usage.json:ro", snap.display());
     let token_env = format!("CLAUDE_CODE_OAUTH_TOKEN={token}");
     let url_env = format!("CWI_PUBLIC_URL={url}");
     let port = format!("{HOST_PORT}:8787");
@@ -179,7 +190,9 @@ fn start(base: &PathBuf) {
         "--security-opt", "no-new-privileges",
         "--pids-limit", "512", "--memory", "2g", "--cpus", "2", "--tmpfs", "/tmp",
         "-v", "agent_guest_chats:/chats", "-v", &mount,
+        "-v", &snap_mount,
         "-e", &token_env, "-e", &url_env,
+        "-e", "CWI_USAGE_FILE=/owner_usage.json",
         "-p", &port, IMAGE,
     ];
     if docker(&args).map(|s| s.success()).unwrap_or(false) {
@@ -208,7 +221,7 @@ fn new_code(base: &PathBuf, label: &str, ttl: &str) {
         if u.is_empty() { DEFAULT_URL.to_string() } else { u }
     };
     let _ = docker(&[
-        "exec", CONTAINER, "/app/agent_web", "guest", "new",
+        "exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "new",
         "--ttl", ttl, "--label", label, "--url", &url,
     ]);
 }
@@ -220,7 +233,7 @@ fn list_codes() {
     }
     // Only labels + expiry can be listed — codes are stored hashed and shown
     // once at mint time (a leaked store yields no usable links).
-    let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "list"]);
+    let _ = docker(&["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "list"]);
 }
 
 /// Active codes as (label, display) — parsed from `guest list`. Display is the
@@ -228,7 +241,7 @@ fn list_codes() {
 /// Assumes single-word labels.
 fn active_entries() -> Vec<(String, String)> {
     let Ok(out) = Command::new("docker")
-        .args(["exec", CONTAINER, "/app/agent_web", "guest", "list"])
+        .args(["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "list"])
         .output()
     else {
         return vec![];
@@ -246,7 +259,7 @@ fn revoke(label: &str) {
         eprintln!("Guest container is not running — start it first.");
         return;
     }
-    let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
+    let _ = docker(&["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
 }
 
 /// Interactive codes submenu: `[ new code ]` plus each active code. Picking a

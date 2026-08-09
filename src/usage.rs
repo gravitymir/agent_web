@@ -25,6 +25,19 @@ const TTL: Duration = Duration::from_secs(20);
 
 /// Return the usage payload for `/api/usage`, served from cache when fresh.
 pub async fn usage_json(config: &Config) -> Value {
+    // Guest containers can't query `/usage` themselves (no desktop login inside,
+    // and setup-token returns no percentages). Instead the owner instance writes
+    // a snapshot that we mount read-only; if CWI_USAGE_FILE points at a readable
+    // JSON file, serve it directly — this is how the owner's plan + limits reach
+    // the guest's badge.
+    if let Ok(path) = std::env::var("CWI_USAGE_FILE") {
+        if let Some(v) = std::fs::read_to_string(&path)
+            .ok()
+            .and_then(|s| serde_json::from_str::<Value>(&s).ok())
+        {
+            return v;
+        }
+    }
     // The subscription limits only reflect what the CLI engine consumes; in
     // native mode the app talks to a different provider, so they'd be misleading.
     if config.native_engine {
@@ -42,6 +55,19 @@ pub async fn usage_json(config: &Config) -> Value {
     }
     let v = fetch(config).await;
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
+    // Owner side: persist a snapshot (real data only) so a guest container can
+    // display these limits. Strip the owner's email — guests don't need it.
+    // Never overwrite with a transient "unavailable".
+    if v.get("available").and_then(Value::as_bool) == Some(true) {
+        let mut snap = v.clone();
+        if let Some(obj) = snap.as_object_mut() {
+            obj.remove("email");
+        }
+        let path = crate::config::claude_config_dir().join("usage_snapshot.json");
+        if let Ok(txt) = serde_json::to_string(&snap) {
+            let _ = std::fs::write(path, txt);
+        }
+    }
     v
 }
 
