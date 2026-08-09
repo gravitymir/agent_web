@@ -1,6 +1,6 @@
 import { state, el, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings } from './ui.js';
+import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings, refreshComposerState } from './ui.js';
 import { setFaviconState } from '../favicon.js';
 import { playCompletionChime } from '../sound.js';
 import { notifyTurnComplete } from '../notify.js';
@@ -1253,6 +1253,9 @@ export async function loadUsage() {
   try { data = await (await fetch("/api/usage")).json(); } catch (e) {}
   state.usage = data && data.available ? data : null;
   updateUsageBadge();
+  // Usage arrives async (after the first render). Re-render the composer so the
+  // frozen banner's "Cloud <plan>" label picks up the now-known plan.
+  refreshComposerState();
   if (el.usagePanel.classList.contains("open")) renderUsageDetail();
 }
 
