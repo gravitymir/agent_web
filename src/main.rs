@@ -233,7 +233,33 @@ async fn main() -> anyhow::Result<()> {
     }
 
     // No "listening on" log — the banner's BIND line already shows the address.
-    let listener = tokio::net::TcpListener::bind(&config.bind_addr).await?;
+    let listener = match tokio::net::TcpListener::bind(&config.bind_addr).await {
+        Ok(l) => l,
+        Err(e) if e.kind() == std::io::ErrorKind::AddrInUse => {
+            let port = config
+                .bind_addr
+                .rsplit(':')
+                .next()
+                .unwrap_or(&config.bind_addr);
+            eprintln!();
+            eprintln!("  Port {port} is already in use ({}).", config.bind_addr);
+            eprintln!("  Another agent_web instance (or another program) is holding it.");
+            eprintln!();
+            if cfg!(windows) {
+                eprintln!("  Find what's using it:");
+                eprintln!("      netstat -ano | findstr :{port}");
+                eprintln!("  Stop it (PowerShell, one line):");
+                eprintln!("      Stop-Process -Id (Get-NetTCPConnection -LocalPort {port} -State Listen).OwningProcess -Force");
+            } else {
+                eprintln!("  Find what's using it:  ss -ltnp | grep :{port}");
+                eprintln!("  Stop it:               fuser -k {port}/tcp   (or: kill <PID>)");
+            }
+            eprintln!();
+            eprintln!("  Then start agent_web again.");
+            std::process::exit(1);
+        }
+        Err(e) => return Err(e.into()),
+    };
     axum::serve(listener, app)
         .with_graceful_shutdown(shutdown_signal())
         .await?;
