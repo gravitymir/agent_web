@@ -244,24 +244,10 @@ async fn run() -> anyhow::Result<()> {
         .layer(TraceLayer::new_for_http())
         .with_state(state);
 
-    // Keep the subscription-usage snapshot fresh while running so a guest
-    // container (which reads it via CWI_USAGE_FILE) shows current limits even
-    // when the owner is idle. Owner only — skip native mode and the guest itself.
-    if !config.native_engine && std::env::var("CWI_USAGE_FILE").is_err() {
-        let cfg = config.clone();
-        tokio::spawn(async move {
-            loop {
-                let _ = usage::usage_json(&cfg).await;
-                tokio::time::sleep(std::time::Duration::from_secs(300)).await;
-            }
-        });
-    }
-
-    // Graceful drain: `agentctl drain` sends SIGUSR1 (`docker kill --signal`),
-    // which flips the flag so the WS layer refuses new turns while in-flight ones
-    // finish. The operator then polls /api/health until active_turns == 0 and
-    // stops the container. Unix only — SIGUSR1 doesn't exist on Windows, and drain
-    // targets the Linux guest container.
+    // Graceful drain: a SIGUSR1 flips the flag so the WS layer refuses new turns
+    // while in-flight ones finish; the operator then polls /api/health until
+    // active_turns == 0 before stopping the process. Unix only — SIGUSR1 doesn't
+    // exist on Windows, so this is for a Linux host (e.g. the executor VM).
     #[cfg(unix)]
     {
         let sessions = sessions.clone(); // the shutdown-cleanup handle (line above)

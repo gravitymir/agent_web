@@ -767,8 +767,7 @@ fn html_to_text(html: &str) -> String {
 }
 
 /// True for loopback / private / link-local / CGNAT / ULA and other non-public
-/// addresses — the ranges an SSRF attempt would target (kept in sync with the
-/// guest container's iptables egress firewall).
+/// addresses — the ranges an SSRF attempt would target.
 fn is_private_ip(ip: std::net::IpAddr) -> bool {
     use std::net::IpAddr;
     match ip {

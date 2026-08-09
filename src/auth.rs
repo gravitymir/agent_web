@@ -33,8 +33,8 @@ use crate::AppState;
 type HmacSha256 = Hmac<Sha256>;
 
 /// Write a secret file with owner-only permissions. On Unix the file is chmod'd
-/// to `0o600` (matters for the multi-user guest container); on other platforms
-/// this is a plain write. Best-effort — a failed chmod doesn't fail the write.
+/// to `0o600` (matters on multi-user hosts); on other platforms this is a plain
+/// write. Best-effort — a failed chmod doesn't fail the write.
 fn write_private(path: &Path, contents: &[u8]) {
     let wrote = fs::write(path, contents).is_ok();
     #[cfg(unix)]
