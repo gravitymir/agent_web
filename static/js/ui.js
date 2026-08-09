@@ -421,6 +421,16 @@ document.getElementById("cc-export-json").addEventListener("click", () => {
     confirmLabel: "Скачать",
   }).then((confirmed) => { if (confirmed) exportChatJson(c.id, c.title); });
 });
+document.getElementById("cc-download-zip").addEventListener("click", () => {
+  // Download the agent's workspace as a zip. Content-Disposition on the endpoint
+  // sets the filename; the same-origin cookie authenticates automatically.
+  const a = document.createElement("a");
+  a.href = "/api/workspace.zip";
+  a.download = "workspace.zip";
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+});
 document.getElementById("cc-delete").addEventListener("click", () => {
   const c = currentChat();
   if (c.id) deleteChat(c.id, c.title, null);

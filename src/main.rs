@@ -226,6 +226,7 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/chats", get(list_chats))
         .route("/api/chats/{id}", get(load_chat).delete(delete_chat))
         .route("/api/chats/{id}/meta", put(set_meta))
+        .route("/api/workspace.zip", get(download_workspace))
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
         .route("/api/usage", get(get_usage))
@@ -572,6 +573,62 @@ async fn list_models() -> impl IntoResponse {
 /// `{available:false}`. See `src/usage.rs`.
 async fn get_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(usage::usage_json(&state.config).await)
+}
+
+/// Stream the agent's workspace as a zip download. This is how a guest (who has
+/// no shell, no git, and no file-download otherwise) gets their work out. Only
+/// the workspace dir is archived — no user-supplied path — and symlinks are not
+/// followed (walkdir default), so it can't escape the sandbox folder.
+async fn download_workspace(State(state): State<Arc<AppState>>) -> axum::response::Response {
+    let dir = state.config.workspace_abs();
+    match tokio::task::spawn_blocking(move || build_workspace_zip(&dir)).await {
+        Ok(Ok(bytes)) => (
+            [
+                (axum::http::header::CONTENT_TYPE, "application/zip"),
+                (
+                    axum::http::header::CONTENT_DISPOSITION,
+                    "attachment; filename=\"workspace.zip\"",
+                ),
+            ],
+            bytes,
+        )
+            .into_response(),
+        Ok(Err(e)) => {
+            tracing::warn!("workspace zip failed: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to build workspace archive").into_response()
+        }
+        Err(e) => {
+            tracing::warn!("workspace zip task panicked: {e}");
+            (StatusCode::INTERNAL_SERVER_ERROR, "failed to build workspace archive").into_response()
+        }
+    }
+}
+
+/// Build an in-memory zip of everything under `dir` (relative paths, forward
+/// slashes). Deflate via pure-Rust miniz_oxide.
+fn build_workspace_zip(dir: &std::path::Path) -> anyhow::Result<Vec<u8>> {
+    use std::io::Write;
+    let mut cursor = std::io::Cursor::new(Vec::new());
+    {
+        let mut zip = zip::ZipWriter::new(&mut cursor);
+        let opts = zip::write::SimpleFileOptions::default()
+            .compression_method(zip::CompressionMethod::Deflated);
+        for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+            let rel = match entry.path().strip_prefix(dir) {
+                Ok(r) if !r.as_os_str().is_empty() => r,
+                _ => continue,
+            };
+            let name = rel.to_string_lossy().replace('\\', "/");
+            if entry.file_type().is_dir() {
+                zip.add_directory(format!("{name}/"), opts)?;
+            } else if entry.file_type().is_file() {
+                zip.start_file(name, opts)?;
+                zip.write_all(&std::fs::read(entry.path())?)?;
+            }
+        }
+        zip.finish()?;
+    }
+    Ok(cursor.into_inner())
 }
 
 async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse {
