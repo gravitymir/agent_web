@@ -18,7 +18,7 @@
 use std::path::PathBuf;
 use std::process::{Command, ExitStatus};
 
-use dialoguer::{theme::ColorfulTheme, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
 
 const IMAGE: &str = "agent-web:guest-sub";
 const CONTAINER: &str = "agent-guest";
@@ -80,8 +80,7 @@ fn interactive(base: &PathBuf) {
         "Guest: start container",
         "Guest: stop container",
         "Guest: new access code (magic link)",
-        "Guest: list codes",
-        "Guest: revoke a code",
+        "Guest: codes (list / revoke)",
         "Tunnel: start",
         "Tunnel: stop",
         "Tunnel: set autostart",
@@ -113,12 +112,11 @@ fn interactive(base: &PathBuf) {
                     .unwrap_or_else(|_| "24h".into());
                 new_code(base, &label, &ttl);
             }
-            4 => list_codes(),
-            5 => revoke_interactive(),
-            6 => tunnel_start(),
-            7 => tunnel_stop(),
-            8 => tunnel_autostart(),
-            9 => build(base),
+            4 => manage_codes(),
+            5 => tunnel_start(),
+            6 => tunnel_stop(),
+            7 => tunnel_autostart(),
+            8 => build(base),
             _ => break,
         }
     }
@@ -200,9 +198,10 @@ fn list_codes() {
     let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "list"]);
 }
 
-/// Active labels, parsed from `guest list` (first token per line). Assumes
-/// single-word labels.
-fn active_labels() -> Vec<String> {
+/// Active codes as (label, display) — parsed from `guest list`. Display is the
+/// full "label … expires in …" line; label (first token) is what revoke needs.
+/// Assumes single-word labels.
+fn active_entries() -> Vec<(String, String)> {
     let Ok(out) = Command::new("docker")
         .args(["exec", CONTAINER, "/app/agent_web", "guest", "list"])
         .output()
@@ -213,7 +212,7 @@ fn active_labels() -> Vec<String> {
         .lines()
         .map(|l| l.trim())
         .filter(|l| !l.is_empty() && !l.starts_with("no active"))
-        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .filter_map(|l| l.split_whitespace().next().map(|lbl| (lbl.to_string(), l.to_string())))
         .collect()
 }
 
@@ -225,26 +224,36 @@ fn revoke(label: &str) {
     let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
 }
 
-fn revoke_interactive() {
+/// Interactive: list active codes, pick one, confirm, revoke.
+fn manage_codes() {
     if !container_running() {
         eprintln!("Guest container is not running — start it first.");
         return;
     }
-    let labels = active_labels();
-    if labels.is_empty() {
-        println!("No active codes to revoke.");
+    let entries = active_entries();
+    if entries.is_empty() {
+        println!("No active codes.");
         return;
     }
-    let mut items = labels.clone();
-    items.push("(cancel)".into());
+    let mut items: Vec<String> = entries.iter().map(|(_, d)| d.clone()).collect();
+    items.push("(back)".into());
     let sel = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Revoke which label")
+        .with_prompt("Active codes — pick one to revoke")
         .items(&items)
         .default(items.len() - 1)
         .interact()
         .unwrap_or(items.len() - 1);
-    if sel < labels.len() {
-        revoke(&labels[sel]);
+    if sel >= entries.len() {
+        return; // (back)
+    }
+    let (label, _) = &entries[sel];
+    let yes = Confirm::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Revoke '{label}'? This immediately kills its magic link"))
+        .default(false)
+        .interact()
+        .unwrap_or(false);
+    if yes {
+        revoke(label);
     }
 }
 
@@ -281,10 +290,15 @@ fn tunnel_stop() {
 }
 
 fn tunnel_status() {
+    // Build the lines by hand — Format-List pads output with blank lines.
     let _ = Command::new("powershell")
         .args([
             "-NoProfile", "-Command",
-            &format!("Get-Service {TUNNEL_SVC} | Format-List Name,Status,StartType"),
+            &format!(
+                "$s = Get-Service {TUNNEL_SVC} -ErrorAction SilentlyContinue; \
+                 if ($s) {{ 'Name      : ' + $s.Name; 'Status    : ' + $s.Status; 'StartType : ' + $s.StartType }} \
+                 else {{ 'not installed ({TUNNEL_SVC})' }}"
+            ),
         ])
         .status();
 }
