@@ -177,6 +177,10 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
     let mut cache_read = 0u64;
     let mut cache_creation = 0u64;
     let mut turns = 0usize;
+    // Assistant message ids already counted — the CLI can log the same message
+    // twice (e.g. a resumed session re-appending), and summing both would
+    // double-count that turn's usage. Dedupe on `message.id`.
+    let mut seen_msgs: HashSet<String> = HashSet::new();
     let mut model = String::new(); // last assistant model seen (Claude Code stamps it)
     // Current context-window fill, not a running total: overwritten (not
     // summed) by each assistant line's own usage, so after the loop it holds
@@ -207,6 +211,19 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
 
         let ty = v.get("type").and_then(Value::as_str);
         if matches!(ty, Some("user") | Some("assistant")) {
+            // Skip a duplicate assistant record (same message id seen already),
+            // so usage and turns aren't counted twice.
+            let dup_assistant = ty == Some("assistant") && {
+                let id = v
+                    .get("message")
+                    .and_then(|m| m.get("id"))
+                    .and_then(Value::as_str)
+                    .unwrap_or("");
+                !id.is_empty() && !seen_msgs.insert(id.to_string())
+            };
+            if dup_assistant {
+                continue;
+            }
             message_count += 1;
             if ty == Some("assistant") {
                 turns += 1;
@@ -580,6 +597,38 @@ mod tests {
         assert_eq!(summary.tokens, 13);
         // ...but the context gauge reflects only the most recent call's size.
         assert_eq!(summary.last_context_tokens, 2 + 500 + 20);
+
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn duplicate_assistant_message_counted_once() {
+        let path = std::env::temp_dir().join("cwi_history_test_dup_msg.jsonl");
+        let lines = [
+            json!({"type":"assistant","message":{"id":"m1","usage":{
+                "input_tokens": 2, "output_tokens": 10,
+                "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5
+            }}}),
+            // Exact duplicate of m1 (same message id) — must NOT be counted again.
+            json!({"type":"assistant","message":{"id":"m1","usage":{
+                "input_tokens": 2, "output_tokens": 10,
+                "cache_read_input_tokens": 100, "cache_creation_input_tokens": 5
+            }}}),
+            json!({"type":"assistant","message":{"id":"m2","usage":{
+                "input_tokens": 1, "output_tokens": 3,
+                "cache_read_input_tokens": 200, "cache_creation_input_tokens": 7
+            }}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let s = summarize_jsonl_file(&path, "dup".into()).expect("should parse");
+        // m1 (once) + m2 — the duplicate m1 line is ignored.
+        assert_eq!(s.tokens, 10 + 3); // output
+        assert_eq!(s.input_tokens, 2 + 1);
+        // Context gauge = last distinct message (m2).
+        assert_eq!(s.last_context_tokens, 1 + 200 + 7);
 
         let _ = std::fs::remove_file(&path);
     }
