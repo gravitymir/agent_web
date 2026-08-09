@@ -8,13 +8,9 @@
   <link rel="stylesheet" href="/styles.css" />
   <link rel="stylesheet" href="/vendor/katex/katex.min.css" />
   <script defer src="/vendor/katex/katex.min.js"></script>
-  <script>
-    // Apply the saved font size before first paint to avoid a flash.
-    (function () {
-      var f = localStorage.getItem("cwi_fontsize");
-      if (f) document.documentElement.style.fontSize = f + "px";
-    })();
-  </script>
+  <!-- Blocking (not deferred) so it runs before first paint; external so the CSP
+       can forbid inline scripts. -->
+  <script src="/js/preboot.js"></script>
 </head>
 <body>
   <!-- Boot overlay: a pulsing, colour-shifting orb shown while the app resolves

@@ -766,9 +766,41 @@ fn html_to_text(html: &str) -> String {
     NL.replace_all(text.trim(), "\n\n").to_string()
 }
 
-/// Block obvious SSRF targets: loopback, private, link-local, and internal
-/// hostnames. (Not exhaustive — a public name resolving to a private IP via DNS
-/// rebinding is not caught here.)
+/// True for loopback / private / link-local / CGNAT / ULA and other non-public
+/// addresses — the ranges an SSRF attempt would target (kept in sync with the
+/// guest container's iptables egress firewall).
+fn is_private_ip(ip: std::net::IpAddr) -> bool {
+    use std::net::IpAddr;
+    match ip {
+        IpAddr::V4(v4) => {
+            let o = v4.octets();
+            v4.is_loopback()
+                || v4.is_private()
+                || v4.is_link_local()
+                || v4.is_unspecified()
+                || v4.is_broadcast()
+                || v4.is_documentation()
+                || o[0] == 0
+                // Carrier-grade NAT 100.64.0.0/10
+                || (o[0] == 100 && (o[1] & 0xc0) == 64)
+        }
+        IpAddr::V6(v6) => {
+            v6.is_loopback()
+                || v6.is_unspecified()
+                || v6.is_multicast()
+                // link-local fe80::/10
+                || (v6.segments()[0] & 0xffc0) == 0xfe80
+                // unique-local fc00::/7
+                || (v6.segments()[0] & 0xfe00) == 0xfc00
+                // IPv4-mapped (::ffff:a.b.c.d) — classify the embedded v4
+                || v6.to_ipv4_mapped().is_some_and(|v4| is_private_ip(IpAddr::V4(v4)))
+        }
+    }
+}
+
+/// Block obvious SSRF targets by hostname/literal-IP before any DNS lookup — a
+/// cheap first pass. DNS-rebinding (a public name resolving to a private IP) is
+/// caught later by `resolve_public_addr`, which pins the connection.
 fn is_blocked_host(url: &str) -> bool {
     let host = match reqwest::Url::parse(url)
         .ok()
@@ -781,16 +813,29 @@ fn is_blocked_host(url: &str) -> bool {
         return true;
     }
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
-        return match ip {
-            std::net::IpAddr::V4(v4) => {
-                v4.is_loopback() || v4.is_private() || v4.is_link_local() || v4.is_unspecified()
-            }
-            std::net::IpAddr::V6(v6) => {
-                v6.is_loopback() || v6.is_unspecified() || (v6.segments()[0] & 0xfe00) == 0xfc00
-            }
-        };
+        return is_private_ip(ip);
     }
     false
+}
+
+/// Resolve `host:port` and return one verified-public address to pin the
+/// connection to. Rejects the host outright if *any* resolved address is private
+/// — a public name that also resolves to a private IP is a rebinding attempt.
+fn resolve_public_addr(host: &str, port: u16) -> Result<std::net::SocketAddr, String> {
+    use std::net::ToSocketAddrs;
+    let addrs = (host, port)
+        .to_socket_addrs()
+        .map_err(|e| format!("DNS resolution failed: {e}"))?;
+    let mut chosen = None;
+    for a in addrs {
+        if is_private_ip(a.ip()) {
+            return Err(format!("host resolves to a private address ({})", a.ip()));
+        }
+        if chosen.is_none() {
+            chosen = Some(a);
+        }
+    }
+    chosen.ok_or_else(|| "host did not resolve to any address".to_string())
 }
 
 async fn web_fetch(input: &Value) -> ToolOutput {
@@ -804,7 +849,42 @@ async fn web_fetch(input: &Value) -> ToolOutput {
     if is_blocked_host(url) {
         return ToolOutput::err("WebFetch: blocked host (loopback/private/internal)");
     }
-    match WEB_CLIENT.get(url).send().await {
+    // DNS-rebinding defense: resolve the host ourselves, reject if it maps to any
+    // private IP, then PIN reqwest to the verified address so it can't re-resolve
+    // to a private one between our check and the connect (TOCTOU). Resolution is
+    // blocking, so it runs on the blocking pool. A pinned client can't be the
+    // shared WEB_CLIENT, so WebFetch builds a per-call client (WebSearch keeps the
+    // shared one — it only ever hits a fixed public host).
+    let parsed = match reqwest::Url::parse(url) {
+        Ok(u) => u,
+        Err(e) => return ToolOutput::err(format!("WebFetch: bad url: {e}")),
+    };
+    let (Some(host), Some(port)) = (
+        parsed.host_str().map(str::to_string),
+        parsed.port_or_known_default(),
+    ) else {
+        return ToolOutput::err("WebFetch: url has no host/port");
+    };
+    let host_for_resolve = host.clone();
+    let pinned = match tokio::task::spawn_blocking(move || {
+        resolve_public_addr(&host_for_resolve, port)
+    })
+    .await
+    {
+        Ok(Ok(addr)) => addr,
+        Ok(Err(reason)) => return ToolOutput::err(format!("WebFetch: {reason}")),
+        Err(e) => return ToolOutput::err(format!("WebFetch: resolver task failed: {e}")),
+    };
+    let client = match reqwest::Client::builder()
+        .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
+        .timeout(Duration::from_secs(30))
+        .resolve(&host, pinned)
+        .build()
+    {
+        Ok(c) => c,
+        Err(e) => return ToolOutput::err(format!("WebFetch: {e}")),
+    };
+    match client.get(url).send().await {
         Ok(resp) => {
             let status = resp.status();
             let ctype = resp

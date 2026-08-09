@@ -16,7 +16,7 @@ fn abbrev(p: &str) -> String {
     if let Some(home) = dirs::home_dir() {
         let h = home.to_string_lossy();
         let h = h.strip_prefix(r"\\?\").unwrap_or(&h);
-        if let Some(rest) = p.strip_prefix(h.as_ref() as &str) {
+        if let Some(rest) = p.strip_prefix(h as &str) {
             return format!("~{rest}");
         }
     }

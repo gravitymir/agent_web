@@ -220,13 +220,11 @@ impl SessionManager {
         let mut map = self.sessions.lock().unwrap();
 
         // Reuse a live keeper for this id if one exists.
-        if let Some(id) = session_id.as_deref() {
-            if let Some(k) = map.get(id) {
-                if !k.is_finished() {
+        if let Some(id) = session_id.as_deref()
+            && let Some(k) = map.get(id)
+                && !k.is_finished() {
                     return Ok(k.clone());
                 }
-            }
-        }
 
         // Otherwise spawn one — still under the lock, so a concurrent request for
         // the same id waits here and then takes this keeper instead of spawning a
@@ -433,11 +431,10 @@ impl TurnTracker {
         }
         let Ok(v) = serde_json::from_str::<Value>(line) else { return };
         if is_assistant {
-            if let Some(m) = v.pointer("/message/model").and_then(Value::as_str) {
-                if !m.is_empty() {
+            if let Some(m) = v.pointer("/message/model").and_then(Value::as_str)
+                && !m.is_empty() {
                     self.model = m.to_string();
                 }
-            }
             return;
         }
         // result event:

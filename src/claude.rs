@@ -80,11 +80,10 @@ pub fn spawn_claude(
         cmd.arg("--session-id").arg(&id);
     }
 
-    if let Some(model) = model {
-        if !model.is_empty() {
+    if let Some(model) = model
+        && !model.is_empty() {
             cmd.arg("--model").arg(model);
         }
-    }
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())

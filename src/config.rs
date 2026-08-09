@@ -45,12 +45,11 @@ fn resolve_static_dir() -> String {
         return s;
     }
     let mut candidates: Vec<PathBuf> = vec![PathBuf::from("static")];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(dir) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(dir) = exe.parent() {
             candidates.push(dir.join("static"));
             candidates.push(dir.join("..").join("..").join("static"));
         }
-    }
     for c in &candidates {
         if c.join("index.html").is_file() {
             // Canonicalize so the banner shows a clean absolute path (no `..\..`);

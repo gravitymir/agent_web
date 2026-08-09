@@ -70,11 +70,10 @@ fn write_cache(models: &[ModelInfo]) {
 pub async fn models_for_api() -> (Vec<ModelInfo>, Option<String>) {
     let cache = read_cache();
 
-    if let Some(c) = &cache {
-        if now_secs().saturating_sub(c.fetched_at) < CACHE_TTL_SECS {
+    if let Some(c) = &cache
+        && now_secs().saturating_sub(c.fetched_at) < CACHE_TTL_SECS {
             return (c.models.clone(), None);
         }
-    }
 
     match fetch_models().await {
         Ok(models) => {

@@ -36,14 +36,14 @@ type HmacSha256 = Hmac<Sha256>;
 /// to `0o600` (matters for the multi-user guest container); on other platforms
 /// this is a plain write. Best-effort — a failed chmod doesn't fail the write.
 fn write_private(path: &Path, contents: &[u8]) {
-    if fs::write(path, contents).is_err() {
-        return;
-    }
+    let wrote = fs::write(path, contents).is_ok();
     #[cfg(unix)]
-    {
+    if wrote {
         use std::os::unix::fs::PermissionsExt;
         let _ = fs::set_permissions(path, fs::Permissions::from_mode(0o600));
     }
+    #[cfg(not(unix))]
+    let _ = wrote; // only consulted on unix; avoid an unused-var warning elsewhere
 }
 
 /// Session cookie name.
@@ -75,28 +75,26 @@ fn sha256_hex(s: &str) -> String {
     hex::encode(h.finalize())
 }
 
-/// Constant-time string comparison (equal length inputs from our own encoding).
+/// Constant-time string comparison, via the audited `subtle` crate rather than a
+/// hand-rolled loop. `ct_eq` on unequal-length inputs returns false in constant
+/// time w.r.t. the compared bytes (length isn't secret here — both sides are
+/// fixed-length hex from our own encoding).
 fn ct_eq(a: &str, b: &str) -> bool {
+    use subtle::ConstantTimeEq;
     let (a, b) = (a.as_bytes(), b.as_bytes());
     if a.len() != b.len() {
         return false;
     }
-    let mut diff = 0u8;
-    for i in 0..a.len() {
-        diff |= a[i] ^ b[i];
-    }
-    diff == 0
+    a.ct_eq(b).into()
 }
 
 fn load_or_create_secret(dir: &Path) -> Vec<u8> {
     let p = dir.join("auth_secret");
-    if let Ok(s) = fs::read_to_string(&p) {
-        if let Ok(b) = hex::decode(s.trim()) {
-            if b.len() >= 32 {
+    if let Ok(s) = fs::read_to_string(&p)
+        && let Ok(b) = hex::decode(s.trim())
+            && b.len() >= 32 {
                 return b;
             }
-        }
-    }
     let mut b = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut b);
     write_private(&p, hex::encode(&b).as_bytes());

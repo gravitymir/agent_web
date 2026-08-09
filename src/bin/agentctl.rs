@@ -15,7 +15,7 @@
 //! so it comes back after a reboot. The Cloudflare tunnel is a Windows service
 //! (Cloudflared); start/stop/autostart need an Administrator terminal.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::{Command, ExitStatus};
 
 use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
@@ -75,7 +75,7 @@ fn usage() {
     );
 }
 
-fn interactive(base: &PathBuf) {
+fn interactive(base: &Path) {
     let items = ["Guest", "Tunnel", "Status", "Quit"];
     loop {
         println!();
@@ -95,7 +95,7 @@ fn interactive(base: &PathBuf) {
 }
 
 /// Guest submenu — start/stop shown by context; Codes opens the code manager.
-fn guest_menu(base: &PathBuf) {
+fn guest_menu(base: &Path) {
     loop {
         let running = container_running();
         let mut items: Vec<&str> = Vec::new();
@@ -150,7 +150,7 @@ fn tunnel_menu() {
 // Guest container
 // ---------------------------------------------------------------------------
 
-fn start(base: &PathBuf) {
+fn start(base: &Path) {
     let token = env_var(base, "CLAUDE_CODE_OAUTH_TOKEN");
     if token.is_empty() {
         eprintln!(
@@ -286,7 +286,7 @@ fn http_get(url: &str) -> Option<String> {
     Some(String::from_utf8_lossy(&out.stdout).into_owned())
 }
 
-fn new_code(base: &PathBuf, label: &str, ttl: &str) {
+fn new_code(base: &Path, label: &str, ttl: &str) {
     if !container_running() {
         eprintln!("Guest container is not running — start it first.");
         return;
@@ -339,7 +339,7 @@ fn revoke(label: &str) {
 
 /// Interactive codes submenu: `[ new code ]` plus each active code. Picking a
 /// code confirms and revokes it; picking new mints one. Loops until "(back)".
-fn codes_menu(base: &PathBuf) {
+fn codes_menu(base: &Path) {
     if !container_running() {
         eprintln!("Guest container is not running — start it first.");
         return;
@@ -392,7 +392,7 @@ fn prompt_new() -> (String, String) {
     (label, ttl)
 }
 
-fn build(base: &PathBuf) {
+fn build(base: &Path) {
     println!("Building {IMAGE} (this takes a few minutes)...");
     let ok = Command::new("docker")
         .args(["build", "-f", "Dockerfile.guest", "-t", IMAGE, "."])
@@ -500,12 +500,11 @@ fn container_running() -> bool {
 /// `target/<profile>/` layout (exe/../..). Falls back to cwd.
 fn base_dir() -> PathBuf {
     let mut cands = vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))];
-    if let Ok(exe) = std::env::current_exe() {
-        if let Some(d) = exe.parent() {
+    if let Ok(exe) = std::env::current_exe()
+        && let Some(d) = exe.parent() {
             cands.push(d.to_path_buf());
             cands.push(d.join("..").join(".."));
         }
-    }
     for c in &cands {
         if c.join(".env").is_file() {
             return c.clone();
@@ -515,7 +514,7 @@ fn base_dir() -> PathBuf {
 }
 
 /// Read a single KEY=VALUE from `<base>/.env`, ignoring commented lines.
-fn env_var(base: &PathBuf, name: &str) -> String {
+fn env_var(base: &Path, name: &str) -> String {
     let Ok(content) = std::fs::read_to_string(base.join(".env")) else {
         return String::new();
     };
@@ -524,11 +523,10 @@ fn env_var(base: &PathBuf, name: &str) -> String {
         if line.is_empty() || line.starts_with('#') {
             continue;
         }
-        if let Some((k, v)) = line.split_once('=') {
-            if k.trim() == name {
+        if let Some((k, v)) = line.split_once('=')
+            && k.trim() == name {
                 return v.trim().trim_matches('"').to_string();
             }
-        }
     }
     String::new()
 }

@@ -36,13 +36,14 @@ use crate::titles::MetaStore;
 const MAX_WS_MESSAGE_BYTES: usize = 16 * 1024 * 1024;
 
 /// Content-Security-Policy served with every response — an extra layer against
-/// injected content. `'unsafe-inline'` is required because the frontend uses a
-/// few inline scripts / `onclick` handlers and inline styles; `data:` covers
-/// pasted images and the HTML-preview iframe (`frame-src`). No external origins
-/// are allowed, so an injected `<script src>` / remote fetch is blocked.
+/// injected content. `script-src` is `'self'` only: all scripts are external
+/// files (the former inline preboot snippet now lives in `/js/preboot.js`), so an
+/// injected `<script>` is blocked outright. `style-src` still needs
+/// `'unsafe-inline'` — the frontend applies inline `style="…"` in JS-built
+/// markup. `data:` covers pasted images; no external origins are allowed.
 const CSP: &str = "default-src 'self'; base-uri 'self'; object-src 'none'; \
     img-src 'self' data: blob:; style-src 'self' 'unsafe-inline'; \
-    script-src 'self' 'unsafe-inline'; connect-src 'self' ws: wss:; \
+    script-src 'self'; connect-src 'self' ws: wss:; \
     frame-src 'self'; form-action 'self'";
 
 /// Attach security headers (CSP + nosniff) to every response.
@@ -89,12 +90,11 @@ fn load_env_file() {
         Ok(p) => vec![std::path::PathBuf::from(p)],
         Err(_) => {
             let mut v = vec![std::path::PathBuf::from(".env")];
-            if let Ok(exe) = std::env::current_exe() {
-                if let Some(dir) = exe.parent() {
+            if let Ok(exe) = std::env::current_exe()
+                && let Some(dir) = exe.parent() {
                     v.push(dir.join(".env"));
                     v.push(dir.join("..").join("..").join(".env"));
                 }
-            }
             v
         }
     };
@@ -546,11 +546,10 @@ fn origin_is_local(headers: &axum::http::HeaderMap) -> bool {
         None => return false,
     };
     // Same-origin: the Origin's authority equals the Host header we answered on.
-    if let Some(host) = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok()) {
-        if authority.eq_ignore_ascii_case(host) {
+    if let Some(host) = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok())
+        && authority.eq_ignore_ascii_case(host) {
             return true;
         }
-    }
     // Otherwise only a loopback host is allowed.
     let host_only = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority);
     matches!(host_only, "localhost" | "127.0.0.1" | "::1" | "[::1]")

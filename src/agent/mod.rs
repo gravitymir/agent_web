@@ -385,12 +385,10 @@ fn handle_stream_event(
     if !*think_emitted
         && ev.get("type").and_then(Value::as_str) == Some("content_block_start")
         && ev["content_block"].get("type").and_then(Value::as_str) != Some("thinking")
-    {
-        if let Some(s) = *think_start {
+        && let Some(s) = *think_start {
             emit_c.line(json!({ "cwi": "think", "ms": s.elapsed().as_millis() as u64 }).to_string());
             *think_emitted = true;
         }
-    }
     acc.on_event(&ev);
 }
 
@@ -409,12 +407,11 @@ fn normalize_content(messages: &mut [Value]) {
             Some(Value::Array(_)) => {
                 if let Some(arr) = m["content"].as_array_mut() {
                     for b in arr.iter_mut() {
-                        if b.get("type").and_then(Value::as_str) == Some("tool_result") {
-                            if let Some(Value::String(s)) = b.get("content") {
+                        if b.get("type").and_then(Value::as_str) == Some("tool_result")
+                            && let Some(Value::String(s)) = b.get("content") {
                                 let s = s.clone();
                                 b["content"] = json!([{ "type": "text", "text": s }]);
                             }
-                        }
                     }
                 }
             }
@@ -521,11 +518,10 @@ fn is_retryable(e: &anyhow::Error) -> bool {
 /// How long to wait before the next retry. Honors a server-provided
 /// `Retry-After` (capped), else exponential backoff (0.5s, 1s, 2s, …).
 fn retry_delay(e: &anyhow::Error, attempt: u32) -> std::time::Duration {
-    if let Some(api) = e.downcast_ref::<client::ApiError>() {
-        if let Some(secs) = api.retry_after {
+    if let Some(api) = e.downcast_ref::<client::ApiError>()
+        && let Some(secs) = api.retry_after {
             return std::time::Duration::from_secs(secs.min(MAX_BACKOFF_SECS));
         }
-    }
     let ms = (500u64 * 2u64.pow(attempt.saturating_sub(1))).min(MAX_BACKOFF_SECS * 1000);
     std::time::Duration::from_millis(ms)
 }

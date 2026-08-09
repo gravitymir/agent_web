@@ -30,14 +30,13 @@ pub async fn usage_json(config: &Config) -> Value {
     // a snapshot that we mount read-only; if CWI_USAGE_FILE points at a readable
     // JSON file, serve it directly — this is how the owner's plan + limits reach
     // the guest's badge.
-    if let Ok(path) = std::env::var("CWI_USAGE_FILE") {
-        if let Some(v) = std::fs::read_to_string(&path)
+    if let Ok(path) = std::env::var("CWI_USAGE_FILE")
+        && let Some(v) = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<Value>(&s).ok())
         {
             return v;
         }
-    }
     // The subscription limits only reflect what the CLI engine consumes; in
     // native mode the app talks to a different provider, so they'd be misleading.
     if config.native_engine {
@@ -47,11 +46,10 @@ pub async fn usage_json(config: &Config) -> Value {
         // Recover from a poisoned lock instead of propagating a panic — a stale
         // cache is harmless and better than taking down every /api/usage request.
         let guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
-        if let Some((t, v)) = guard.as_ref() {
-            if t.elapsed() < TTL {
+        if let Some((t, v)) = guard.as_ref()
+            && t.elapsed() < TTL {
                 return v.clone();
             }
-        }
     }
     let v = fetch(config).await;
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));

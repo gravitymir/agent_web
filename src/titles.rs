@@ -7,6 +7,8 @@
 
 use std::collections::HashMap;
 use std::path::PathBuf;
+use std::sync::mpsc::{self, Sender};
+use std::thread;
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
@@ -46,18 +48,40 @@ pub struct ChatMeta {
 }
 
 pub struct MetaStore {
-    path: PathBuf,
     map: HashMap<String, ChatMeta>,
+    /// Serialized-JSON channel to the background writer thread. `save()` sends the
+    /// full serialized map here instead of blocking on `fs::write` — important
+    /// because callers hold the `AppState` meta lock (often on an async worker,
+    /// e.g. per tool-step in `session.rs`), so disk I/O must not run under it.
+    writer: Sender<String>,
 }
 
 impl MetaStore {
-    /// Load the store from `path`, tolerating a missing or malformed file.
+    /// Load the store from `path`, tolerating a missing or malformed file, and
+    /// spawn the background writer that owns all disk writes for it.
     pub fn load(path: PathBuf) -> Self {
         let map = std::fs::read_to_string(&path)
             .ok()
             .and_then(|s| serde_json::from_str::<HashMap<String, ChatMeta>>(&s).ok())
             .unwrap_or_default();
-        Self { path, map }
+
+        let (tx, rx) = mpsc::channel::<String>();
+        thread::spawn(move || {
+            // Each message is the full serialized map. While one write is in
+            // flight, later updates queue; drain them and write only the latest so
+            // a burst of turns collapses into a single disk write (debounce).
+            while let Ok(mut json) = rx.recv() {
+                while let Ok(newer) = rx.try_recv() {
+                    json = newer;
+                }
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+                let _ = std::fs::write(&path, json);
+            }
+        });
+
+        Self { map, writer: tx }
     }
 
     pub fn get(&self, id: &str) -> Option<ChatMeta> {
@@ -127,12 +151,13 @@ impl MetaStore {
         Ok(())
     }
 
+    /// Serialize the map and hand it to the background writer. Serialization is
+    /// CPU-only (safe under the caller's lock); the actual disk write happens off
+    /// this thread. A dropped receiver (writer thread gone) is ignored — the
+    /// in-memory state is still correct and this is a best-effort sidecar.
     fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let json = serde_json::to_string_pretty(&self.map)?;
-        std::fs::write(&self.path, json)?;
+        let _ = self.writer.send(json);
         Ok(())
     }
 }

@@ -133,11 +133,9 @@ fn cached_summary(
     };
     if let Some((cached_mtime, sum)) =
         SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(path)
-    {
-        if *cached_mtime == mtime {
+        && *cached_mtime == mtime {
             return Some(sum.clone());
         }
-    }
     let sum = compute(path, id)?;
     SUMMARY_CACHE
         .lock()
@@ -234,11 +232,10 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
         };
 
         // Prefer an explicit AI-generated title if present.
-        if v.get("type").and_then(Value::as_str) == Some("summary") {
-            if let Some(s) = v.get("summary").and_then(Value::as_str) {
+        if v.get("type").and_then(Value::as_str) == Some("summary")
+            && let Some(s) = v.get("summary").and_then(Value::as_str) {
                 title = Some(truncate(s, 120));
             }
-        }
 
         if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
             last_ts = Some(ts.to_string());
@@ -262,11 +259,10 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
             message_count += 1;
             if ty == Some("assistant") {
                 turns += 1;
-                if let Some(mdl) = v.get("message").and_then(|m| m.get("model")).and_then(Value::as_str) {
-                    if !mdl.is_empty() {
+                if let Some(mdl) = v.get("message").and_then(|m| m.get("model")).and_then(Value::as_str)
+                    && !mdl.is_empty() {
                         model = mdl.to_string();
                     }
-                }
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                     // output_tokens includes the thinking budget.
@@ -278,14 +274,13 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
                         get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens");
                 }
             }
-            if title.is_none() && ty == Some("user") {
-                if let Some(text) = extract_text(&v) {
+            if title.is_none() && ty == Some("user")
+                && let Some(text) = extract_text(&v) {
                     let text = text.trim();
                     if !text.is_empty() {
                         title = Some(truncate(text, 120));
                     }
                 }
-            }
         }
     }
 
@@ -314,10 +309,9 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
 /// denominator. Approximate — recheck as providers ship bigger windows.
 fn context_limit_for_model(model: &str) -> u64 {
     let m = model.to_ascii_lowercase();
-    if m.contains("gemini") {
-        1_048_576 // Gemini 2.5 / 3 Pro: ~1M
-    } else if m.contains("qwen") {
-        1_048_576 // Qwen3.x Max / Plus: ~1M
+    // Gemini 2.5/3 Pro and Qwen3.x Max/Plus are both ~1M-token windows.
+    if m.contains("gemini") || m.contains("qwen") {
+        1_048_576
     } else if m.contains("kimi") {
         256_000
     } else {
@@ -538,11 +532,10 @@ fn extract_text(v: &Value) -> Option<String> {
     if let Some(arr) = content.as_array() {
         let mut out = String::new();
         for block in arr {
-            if let Some("text") = block.get("type").and_then(Value::as_str) {
-                if let Some(t) = block.get("text").and_then(Value::as_str) {
+            if let Some("text") = block.get("type").and_then(Value::as_str)
+                && let Some(t) = block.get("text").and_then(Value::as_str) {
                     out.push_str(t);
                 }
-            }
         }
         if out.is_empty() {
             return None;
@@ -564,11 +557,10 @@ fn extract_native_text(v: &Value) -> Option<String> {
     if let Some(arr) = content.as_array() {
         let mut out = String::new();
         for block in arr {
-            if let Some("text") = block.get("type").and_then(Value::as_str) {
-                if let Some(t) = block.get("text").and_then(Value::as_str) {
+            if let Some("text") = block.get("type").and_then(Value::as_str)
+                && let Some(t) = block.get("text").and_then(Value::as_str) {
                     out.push_str(t);
                 }
-            }
         }
         if out.is_empty() {
             return None;

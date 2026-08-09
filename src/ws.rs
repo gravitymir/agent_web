@@ -201,24 +201,22 @@ async fn handle_client(
         ClientMsg::Send { session_id, text, model, provider, new_chat, images, caps } => {
             // Validate client-supplied identifiers before they become file paths or
             // CLI arguments (path traversal / `cmd.exe` injection).
-            if let Some(id) = session_id.as_deref() {
-                if !crate::ids::is_valid_session_id(id) {
+            if let Some(id) = session_id.as_deref()
+                && !crate::ids::is_valid_session_id(id) {
                     let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "invalid session id" })).await;
                     return true;
                 }
-            }
             let model = model.filter(|m| crate::ids::is_valid_model(m));
             let sid = session_id.clone();
             // Freeze guard: a chat that lives only in the *other* engine's store is
             // read-only until the user switches CWI_ENGINE. Viewing is a separate
             // GET; here we refuse to drive a turn on it.
-            if let Some(id) = session_id.as_ref() {
-                if !new_chat && chat_is_frozen(state, id) {
+            if let Some(id) = session_id.as_ref()
+                && !new_chat && chat_is_frozen(state, id) {
                     let _ = send_control(ws_tx, json!({ "cwi": "error",
                         "message": "Этот чат создан другим движком — только чтение. Переключите CWI_ENGINE, чтобы продолжить." })).await;
                     return true;
                 }
-            }
             // Graceful drain: once `agentctl drain` flips the flag, we stop
             // accepting NEW turns but let in-flight ones finish. Refuse here so the
             // operator can safely `stop` once `active_turns` reaches zero.
