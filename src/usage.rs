@@ -65,7 +65,20 @@ pub async fn usage_json(config: &Config) -> Value {
         }
         let path = crate::config::claude_config_dir().join("usage_snapshot.json");
         if let Ok(txt) = serde_json::to_string(&snap) {
-            let _ = std::fs::write(path, txt);
+            match std::fs::write(&path, txt) {
+                Ok(_) => {
+                    let plan = v.get("plan").and_then(Value::as_str).unwrap_or("?");
+                    let sp = v.pointer("/session/percent").and_then(Value::as_u64).unwrap_or(0);
+                    let wp = v.pointer("/week/percent").and_then(Value::as_u64).unwrap_or(0);
+                    tracing::info!(
+                        "usage snapshot → {} (plan={plan} 5h={sp}% week={wp}%)",
+                        path.display()
+                    );
+                }
+                Err(e) => {
+                    tracing::warn!("usage snapshot write failed ({}): {e}", path.display());
+                }
+            }
         }
     }
     v
