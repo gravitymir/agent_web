@@ -316,19 +316,21 @@ fn build(base: &PathBuf) {
 // ---------------------------------------------------------------------------
 
 fn tunnel_start() {
-    if ps_strict(&format!("Start-Service {TUNNEL_SVC}")) {
+    println!("Requesting administrator rights (approve the UAC prompt)...");
+    if ps_elevated(&format!("Start-Service {TUNNEL_SVC}")) {
         println!("Tunnel started.");
     } else {
-        eprintln!("Could not start the tunnel — run agentctl from an Administrator terminal, or: Start-Service {TUNNEL_SVC}");
+        eprintln!("Could not start the tunnel (UAC declined or service error).");
     }
 }
 
 fn tunnel_stop() {
     println!("Note: this stops the WHOLE tunnel (both your agent.* and guest.* hosts).");
-    if ps_strict(&format!("Stop-Service {TUNNEL_SVC}")) {
+    println!("Requesting administrator rights (approve the UAC prompt)...");
+    if ps_elevated(&format!("Stop-Service {TUNNEL_SVC}")) {
         println!("Tunnel stopped.");
     } else {
-        eprintln!("Could not stop the tunnel — need an Administrator terminal.");
+        eprintln!("Could not stop the tunnel (UAC declined or service error).");
     }
 }
 
@@ -347,10 +349,11 @@ fn tunnel_status() {
 }
 
 fn tunnel_autostart() {
-    if ps_strict(&format!("Set-Service -Name {TUNNEL_SVC} -StartupType Automatic")) {
+    println!("Requesting administrator rights (approve the UAC prompt)...");
+    if ps_elevated(&format!("Set-Service -Name {TUNNEL_SVC} -StartupType Automatic")) {
         println!("Tunnel set to start automatically on boot.");
     } else {
-        eprintln!("Could not change startup type — run agentctl as Administrator.");
+        eprintln!("Could not change startup type (UAC declined).");
     }
 }
 
@@ -376,11 +379,18 @@ fn docker(args: &[&str]) -> std::io::Result<ExitStatus> {
     Command::new("docker").args(args).status()
 }
 
-/// Run a PowerShell command that fails loudly (non-zero exit on error) so we can
-/// tell success from "access denied".
-fn ps_strict(cmd: &str) -> bool {
+/// Run a PowerShell command elevated (via a UAC prompt) and wait for it — used
+/// for the Cloudflared Windows-service ops, which require Administrator. Returns
+/// true only if the elevated command succeeded. `inner` must not contain single
+/// quotes (our tunnel commands don't).
+fn ps_elevated(inner: &str) -> bool {
+    let script = format!(
+        "try {{ $p = Start-Process powershell -Verb RunAs -Wait -PassThru -ArgumentList \
+         '-NoProfile','-Command','$ErrorActionPreference=''Stop''; {inner}'; \
+         if ($p.ExitCode -ne 0) {{ exit 1 }} }} catch {{ exit 1 }}"
+    );
     Command::new("powershell")
-        .args(["-NoProfile", "-Command", &format!("$ErrorActionPreference='Stop'; {cmd}")])
+        .args(["-NoProfile", "-Command", &script])
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
