@@ -7,7 +7,7 @@
 # any file access outside /workspace — including /proc/self/environ.
 #
 # Build:  docker build -f Dockerfile.guest -t agent-web:guest-sub .
-# Run:    ./run-guest.ps1   (needs guest.env with CLAUDE_CODE_OAUTH_TOKEN)
+# Run:    ./run-guest.ps1   (reads CLAUDE_CODE_OAUTH_TOKEN from .env)
 
 # ---- build: static musl binary of our app ----
 FROM rust:alpine AS build
