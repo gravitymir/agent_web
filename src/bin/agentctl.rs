@@ -62,6 +62,7 @@ fn main() {
                 revoke(&label);
             }
         }
+        Some("vm") => vm_cli(&args),
         Some("tunnel") => match args.get(1).map(|s| s.as_str()) {
             Some("start") => tunnel_start(),
             Some("stop") => tunnel_stop(),
@@ -79,7 +80,7 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>]"
+        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>|vm <selftest|status <name>|delete <name>>]"
     );
 }
 
@@ -597,4 +598,187 @@ fn env_var(base: &Path, name: &str) -> String {
             }
     }
     String::new()
+}
+
+// ---------------------------------------------------------------------------
+// VirtualBox executor VMs (Phase 2). Thin wrappers over VBoxManage — the same
+// shape as the docker() helper, so agentctl can drive VM lifecycle (create /
+// start headless / snapshot / port-forward / stop / delete) from the console.
+// ---------------------------------------------------------------------------
+
+mod vbox {
+    use std::process::Command;
+
+    /// The VBoxManage binary. Prefer PATH; on Windows fall back to the default
+    /// install location so it works even if PATH wasn't updated.
+    fn bin() -> String {
+        #[cfg(windows)]
+        {
+            let default = r"C:\Program Files\Oracle\VirtualBox\VBoxManage.exe";
+            if std::path::Path::new(default).exists() {
+                return default.to_string();
+            }
+        }
+        "VBoxManage".to_string()
+    }
+
+    /// Run VBoxManage, inheriting stdio; return whether it succeeded.
+    pub fn run(args: &[&str]) -> bool {
+        Command::new(bin()).args(args).status().map(|s| s.success()).unwrap_or(false)
+    }
+
+    /// Run VBoxManage capturing stdout (None on failure / no output).
+    pub fn out(args: &[&str]) -> Option<String> {
+        let o = Command::new(bin()).args(args).output().ok()?;
+        if !o.status.success() {
+            return None;
+        }
+        Some(String::from_utf8_lossy(&o.stdout).into_owned())
+    }
+
+    pub fn version() -> Option<String> {
+        out(&["--version"]).map(|s| s.trim().to_string())
+    }
+
+    /// A VM is registered / running if its quoted name appears in the listing.
+    pub fn exists(name: &str) -> bool {
+        out(&["list", "vms"]).is_some_and(|s| s.contains(&format!("\"{name}\"")))
+    }
+    pub fn running(name: &str) -> bool {
+        out(&["list", "runningvms"]).is_some_and(|s| s.contains(&format!("\"{name}\"")))
+    }
+
+    /// Register a fresh VM with basic resources and a NAT NIC.
+    pub fn create(name: &str, cpus: u32, mem_mb: u32) -> bool {
+        run(&["createvm", "--name", name, "--ostype", "Ubuntu_64", "--register"])
+            && run(&[
+                "modifyvm", name,
+                "--memory", &mem_mb.to_string(),
+                "--cpus", &cpus.to_string(),
+                "--nic1", "nat",
+            ])
+    }
+
+    /// Forward host_port -> guest_port over the NAT NIC (rule name must be unique).
+    pub fn port_forward(name: &str, rule: &str, host_port: u16, guest_port: u16) -> bool {
+        run(&[
+            "modifyvm", name,
+            "--natpf1", &format!("{rule},tcp,,{host_port},,{guest_port}"),
+        ])
+    }
+
+    pub fn start_headless(name: &str) -> bool {
+        run(&["startvm", name, "--type", "headless"])
+    }
+    pub fn poweroff(name: &str) -> bool {
+        run(&["controlvm", name, "poweroff"])
+    }
+    pub fn snapshot_take(name: &str, snap: &str) -> bool {
+        run(&["snapshot", name, "take", snap])
+    }
+    pub fn snapshot_restore(name: &str, snap: &str) -> bool {
+        run(&["snapshot", name, "restore", snap])
+    }
+    pub fn snapshot_list(name: &str) -> Option<String> {
+        out(&["snapshot", name, "list", "--machinereadable"])
+    }
+    pub fn info(name: &str) -> Option<String> {
+        out(&["showvminfo", name, "--machinereadable"])
+    }
+    /// Unregister and delete all files.
+    pub fn delete(name: &str) -> bool {
+        run(&["unregistervm", name, "--delete"])
+    }
+}
+
+/// `agentctl vm <selftest|status|delete> [name]` — Phase-2 VM controls. The full
+/// interactive integration (menus, base image, broker wiring) comes next; for now
+/// this exercises and exposes the VBoxManage lifecycle directly.
+fn vm_cli(args: &[String]) {
+    match args.get(1).map(|s| s.as_str()) {
+        Some("selftest") => vm_selftest(),
+        Some("status") => match args.get(2) {
+            Some(name) => match vbox::info(name) {
+                Some(i) => print!("{i}"),
+                None => eprintln!("VM '{name}' not found (or VBoxManage failed)."),
+            },
+            None => eprintln!("usage: agentctl vm status <name>"),
+        },
+        Some("delete") => match args.get(2) {
+            Some(name) => {
+                if vbox::running(name) {
+                    let _ = vbox::poweroff(name);
+                }
+                if vbox::delete(name) {
+                    println!("Deleted VM '{name}'.");
+                } else {
+                    eprintln!("Failed to delete '{name}' (does it exist?).");
+                }
+            }
+            None => eprintln!("usage: agentctl vm delete <name>"),
+        },
+        _ => eprintln!("usage: agentctl vm [selftest|status <name>|delete <name>]"),
+    }
+}
+
+/// Exercise the whole VBoxManage lifecycle on a throwaway VM (no OS needed — we
+/// only verify our wrappers drive create/modify/snapshot/delete correctly).
+fn vm_selftest() {
+    const NAME: &str = "agentctl-selftest";
+    // Report a step and return its pass flag (caller folds into `ok`) — a closure
+    // that captured `ok` would keep it mutably borrowed past the final read.
+    let step = |label: &str, pass: bool| -> bool {
+        println!("  [{}] {label}", if pass { "OK" } else { "!!" });
+        pass
+    };
+    let mut ok = true;
+
+    match vbox::version() {
+        Some(v) => {
+            step(&format!("VBoxManage {v}"), true);
+        }
+        None => {
+            eprintln!("VBoxManage not found. Install VirtualBox or add it to PATH.");
+            return;
+        }
+    }
+
+    // Clean slate if a previous run left it behind.
+    if vbox::exists(NAME) {
+        if vbox::running(NAME) {
+            let _ = vbox::poweroff(NAME);
+        }
+        let _ = vbox::delete(NAME);
+    }
+
+    ok &= step("create VM", vbox::create(NAME, 2, 2048));
+    ok &= step("NAT port-forward 18787->8787", vbox::port_forward(NAME, "aw", 18787, 8787));
+
+    // Verify the settings actually applied.
+    let info = vbox::info(NAME).unwrap_or_default();
+    ok &= step("memory=2048 applied", info.contains("memory=2048"));
+    ok &= step("cpus=2 applied", info.contains("cpus=2"));
+    ok &= step("port-forward applied", info.contains("18787") && info.contains("8787"));
+
+    // Offline snapshot (no running VM needed).
+    ok &= step("snapshot take 'clean'", vbox::snapshot_take(NAME, "clean"));
+    let snaps = vbox::snapshot_list(NAME).unwrap_or_default();
+    ok &= step("snapshot 'clean' listed", snaps.contains("clean"));
+    ok &= step("snapshot restore 'clean'", vbox::snapshot_restore(NAME, "clean"));
+
+    // Headless start is best-effort (a diskless VM can't boot; on the Hyper-V
+    // backend it may refuse) — report, don't fail the suite on it.
+    if vbox::start_headless(NAME) {
+        println!("  [OK] start headless (diskless — will idle at no-boot)");
+        std::thread::sleep(std::time::Duration::from_secs(2));
+        println!("  [{}] running detected", if vbox::running(NAME) { "OK" } else { "--" });
+        let _ = vbox::poweroff(NAME);
+    } else {
+        println!("  [--] start headless skipped (expected without a bootable disk)");
+    }
+
+    ok &= step("delete VM", vbox::delete(NAME));
+    ok &= step("VM gone", !vbox::exists(NAME));
+
+    println!("\n{}", if ok { "vm selftest: PASS" } else { "vm selftest: FAILED (see !! above)" });
 }
