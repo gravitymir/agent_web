@@ -1,7 +1,7 @@
 import { state, el } from './state.js';
-import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText, renderPermissionRequest, markPermissionResolved } from './render.js';
+import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText, renderPermissionRequest, markPermissionResolved, loadUsage } from './render.js';
 import { setFaviconState } from '../favicon.js';
-import { renderTranscriptWindowed, restoreUnsentMessage, confirmSentMessage } from './ui.js';
+import { renderTranscriptWindowed, restoreUnsentMessage, confirmSentMessage, loadProviders, loadChatList } from './ui.js';
 
 // ---------------------------------------------------------------------------
 // WebSocket connection with exponential-backoff auto-reconnect.
@@ -12,6 +12,10 @@ const HEARTBEAT_INTERVAL = 20000; // ms
 
 let reconnectAttempts = 0;
 let reconnectTimer = null;
+// Whether we've had at least one successful connection. Distinguishes the very
+// first connect (startup already fetched providers/models/usage) from a later
+// RE-connect, where the server may have restarted on a different engine.
+let connectedOnce = false;
 let heartbeatTimer = null;
 let intentionalClose = false;
 // Whether the keeper we just attached to had ANY live scrollback at all (the
@@ -41,12 +45,22 @@ export function connect() {
   state.ws = ws;
 
   ws.onopen = () => {
+    const reconnected = connectedOnce;
+    connectedOnce = true;
     reconnectAttempts = 0;
     setConn(true);
     startHeartbeat(ws);
     // Reconnect: re-attach to the live session (if any) to resume its stream.
     if (state.sessionId && !state.isNew) {
       sendWs({ type: "attach", session_id: state.sessionId });
+    }
+    // On a RE-connect the server may have been restarted on a different engine
+    // (CWI_ENGINE). Re-resolve provider/engine, models, usage and the chat list
+    // so the UI stops showing the previous engine without a manual page reload.
+    if (reconnected) {
+      loadProviders();
+      loadUsage();
+      loadChatList();
     }
   };
 
