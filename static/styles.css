@@ -49,27 +49,23 @@ body { font-size: 1rem; }
 @keyframes bootSpin { to { transform: rotate(360deg); } }
 @keyframes bootHue { from { filter: hue-rotate(0deg); } to { filter: hue-rotate(360deg); } }
 
-/* App hidden until booted; then fade in and reveal key regions in sequence. */
+/* App fully hidden until booted, then revealed as ONE clean fade. The whole UI
+   (header, messages, composer, chat list) appears together — no per-region
+   stagger, which used to look like a half-loaded page (composer before the
+   rest). The boot overlay only lifts once init has finished, so what fades in is
+   already complete. */
 #app { opacity: 0; }
-body.booted #app { opacity: 1; transition: opacity .35s ease; }
-@keyframes bootReveal { from { opacity: 0; transform: translateY(10px); } to { opacity: 1; transform: none; } }
-body.booted #main   { animation: bootReveal .45s cubic-bezier(.2,.7,.2,1) both .04s; }
-/* NOTE: never animate `transform` on #sidebar here — it owns translateX for its
-   open/close slide, and a persisting `transform: none` would jam it open. */
-/* Chat-list items cascade in one after another. */
-body.booted .chat-item { animation: bootReveal .40s ease both; }
-body.booted .chat-item:nth-child(1) { animation-delay: .24s; }
-body.booted .chat-item:nth-child(2) { animation-delay: .29s; }
-body.booted .chat-item:nth-child(3) { animation-delay: .34s; }
-body.booted .chat-item:nth-child(4) { animation-delay: .39s; }
-body.booted .chat-item:nth-child(5) { animation-delay: .44s; }
-body.booted .chat-item:nth-child(6) { animation-delay: .49s; }
-body.booted .chat-item:nth-child(7) { animation-delay: .54s; }
-body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
+body.booted #app { opacity: 1; transition: opacity .3s ease; }
+/* The floating chat-title capsule lives outside #app, so gate it on `booted`
+   too — otherwise it appears as the boot overlay fades, a beat before the #app
+   content. (Badges manage their own opacity via JS, so they're left alone.) */
+#chat-title, #chat-controls { opacity: 0; }
+body.booted #chat-title,
+body.booted #chat-controls { opacity: 1; transition: opacity .3s ease; }
 @media (prefers-reduced-motion: reduce) {
   .boot-orb { animation: none; }
-  body.booted #app, body.booted #main, body.booted .chat-item {
-    animation: none; opacity: 1; transform: none;
+  body.booted #app, body.booted #chat-title, body.booted #chat-controls {
+    transition: none; opacity: 1;
   }
 }
 
