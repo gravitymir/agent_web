@@ -12,9 +12,14 @@
 set -eu
 
 if [ "${CWI_EGRESS:-on}" != "off" ]; then
-  # Allow DNS and loopback FIRST (rules are matched top-to-bottom). Docker's
-  # embedded resolver (127.0.0.11) forwards to a private upstream, so blindly
-  # rejecting private ranges would break all name resolution.
+  # Allow replies to already-established connections FIRST — otherwise the app's
+  # own HTTP responses (to inbound requests arriving via the private Docker bridge
+  # gateway) would be rejected and the UI would time out (524). NEW outbound to
+  # private ranges is still a fresh connection, so SSRF stays blocked below.
+  iptables -A OUTPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+  # Allow DNS and loopback (rules matched top-to-bottom). Docker's embedded
+  # resolver (127.0.0.11) forwards to a private upstream, so blindly rejecting
+  # private ranges would break all name resolution.
   iptables -A OUTPUT -o lo -j ACCEPT
   iptables -A OUTPUT -p udp --dport 53 -j ACCEPT
   iptables -A OUTPUT -p tcp --dport 53 -j ACCEPT
