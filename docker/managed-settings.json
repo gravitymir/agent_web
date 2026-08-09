@@ -4,8 +4,6 @@
     "deny": [
       "Bash",
       "PowerShell",
-      "WebFetch",
-      "WebSearch",
       "mcp__*",
       "AskUserQuestion",
       "Read(//proc/**)",
@@ -20,7 +18,9 @@
       "Read(./**)",
       "Edit(./**)",
       "Read(//workspace/**)",
-      "Edit(//workspace/**)"
+      "Edit(//workspace/**)",
+      "WebFetch",
+      "WebSearch"
     ]
   },
   "allowManagedPermissionRulesOnly": true,
