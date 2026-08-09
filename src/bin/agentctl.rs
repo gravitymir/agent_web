@@ -172,7 +172,11 @@ fn start(base: &PathBuf) {
     let args: Vec<&str> = vec![
         "run", "-d", "--name", CONTAINER,
         "--restart", "unless-stopped", // survive reboots / Docker restarts
-        "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
+        "--read-only", "--cap-drop", "ALL",
+        // entrypoint (root) needs NET_ADMIN to install egress rules and
+        // SETUID/SETGID so gosu can drop to the unprivileged 'guest' user.
+        "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID",
+        "--security-opt", "no-new-privileges",
         "--pids-limit", "512", "--memory", "2g", "--cpus", "2", "--tmpfs", "/tmp",
         "-v", "agent_guest_chats:/chats", "-v", &mount,
         "-e", &token_env, "-e", &url_env,

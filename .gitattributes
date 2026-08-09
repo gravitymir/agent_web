@@ -1,0 +1,4 @@
+# Shell scripts must stay LF so the shebang works inside Linux containers,
+# even when checked out on Windows.
+*.sh text eol=lf
+docker/entrypoint.sh text eol=lf

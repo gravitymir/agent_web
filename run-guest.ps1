@@ -49,6 +49,9 @@ docker run -d --name agent-guest `
   --restart unless-stopped `
   --read-only `
   --cap-drop ALL `
+  --cap-add NET_ADMIN `
+  --cap-add SETUID `
+  --cap-add SETGID `
   --security-opt no-new-privileges `
   --pids-limit 512 `
   --memory 2g `
