@@ -75,49 +75,70 @@ fn usage() {
 }
 
 fn interactive(base: &PathBuf) {
-    let items = [
-        "Status (container + tunnel)",
-        "Guest: start container",
-        "Guest: stop container",
-        "Guest: new access code (magic link)",
-        "Guest: codes (list / revoke)",
-        "Tunnel: start",
-        "Tunnel: stop",
-        "Tunnel: set autostart",
-        "Guest: build image",
-        "Quit",
-    ];
+    let items = ["Guest", "Tunnel", "Status", "Quit"];
     loop {
         println!();
-        let choice = Select::with_theme(&ColorfulTheme::default())
+        let sel = Select::with_theme(&ColorfulTheme::default())
             .with_prompt("Agent Web — control panel")
             .items(&items)
             .default(0)
             .interact()
             .unwrap_or(items.len() - 1);
-        match choice {
-            0 => status(),
-            1 => start(base),
-            2 => stop(),
-            3 => {
-                let label: String = Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Label (who is this for)")
-                    .default("guest".into())
-                    .interact_text()
-                    .unwrap_or_else(|_| "guest".into());
-                let ttl: String = Input::with_theme(&ColorfulTheme::default())
-                    .with_prompt("Valid for (e.g. 24h, 7d, 30m)")
-                    .default("24h".into())
-                    .interact_text()
-                    .unwrap_or_else(|_| "24h".into());
-                new_code(base, &label, &ttl);
-            }
-            4 => manage_codes(),
-            5 => tunnel_start(),
-            6 => tunnel_stop(),
-            7 => tunnel_autostart(),
-            8 => build(base),
+        match items[sel] {
+            "Guest" => guest_menu(base),
+            "Tunnel" => tunnel_menu(),
+            "Status" => status(),
             _ => break,
+        }
+    }
+}
+
+/// Guest submenu — start/stop shown by context; Codes opens the code manager.
+fn guest_menu(base: &PathBuf) {
+    loop {
+        let running = container_running();
+        let mut items: Vec<&str> = Vec::new();
+        if running {
+            items.push("Stop container");
+            items.push("Codes (list / new / revoke)");
+        } else {
+            items.push("Start container");
+        }
+        items.push("Build image");
+        items.push("(back)");
+        println!();
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt(if running { "Guest — running" } else { "Guest — stopped" })
+            .items(&items)
+            .default(0)
+            .interact()
+            .unwrap_or(items.len() - 1);
+        match items[sel] {
+            "Start container" => start(base),
+            "Stop container" => stop(),
+            "Codes (list / new / revoke)" => codes_menu(base),
+            "Build image" => build(base),
+            _ => return,
+        }
+    }
+}
+
+fn tunnel_menu() {
+    let items = ["Status", "Start", "Stop", "Set autostart", "(back)"];
+    loop {
+        println!();
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Tunnel")
+            .items(&items)
+            .default(0)
+            .interact()
+            .unwrap_or(items.len() - 1);
+        match items[sel] {
+            "Status" => tunnel_status(),
+            "Start" => tunnel_start(),
+            "Stop" => tunnel_stop(),
+            "Set autostart" => tunnel_autostart(),
+            _ => return,
         }
     }
 }
@@ -224,37 +245,59 @@ fn revoke(label: &str) {
     let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
 }
 
-/// Interactive: list active codes, pick one, confirm, revoke.
-fn manage_codes() {
+/// Interactive codes submenu: `[ new code ]` plus each active code. Picking a
+/// code confirms and revokes it; picking new mints one. Loops until "(back)".
+fn codes_menu(base: &PathBuf) {
     if !container_running() {
         eprintln!("Guest container is not running — start it first.");
         return;
     }
-    let entries = active_entries();
-    if entries.is_empty() {
-        println!("No active codes.");
-        return;
+    loop {
+        let entries = active_entries();
+        let mut items: Vec<String> = vec!["[ new code ]".into()];
+        for (_, d) in &entries {
+            items.push(d.clone());
+        }
+        items.push("(back)".into());
+        println!();
+        let sel = Select::with_theme(&ColorfulTheme::default())
+            .with_prompt("Codes — pick a code to revoke, or create a new one")
+            .items(&items)
+            .default(0)
+            .interact()
+            .unwrap_or(items.len() - 1);
+        if sel == 0 {
+            let (label, ttl) = prompt_new();
+            new_code(base, &label, &ttl);
+        } else if sel == items.len() - 1 {
+            return; // (back)
+        } else {
+            let (label, _) = &entries[sel - 1];
+            let yes = Confirm::with_theme(&ColorfulTheme::default())
+                .with_prompt(format!("Revoke '{label}'? This immediately kills its magic link"))
+                .default(false)
+                .interact()
+                .unwrap_or(false);
+            if yes {
+                revoke(label);
+            }
+        }
     }
-    let mut items: Vec<String> = entries.iter().map(|(_, d)| d.clone()).collect();
-    items.push("(back)".into());
-    let sel = Select::with_theme(&ColorfulTheme::default())
-        .with_prompt("Active codes — pick one to revoke")
-        .items(&items)
-        .default(items.len() - 1)
-        .interact()
-        .unwrap_or(items.len() - 1);
-    if sel >= entries.len() {
-        return; // (back)
-    }
-    let (label, _) = &entries[sel];
-    let yes = Confirm::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Revoke '{label}'? This immediately kills its magic link"))
-        .default(false)
-        .interact()
-        .unwrap_or(false);
-    if yes {
-        revoke(label);
-    }
+}
+
+/// Prompt for a label + TTL when minting a code interactively.
+fn prompt_new() -> (String, String) {
+    let label: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Label (who is this for)")
+        .default("guest".into())
+        .interact_text()
+        .unwrap_or_else(|_| "guest".into());
+    let ttl: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt("Valid for (e.g. 24h, 7d, 30m)")
+        .default("24h".into())
+        .interact_text()
+        .unwrap_or_else(|_| "24h".into());
+    (label, ttl)
 }
 
 fn build(base: &PathBuf) {
