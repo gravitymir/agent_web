@@ -112,14 +112,22 @@ fn load_env_file() {
         if let Some((k, v)) = line.split_once('=') {
             let (k, v) = (k.trim(), v.trim().trim_matches('"'));
             if !k.is_empty() && std::env::var(k).is_err() {
-                std::env::set_var(k, v);
+                // SAFETY: called only from `main`'s synchronous startup phase,
+                // before the async runtime/threads exist — no concurrent env access.
+                unsafe { std::env::set_var(k, v) };
             }
         }
     }
 }
 
-#[tokio::main]
-async fn main() -> anyhow::Result<()> {
+/// Synchronous startup phase. Everything that MUTATES the environment
+/// (`load_env_file`, the CLAUDE_CONFIG_DIR pin, the wizard) runs here, *before*
+/// the Tokio runtime — and therefore its worker threads — exist. That is what
+/// makes the `set_var` calls sound: no other thread can be reading the
+/// environment concurrently, which is exactly the data race edition 2024 marks
+/// `set_var`/`remove_var` `unsafe` to prevent. Once this returns, the environment
+/// is frozen for the rest of the process.
+fn main() -> anyhow::Result<()> {
     load_env_file();
 
     // Portable storage: when CLAUDE_CONFIG_DIR isn't set, pin it to the resolved
@@ -130,7 +138,9 @@ async fn main() -> anyhow::Result<()> {
     if std::env::var("CLAUDE_CONFIG_DIR").map_or(true, |v| v.trim().is_empty()) {
         let dir = config::claude_config_dir();
         let _ = std::fs::create_dir_all(&dir);
-        std::env::set_var("CLAUDE_CONFIG_DIR", &dir);
+        // SAFETY: single-threaded startup — no runtime or other threads exist yet,
+        // so nothing can read the environment concurrently with this write.
+        unsafe { std::env::set_var("CLAUDE_CONFIG_DIR", &dir) };
     }
 
     // `agent_web guest <new|list|revoke>` — manage built-in access codes, then
@@ -145,6 +155,16 @@ async fn main() -> anyhow::Result<()> {
     // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
     wizard::run();
 
+    // Environment is fully configured and frozen; now spin up the async runtime.
+    tokio::runtime::Builder::new_multi_thread()
+        .enable_all()
+        .build()?
+        .block_on(run())
+}
+
+/// Async server entry point. Runs after `main()`'s synchronous env setup, so it
+/// and every task it spawns only ever *read* the environment.
+async fn run() -> anyhow::Result<()> {
     tracing_subscriber::registry()
         .with(EnvFilter::try_from_default_env().unwrap_or_else(|_| "info".into()))
         .with(tracing_subscriber::fmt::layer())

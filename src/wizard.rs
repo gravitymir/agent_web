@@ -53,12 +53,14 @@ pub fn run() {
         .interact()
         .unwrap_or(engine_default);
 
+    // SAFETY: `run()` is called only from `main`'s synchronous startup phase,
+    // before the async runtime/threads exist — no concurrent environment access.
     match ENGINES[engine_idx].1 {
-        None => std::env::set_var("CWI_ENGINE", "cli"),
-        Some(provider) => {
+        None => unsafe { std::env::set_var("CWI_ENGINE", "cli") },
+        Some(provider) => unsafe {
             std::env::set_var("CWI_ENGINE", "native");
             std::env::set_var("CWI_AGENT_PROVIDER", provider);
-        }
+        },
     }
 
     // --- Port -----------------------------------------------------------------
@@ -76,5 +78,6 @@ pub fn run() {
         .interact()
         .unwrap_or(port_default);
 
-    std::env::set_var("CWI_BIND", format!("127.0.0.1:{}", PORTS[port_idx]));
+    // SAFETY: as above — synchronous startup, no other threads yet.
+    unsafe { std::env::set_var("CWI_BIND", format!("127.0.0.1:{}", PORTS[port_idx])) };
 }
