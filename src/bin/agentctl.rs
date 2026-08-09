@@ -25,6 +25,10 @@ const CONTAINER: &str = "agent-guest";
 const HOST_PORT: &str = "127.0.0.1:8788";
 const DEFAULT_URL: &str = "https://guest.astechlab.dev";
 const TUNNEL_SVC: &str = "Cloudflared";
+// Container resource caps — defaults; overridable per-run (interactive prompt or
+// CWI_GUEST_CPUS / CWI_GUEST_MEMORY in .env).
+const DEFAULT_CPUS: &str = "2";
+const DEFAULT_MEMORY: &str = "2g";
 
 fn main() {
     let base = base_dir();
@@ -32,10 +36,14 @@ fn main() {
     match args.first().map(|s| s.as_str()) {
         Some("up") => {
             tunnel_start();
-            start(&base);
+            let (cpus, memory) = resource_defaults(&base);
+            start(&base, &cpus, &memory);
         }
         Some("down") => stop(),
-        Some("start") => start(&base),
+        Some("start") => {
+            let (cpus, memory) = resource_defaults(&base);
+            start(&base, &cpus, &memory);
+        }
         Some("drain") => drain(),
         Some("stop") => stop(),
         Some("status") => status(),
@@ -116,7 +124,10 @@ fn guest_menu(base: &Path) {
             .interact()
             .unwrap_or(items.len() - 1);
         match items[sel] {
-            "Start container" => start(base),
+            "Start container" => {
+                let (cpus, memory) = prompt_resources(base);
+                start(base, &cpus, &memory);
+            }
             "Drain (finish active turns, then safe to stop)" => drain(),
             "Stop container" => stop(),
             "Codes (list / new / revoke)" => codes_menu(base),
@@ -150,7 +161,7 @@ fn tunnel_menu() {
 // Guest container
 // ---------------------------------------------------------------------------
 
-fn start(base: &Path) {
+fn start(base: &Path, cpus: &str, memory: &str) {
     let token = env_var(base, "CLAUDE_CODE_OAUTH_TOKEN");
     if token.is_empty() {
         eprintln!(
@@ -191,7 +202,7 @@ fn start(base: &Path) {
         // SETUID/SETGID so gosu can drop to the unprivileged 'guest' user.
         "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID",
         "--security-opt", "no-new-privileges",
-        "--pids-limit", "512", "--memory", "2g", "--cpus", "2", "--tmpfs", "/tmp",
+        "--pids-limit", "512", "--memory", memory, "--cpus", cpus, "--tmpfs", "/tmp",
         "-v", "agent_guest_chats:/chats", "-v", &mount,
         "-v", &snap_mount,
         "-e", &token_env, "-e", &url_env,
@@ -199,11 +210,68 @@ fn start(base: &Path) {
         "-p", &port, IMAGE,
     ];
     if docker(&args).map(|s| s.success()).unwrap_or(false) {
-        println!("\nGuest container started on http://{HOST_PORT}");
+        println!("\nGuest container started on http://{HOST_PORT}  (cpus={cpus}, memory={memory})");
         println!("Public: {url}  (mint a code from this panel or with `agentctl code`)");
     } else {
         eprintln!("\nFailed to start. Is Docker running and the image built? (menu \"build image\")");
     }
+}
+
+/// Ask Docker how much it can actually give a container: (NCPU, MemTotal bytes).
+/// This reflects the Docker/WSL2 VM's allocation, which is the real ceiling for
+/// `--cpus` / `--memory` (it can be less than the host's physical resources).
+fn docker_capacity() -> (Option<u64>, Option<u64>) {
+    let ncpu = docker_info("{{.NCPU}}").and_then(|s| s.parse().ok());
+    let mem = docker_info("{{.MemTotal}}").and_then(|s| s.parse().ok());
+    (ncpu, mem)
+}
+
+fn docker_info(fmt: &str) -> Option<String> {
+    let out = Command::new("docker").args(["info", "--format", fmt]).output().ok()?;
+    if !out.status.success() {
+        return None;
+    }
+    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
+    if s.is_empty() { None } else { Some(s) }
+}
+
+/// Non-interactive resource caps: `.env` overrides (CWI_GUEST_CPUS /
+/// CWI_GUEST_MEMORY), else the built-in defaults. Used by the `start`/`up`
+/// subcommands, which must not block on a prompt.
+fn resource_defaults(base: &Path) -> (String, String) {
+    let pick = |key: &str, default: &str| {
+        let v = env_var(base, key);
+        if v.is_empty() { default.to_string() } else { v }
+    };
+    (pick("CWI_GUEST_CPUS", DEFAULT_CPUS), pick("CWI_GUEST_MEMORY", DEFAULT_MEMORY))
+}
+
+/// Interactive resource picker: show what Docker can give, then prompt (Enter
+/// keeps the current default). Handy when the machine is otherwise idle and you
+/// want to hand the container more.
+fn prompt_resources(base: &Path) -> (String, String) {
+    let (max_cpu, max_mem) = docker_capacity();
+    let (def_cpu, def_mem) = resource_defaults(base);
+
+    let cpu_hint = max_cpu
+        .map(|c| format!(" (Docker sees {c} CPUs)"))
+        .unwrap_or_default();
+    let cpus: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("CPUs{cpu_hint}"))
+        .default(def_cpu.clone())
+        .interact_text()
+        .unwrap_or(def_cpu);
+
+    let mem_hint = max_mem
+        .map(|b| format!(" (Docker has ~{} GB)", b / 1_073_741_824))
+        .unwrap_or_default();
+    let memory: String = Input::with_theme(&ColorfulTheme::default())
+        .with_prompt(format!("Memory — e.g. 2g, 512m{mem_hint}"))
+        .default(def_mem.clone())
+        .interact_text()
+        .unwrap_or(def_mem);
+
+    (cpus.trim().to_string(), memory.trim().to_string())
 }
 
 fn stop() {

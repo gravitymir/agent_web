@@ -39,6 +39,13 @@ if ([string]::IsNullOrWhiteSpace($token)) {
 $publicUrl = Get-EnvVar 'CWI_PUBLIC_URL'
 if ([string]::IsNullOrWhiteSpace($publicUrl)) { $publicUrl = 'https://guest.astechlab.dev' }
 
+# Resource caps (override in .env to hand an idle machine more). The interactive
+# `agentctl` panel picks these per-run; this script just reads the .env defaults.
+$cpus = Get-EnvVar 'CWI_GUEST_CPUS'
+if ([string]::IsNullOrWhiteSpace($cpus)) { $cpus = '2' }
+$memory = Get-EnvVar 'CWI_GUEST_MEMORY'
+if ([string]::IsNullOrWhiteSpace($memory)) { $memory = '2g' }
+
 # Guest workspace on the host (the ONLY host folder the container can touch).
 New-Item -ItemType Directory -Force guest-workspace | Out-Null
 
@@ -62,8 +69,8 @@ docker run -d --name agent-guest `
   --cap-add SETGID `
   --security-opt no-new-privileges `
   --pids-limit 512 `
-  --memory 2g `
-  --cpus 2 `
+  --memory $memory `
+  --cpus $cpus `
   --tmpfs /tmp `
   -v agent_guest_chats:/chats `
   -v "${PWD}\guest-workspace:/workspace" `
