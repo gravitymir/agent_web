@@ -256,6 +256,7 @@ impl Engine {
                             tokio::time::sleep(backoff).await;
                             continue;
                         }
+                        log_turn_error(&self.session_id, &self.provider.model, &e);
                         emit.line(json!({ "cwi": "error", "message": format!("agent: {e}") }).to_string());
                         stream_failed = true;
                         break;
@@ -390,6 +391,33 @@ fn handle_stream_event(
             *think_emitted = true;
         }
     acc.on_event(&ev);
+}
+
+/// Log a failed turn to the terminal in a readable form. Provider error bodies
+/// are JSON like `{"code":"AccessDenied","message":"…","request_id":"…"}` wrapped
+/// as `HTTP <status>: <body>` — pull those apart into structured fields instead of
+/// dumping one long blob, and fall back to the raw string when it isn't JSON.
+fn log_turn_error(session_id: &str, model: &str, err: &anyhow::Error) {
+    let raw = err.to_string();
+    let status = raw
+        .split("HTTP ")
+        .nth(1)
+        .and_then(|s| s.split([':', ' ']).next())
+        .unwrap_or("-");
+    if let Some(body) = raw.find('{').and_then(|i| serde_json::from_str::<Value>(&raw[i..]).ok()) {
+        let field = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+        tracing::error!(
+            session = %session_id,
+            model = %model,
+            status = %status,
+            code = %field("code"),
+            request_id = %field("request_id"),
+            "agent turn failed: {}",
+            field("message")
+        );
+    } else {
+        tracing::error!(session = %session_id, model = %model, "agent turn failed: {raw}");
+    }
 }
 
 /// Rewrite any string `content` into the block-array form Anthropic-compatible
