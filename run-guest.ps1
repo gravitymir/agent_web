@@ -46,6 +46,7 @@ New-Item -ItemType Directory -Force guest-workspace | Out-Null
 try { docker rm -f agent-guest 2>&1 | Out-Null } catch { }
 
 docker run -d --name agent-guest `
+  --restart unless-stopped `
   --read-only `
   --cap-drop ALL `
   --security-opt no-new-privileges `

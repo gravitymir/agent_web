@@ -1,22 +1,22 @@
 //! agentctl — interactive control panel for the Agent Web guest sandbox.
 //!
-//! Aggregates the docker commands and access-code minting behind an arrow-key
-//! menu (run with no args) or direct subcommands (scriptable), so you don't have
-//! to remember docker invocations.
+//! Aggregates the docker + tunnel commands and access-code minting behind an
+//! arrow-key menu (run with no args) or direct subcommands (scriptable):
 //!
 //!   agentctl                 # interactive menu
-//!   agentctl start           # (re)start the locked guest container
-//!   agentctl stop            # stop it
-//!   agentctl status          # is it up?
-//!   agentctl code [label] [ttl]   # mint a magic link (default: guest 24h)
-//!   agentctl list            # list active codes
-//!   agentctl build           # (re)build the guest image
+//!   agentctl up              # start tunnel + guest container
+//!   agentctl down            # stop guest container (tunnel left running)
+//!   agentctl start|stop|status|list|build
+//!   agentctl code [label] [ttl]        # mint a magic link (default: guest 24h)
+//!   agentctl tunnel start|stop|status|autostart
 //!
-//! The subscription token and public URL are read from .env; only those enter
-//! the container (least privilege — see run-guest.ps1).
+//! The subscription token + public URL are read from .env; only those enter the
+//! container (least privilege). The container runs with --restart unless-stopped
+//! so it comes back after a reboot. The Cloudflare tunnel is a Windows service
+//! (Cloudflared); start/stop/autostart need an Administrator terminal.
 
 use std::path::PathBuf;
-use std::process::Command;
+use std::process::{Command, ExitStatus};
 
 use dialoguer::{theme::ColorfulTheme, Input, Select};
 
@@ -24,11 +24,17 @@ const IMAGE: &str = "agent-web:guest-sub";
 const CONTAINER: &str = "agent-guest";
 const HOST_PORT: &str = "127.0.0.1:8788";
 const DEFAULT_URL: &str = "https://guest.astechlab.dev";
+const TUNNEL_SVC: &str = "Cloudflared";
 
 fn main() {
     let base = base_dir();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
+        Some("up") => {
+            tunnel_start();
+            start(&base);
+        }
+        Some("down") => stop(),
         Some("start") => start(&base),
         Some("stop") => stop(),
         Some("status") => status(),
@@ -39,6 +45,21 @@ fn main() {
             let ttl = args.get(2).cloned().unwrap_or_else(|| "24h".into());
             new_code(&base, &label, &ttl);
         }
+        Some("revoke") => {
+            let label = args.get(1).cloned().unwrap_or_default();
+            if label.is_empty() {
+                eprintln!("usage: agentctl revoke <label>");
+            } else {
+                revoke(&label);
+            }
+        }
+        Some("tunnel") => match args.get(1).map(|s| s.as_str()) {
+            Some("start") => tunnel_start(),
+            Some("stop") => tunnel_stop(),
+            Some("status") => tunnel_status(),
+            Some("autostart") => tunnel_autostart(),
+            _ => eprintln!("usage: agentctl tunnel [start|stop|status|autostart]"),
+        },
         Some(other) => {
             eprintln!("unknown command: {other}");
             usage();
@@ -48,16 +69,22 @@ fn main() {
 }
 
 fn usage() {
-    eprintln!("usage: agentctl [start|stop|status|list|build|code [label] [ttl]]");
+    eprintln!(
+        "usage: agentctl [up|down|start|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>]"
+    );
 }
 
 fn interactive(base: &PathBuf) {
     let items = [
+        "Status (container + tunnel)",
         "Guest: start container",
         "Guest: stop container",
         "Guest: new access code (magic link)",
         "Guest: list codes",
-        "Guest: status",
+        "Guest: revoke a code",
+        "Tunnel: start",
+        "Tunnel: stop",
+        "Tunnel: set autostart",
         "Guest: build image",
         "Quit",
     ];
@@ -70,9 +97,10 @@ fn interactive(base: &PathBuf) {
             .interact()
             .unwrap_or(items.len() - 1);
         match choice {
-            0 => start(base),
-            1 => stop(),
-            2 => {
+            0 => status(),
+            1 => start(base),
+            2 => stop(),
+            3 => {
                 let label: String = Input::with_theme(&ColorfulTheme::default())
                     .with_prompt("Label (who is this for)")
                     .default("guest".into())
@@ -85,16 +113,19 @@ fn interactive(base: &PathBuf) {
                     .unwrap_or_else(|_| "24h".into());
                 new_code(base, &label, &ttl);
             }
-            3 => list_codes(),
-            4 => status(),
-            5 => build(base),
+            4 => list_codes(),
+            5 => revoke_interactive(),
+            6 => tunnel_start(),
+            7 => tunnel_stop(),
+            8 => tunnel_autostart(),
+            9 => build(base),
             _ => break,
         }
     }
 }
 
 // ---------------------------------------------------------------------------
-// Actions
+// Guest container
 // ---------------------------------------------------------------------------
 
 fn start(base: &PathBuf) {
@@ -121,6 +152,7 @@ fn start(base: &PathBuf) {
     let port = format!("{HOST_PORT}:8787");
     let args: Vec<&str> = vec![
         "run", "-d", "--name", CONTAINER,
+        "--restart", "unless-stopped", // survive reboots / Docker restarts
         "--read-only", "--cap-drop", "ALL", "--security-opt", "no-new-privileges",
         "--pids-limit", "512", "--memory", "2g", "--cpus", "2", "--tmpfs", "/tmp",
         "-v", "agent_guest_chats:/chats", "-v", &mount,
@@ -131,7 +163,7 @@ fn start(base: &PathBuf) {
         println!("\nGuest container started on http://{HOST_PORT}");
         println!("Public: {url}  (mint a code from this panel or with `agentctl code`)");
     } else {
-        eprintln!("\nFailed to start. Is Docker running and the image built? (menu option \"build image\")");
+        eprintln!("\nFailed to start. Is Docker running and the image built? (menu \"build image\")");
     }
 }
 
@@ -141,13 +173,6 @@ fn stop() {
     } else {
         eprintln!("Nothing to stop (container not running?).");
     }
-}
-
-fn status() {
-    let _ = docker(&[
-        "ps", "-a", "--filter", &format!("name={CONTAINER}"),
-        "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
-    ]);
 }
 
 fn new_code(base: &PathBuf, label: &str, ttl: &str) {
@@ -170,26 +195,138 @@ fn list_codes() {
         eprintln!("Guest container is not running — start it first.");
         return;
     }
+    // Only labels + expiry can be listed — codes are stored hashed and shown
+    // once at mint time (a leaked store yields no usable links).
     let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "list"]);
+}
+
+/// Active labels, parsed from `guest list` (first token per line). Assumes
+/// single-word labels.
+fn active_labels() -> Vec<String> {
+    let Ok(out) = Command::new("docker")
+        .args(["exec", CONTAINER, "/app/agent_web", "guest", "list"])
+        .output()
+    else {
+        return vec![];
+    };
+    String::from_utf8_lossy(&out.stdout)
+        .lines()
+        .map(|l| l.trim())
+        .filter(|l| !l.is_empty() && !l.starts_with("no active"))
+        .filter_map(|l| l.split_whitespace().next().map(str::to_string))
+        .collect()
+}
+
+fn revoke(label: &str) {
+    if !container_running() {
+        eprintln!("Guest container is not running — start it first.");
+        return;
+    }
+    let _ = docker(&["exec", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
+}
+
+fn revoke_interactive() {
+    if !container_running() {
+        eprintln!("Guest container is not running — start it first.");
+        return;
+    }
+    let labels = active_labels();
+    if labels.is_empty() {
+        println!("No active codes to revoke.");
+        return;
+    }
+    let mut items = labels.clone();
+    items.push("(cancel)".into());
+    let sel = Select::with_theme(&ColorfulTheme::default())
+        .with_prompt("Revoke which label")
+        .items(&items)
+        .default(items.len() - 1)
+        .interact()
+        .unwrap_or(items.len() - 1);
+    if sel < labels.len() {
+        revoke(&labels[sel]);
+    }
 }
 
 fn build(base: &PathBuf) {
     println!("Building {IMAGE} (this takes a few minutes)...");
-    let mut cmd = Command::new("docker");
-    cmd.args(["build", "-f", "Dockerfile.guest", "-t", IMAGE, "."])
-        .current_dir(base);
-    match cmd.status() {
-        Ok(s) if s.success() => println!("Image built."),
-        _ => eprintln!("Build failed. Is Docker running?"),
+    let ok = Command::new("docker")
+        .args(["build", "-f", "Dockerfile.guest", "-t", IMAGE, "."])
+        .current_dir(base)
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false);
+    if ok { println!("Image built."); } else { eprintln!("Build failed. Is Docker running?"); }
+}
+
+// ---------------------------------------------------------------------------
+// Cloudflare tunnel (Windows service)
+// ---------------------------------------------------------------------------
+
+fn tunnel_start() {
+    if ps_strict(&format!("Start-Service {TUNNEL_SVC}")) {
+        println!("Tunnel started.");
+    } else {
+        eprintln!("Could not start the tunnel — run agentctl from an Administrator terminal, or: Start-Service {TUNNEL_SVC}");
     }
+}
+
+fn tunnel_stop() {
+    println!("Note: this stops the WHOLE tunnel (both your agent.* and guest.* hosts).");
+    if ps_strict(&format!("Stop-Service {TUNNEL_SVC}")) {
+        println!("Tunnel stopped.");
+    } else {
+        eprintln!("Could not stop the tunnel — need an Administrator terminal.");
+    }
+}
+
+fn tunnel_status() {
+    let _ = Command::new("powershell")
+        .args([
+            "-NoProfile", "-Command",
+            &format!("Get-Service {TUNNEL_SVC} | Format-List Name,Status,StartType"),
+        ])
+        .status();
+}
+
+fn tunnel_autostart() {
+    if ps_strict(&format!("Set-Service -Name {TUNNEL_SVC} -StartupType Automatic")) {
+        println!("Tunnel set to start automatically on boot.");
+    } else {
+        eprintln!("Could not change startup type — run agentctl as Administrator.");
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Combined status
+// ---------------------------------------------------------------------------
+
+fn status() {
+    println!("== Guest container ==");
+    let _ = docker(&[
+        "ps", "-a", "--filter", &format!("name={CONTAINER}"),
+        "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
+    ]);
+    println!("\n== Tunnel (service {TUNNEL_SVC}) ==");
+    tunnel_status();
 }
 
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
 
-fn docker(args: &[&str]) -> std::io::Result<std::process::ExitStatus> {
+fn docker(args: &[&str]) -> std::io::Result<ExitStatus> {
     Command::new("docker").args(args).status()
+}
+
+/// Run a PowerShell command that fails loudly (non-zero exit on error) so we can
+/// tell success from "access denied".
+fn ps_strict(cmd: &str) -> bool {
+    Command::new("powershell")
+        .args(["-NoProfile", "-Command", &format!("$ErrorActionPreference='Stop'; {cmd}")])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
 }
 
 fn container_running() -> bool {
@@ -218,8 +355,7 @@ fn base_dir() -> PathBuf {
     cands.into_iter().next().unwrap()
 }
 
-/// Read a single KEY=VALUE from `<base>/.env`, ignoring commented lines. Returns
-/// "" if absent.
+/// Read a single KEY=VALUE from `<base>/.env`, ignoring commented lines.
 fn env_var(base: &PathBuf, name: &str) -> String {
     let Ok(content) = std::fs::read_to_string(base.join(".env")) else {
         return String::new();
