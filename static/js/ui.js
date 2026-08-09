@@ -889,7 +889,14 @@ export function refreshComposerState() {
   if (el.frozenBanner) {
     el.frozenBanner.hidden = !frozen;
     if (frozen) {
-      const modeName = (nat) => (nat ? "native (/v1/messages)" : "Claude Code CLI");
+      // CLI/subscription label matches the badge header: "Cloud <plan>" (e.g.
+      // "Cloud Max"). Plan comes from the subscription usage when known.
+      const cloudLabel = () => {
+        const plan = state.usage && state.usage.plan ? String(state.usage.plan) : "";
+        const nice = plan ? " " + plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase() : "";
+        return "Cloud" + nice;
+      };
+      const modeName = (nat) => (nat ? "native (/v1/messages)" : cloudLabel());
       const chatMode = modeName(state.chatEngine[state.sessionId] === "native");
       const serverMode = modeName(state.engineNative === true);
       el.frozenBanner.innerHTML =
