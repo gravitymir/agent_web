@@ -887,13 +887,26 @@ export function refreshComposerState() {
     ? "Только чтение — этот чат создан другим движком"
     : "Enter: send,  Shift+Enter: new line";
   if (el.frozenBanner) {
-    const owner = state.chatEngine[state.sessionId];
-    const other = owner === "native" ? "native (/v1/messages)" : "Claude Code CLI";
     el.frozenBanner.hidden = !frozen;
-    el.frozenBanner.innerHTML = frozen
-      ? iIcon("lock", 15, "frozen-lock") +
-        `<span>Чат создан движком «${escapeHtml(other)}». Доступен только для чтения — переключите CWI_ENGINE на него и перезапустите, чтобы продолжить.</span>`
-      : "";
+    if (frozen) {
+      const modeName = (nat) => (nat ? "native (/v1/messages)" : "Claude Code CLI");
+      const chatMode = modeName(state.chatEngine[state.sessionId] === "native");
+      const serverMode = modeName(state.engineNative === true);
+      el.frozenBanner.innerHTML =
+        iIcon("lock", 15, "frozen-lock") +
+        `<div class="frozen-body">` +
+        `<div>Сервер сейчас запущен в режиме «${escapeHtml(serverMode)}», а этот чат создан в «${escapeHtml(chatMode)}» — поэтому он доступен только для чтения. Выберите подходящий чат из списка или создайте новый.</div>` +
+        `<div class="frozen-actions">` +
+        `<button type="button" class="frozen-btn" data-act="new">${iIcon("plus", 14)} Новый чат</button>` +
+        `<button type="button" class="frozen-btn ghost" data-act="list">${iIcon("menu", 14)} Список чатов</button>` +
+        `</div></div>`;
+      el.frozenBanner.querySelector('[data-act="new"]')
+        ?.addEventListener("click", openNewChatModal);
+      el.frozenBanner.querySelector('[data-act="list"]')
+        ?.addEventListener("click", () => setSidebar(true));
+    } else {
+      el.frozenBanner.innerHTML = "";
+    }
   }
   updateSendButton();
 }

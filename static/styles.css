@@ -151,8 +151,8 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
   display: inline-flex; align-items: center; color: var(--text-dim);
 }
 .frozen-banner {
-  margin: 0; padding: 8px 12px; border-radius: 10px;
-  display: flex; align-items: center; gap: 7px;
+  margin: 0; padding: 10px 12px; border-radius: 10px;
+  display: flex; align-items: flex-start; gap: 8px;
   background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev));
   border: 1px solid color-mix(in srgb, var(--accent) 30%, transparent);
   /* rem so it follows the page-wide "Размер шрифта" setting (root font-size). */
@@ -161,7 +161,22 @@ body.booted .chat-item:nth-child(n+8) { animation-delay: .58s; }
 /* `display: flex` above beats the UA `[hidden]{display:none}`, so restore it. */
 .frozen-banner[hidden] { display: none; }
 /* Lock glyph sized in em so it scales with the banner text. */
-.frozen-lock { flex-shrink: 0; width: 1.15em; height: 1.15em; }
+.frozen-lock { flex-shrink: 0; width: 1.15em; height: 1.15em; margin-top: 1px; }
+.frozen-body { display: flex; flex-direction: column; gap: 9px; min-width: 0; }
+.frozen-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.frozen-btn {
+  display: inline-flex; align-items: center; gap: 6px;
+  padding: 5px 11px; border-radius: 8px; border: 0; cursor: pointer;
+  background: var(--accent); color: #fff;
+  font-size: 0.82rem; font-weight: 600; line-height: 1;
+}
+.frozen-btn:hover { background: color-mix(in srgb, var(--accent) 85%, #000); }
+.frozen-btn .ios-icon { width: 1em; height: 1em; }
+.frozen-btn.ghost {
+  background: transparent; color: var(--accent);
+  border: 1px solid color-mix(in srgb, var(--accent) 45%, transparent);
+}
+.frozen-btn.ghost:hover { background: color-mix(in srgb, var(--accent) 12%, transparent); }
 
 /* Subscription usage/limits block in the settings panel. */
 .usage-info { display: flex; flex-direction: column; gap: 13px; }
