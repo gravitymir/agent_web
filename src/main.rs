@@ -4,6 +4,7 @@ mod banner;
 mod broker;
 mod claude;
 mod config;
+mod executor;
 mod history;
 mod ids;
 mod models;
@@ -242,6 +243,7 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
         .route("/api/usage", get(get_usage))
+        .route("/api/drain/begin", post(drain_begin))
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
         .route("/broker/v1/messages", post(broker::messages))
@@ -344,7 +346,7 @@ async fn shutdown_signal() {
     }
 }
 
-/// Liveness/version endpoint. Also drives `agentctl drain`: `draining` reports
+/// Liveness/version endpoint. Also drives the guest Drain-Stop flow: `draining` reports
 /// whether new turns are being refused, and `active_turns` counts in-flight agent
 /// turns so the operator knows when it's safe to stop the container.
 async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
@@ -352,6 +354,18 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "status": "ok",
         "version": env!("CARGO_PKG_VERSION"),
         "draining": state.sessions.is_draining(),
+        "active_turns": state.sessions.active_turns(),
+    }))
+}
+
+/// Enter graceful-drain mode: stop accepting new turns, let running ones finish.
+/// Read progress from `/api/health` (`active_turns` → 0). Used by the host's
+/// executor "Drain-Stop" flow, which POSTs this to the guest before powering off.
+async fn drain_begin(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.sessions.set_draining(true);
+    Json(serde_json::json!({
+        "ok": true,
+        "draining": true,
         "active_turns": state.sessions.active_turns(),
     }))
 }

@@ -145,13 +145,31 @@
     </svg>
   </button>
   <div id="sidebar-overlay" class="side-overlay" hidden></div>
-  <aside id="sidebar" class="sidebar-drawer" aria-label="Список чатов">
-    <div class="sidebar-header">
+  <aside id="sidebar" class="sidebar-drawer" aria-label="Боковая панель">
+    <div class="sidebar-tabs">
+      <button class="side-tab active" data-tab="chats">Чаты</button>
+      <button class="side-tab" data-tab="guest">Гостевой сервер</button>
+    </div>
+    <div class="sidebar-header" data-tab-body="chats">
       <button id="new-chat" class="btn-primary"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg> Новый чат</button>
       <input id="chat-search" class="chat-search" type="search"
              placeholder="Поиск по чатам…" autocomplete="off" aria-label="Поиск по чатам" />
     </div>
-    <div id="chat-list" class="chat-list"></div>
+    <div id="chat-list" class="chat-list" data-tab-body="chats"></div>
+
+    <div id="guest-view" class="guest-view" data-tab-body="guest" hidden>
+      <div class="guest-status">
+        <span id="guest-dot" class="guest-dot" data-state="unknown"></span>
+        <span id="guest-state">…</span>
+      </div>
+      <div id="guest-meta" class="guest-meta"></div>
+      <div class="guest-actions">
+        <button id="guest-start" class="btn-primary guest-btn">Запустить</button>
+        <button id="guest-drain" class="btn-secondary guest-btn">Drain-Stop</button>
+        <button id="guest-stop" class="btn-danger guest-btn">Остановить</button>
+      </div>
+      <div id="guest-log" class="guest-log" aria-live="polite"></div>
+    </div>
   </aside>
 
   <!-- Connection-lost banner (top center); shown only while disconnected. -->

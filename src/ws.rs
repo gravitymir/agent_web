@@ -114,6 +114,12 @@ enum ClientMsg {
         #[serde(default)]
         message: Option<String>,
     },
+    /// Control the executor VM (a host-side singleton, not tied to a chat). The
+    /// server streams progress back as `{"cwi":"executor",…}` frames.
+    Executor {
+        /// `start` | `stop` | `drain` | `status`.
+        action: String,
+    },
     Ping,
 }
 
@@ -217,7 +223,7 @@ async fn handle_client(
                         "message": "Этот чат создан другим движком — только чтение. Переключите CWI_ENGINE, чтобы продолжить." })).await;
                     return true;
                 }
-            // Graceful drain: once `agentctl drain` flips the flag, we stop
+            // Graceful drain: once a Drain-Stop flips the flag, we stop
             // accepting NEW turns but let in-flight ones finish. Refuse here so the
             // operator can safely `stop` once `active_turns` reaches zero.
             if state.sessions.is_draining() {
@@ -279,12 +285,148 @@ async fn handle_client(
             }
         }
 
+        ClientMsg::Executor { action } => {
+            handle_executor(&action, state, ws_tx).await;
+        }
         ClientMsg::Ping => {
             // Keep-alive from the browser; no response needed.
         }
     }
 
     true
+}
+
+// ---------------------------------------------------------------------------
+// Executor VM control (host-side singleton). Streams `{"cwi":"executor",…}`
+// frames to the requesting connection as each step progresses. VBoxManage/SSH
+// ops are blocking, so they run on `spawn_blocking`; drain talks to the guest's
+// own `agent_web` (forwarded at 127.0.0.1:GUEST_APP_PORT) for its live turn count.
+// ---------------------------------------------------------------------------
+
+fn exec_frame(state: &str, progress: &str, active: Option<usize>) -> serde_json::Value {
+    json!({ "cwi": "executor", "state": state, "progress": progress, "active_turns": active })
+}
+
+/// Ask the guest's agent_web how many turns are in flight (via `/api/health`).
+async fn guest_active_turns(client: &reqwest::Client, base: &str) -> Option<usize> {
+    let resp = client
+        .get(format!("{base}/api/health"))
+        .timeout(std::time::Duration::from_secs(4))
+        .send()
+        .await
+        .ok()?;
+    let v: serde_json::Value = resp.json().await.ok()?;
+    v.get("active_turns").and_then(|x| x.as_u64()).map(|n| n as usize)
+}
+
+/// Full state snapshot: VM (exists/running/ssh/snapshot) + the guest's live turns.
+async fn send_executor_status(ws_tx: &mut WsSink) {
+    let st = tokio::task::spawn_blocking(crate::executor::status).await.ok();
+    let (exists, running, ssh, snap) = match &st {
+        Some(s) => (s.exists, s.running, s.ssh_ready, s.has_clean_snapshot),
+        None => (false, false, false, false),
+    };
+    let active = if ssh {
+        let client = reqwest::Client::new();
+        let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_APP_PORT);
+        guest_active_turns(&client, &base).await
+    } else {
+        None
+    };
+    let state_str = if !exists {
+        "absent"
+    } else if running && ssh {
+        "ready"
+    } else if running {
+        "booting"
+    } else {
+        "stopped"
+    };
+    let _ = send_control(
+        ws_tx,
+        json!({
+            "cwi": "executor",
+            "state": state_str,
+            "vm": { "exists": exists, "running": running, "ssh_ready": ssh, "clean_snapshot": snap },
+            "active_turns": active,
+        }),
+    )
+    .await;
+}
+
+async fn handle_executor(action: &str, _state: &Arc<AppState>, ws_tx: &mut WsSink) {
+    match action {
+        "status" => send_executor_status(ws_tx).await,
+
+        "start" => {
+            let _ = send_control(ws_tx, exec_frame("booting", "восстанавливаю снапшот clean…", None)).await;
+            if !tokio::task::spawn_blocking(crate::executor::restore_clean).await.unwrap_or(false) {
+                let _ = send_control(ws_tx, exec_frame("error", "не удалось восстановить снапшот clean", None)).await;
+                return;
+            }
+            let _ = send_control(ws_tx, exec_frame("booting", "загружаюсь (headless)…", None)).await;
+            let _ = tokio::task::spawn_blocking(crate::executor::start_headless).await;
+            let _ = send_control(ws_tx, exec_frame("booting", "жду SSH…", None)).await;
+            for _ in 0..30 {
+                if tokio::task::spawn_blocking(crate::executor::ssh_ready).await.unwrap_or(false) {
+                    send_executor_status(ws_tx).await;
+                    return;
+                }
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            }
+            let _ = send_control(ws_tx, exec_frame("error", "SSH не поднялся за ~90с (VM ещё грузится?)", None)).await;
+        }
+
+        "stop" => {
+            let _ = send_control(ws_tx, exec_frame("stopping", "выключаю VM (ACPI)…", None)).await;
+            let _ = tokio::task::spawn_blocking(crate::executor::stop_graceful).await;
+            tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+            send_executor_status(ws_tx).await;
+        }
+
+        "drain" => handle_drain(ws_tx).await,
+
+        _ => {
+            let _ = send_control(ws_tx, exec_frame("error", &format!("неизвестное действие: {action}"), None)).await;
+        }
+    }
+}
+
+/// Graceful drain-stop: tell the guest to stop taking new turns, wait for its
+/// in-flight agents to finish, stop its server, then power the VM off.
+async fn handle_drain(ws_tx: &mut WsSink) {
+    let client = reqwest::Client::new();
+    let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_APP_PORT);
+
+    let _ = send_control(ws_tx, exec_frame("draining", "перевожу гостя в drain (новые ходы не принимаются)…", None)).await;
+    let _ = client
+        .post(format!("{base}/api/drain/begin"))
+        .timeout(std::time::Duration::from_secs(5))
+        .send()
+        .await;
+
+    // Wait for the guest's agents to finish (up to ~10 min).
+    for _ in 0..120 {
+        let active = guest_active_turns(&client, &base).await;
+        let msg = match active {
+            Some(0) => "все агенты завершили".to_string(),
+            Some(n) => format!("жду завершения агентов: активно {n}"),
+            None => "жду завершения агентов…".to_string(),
+        };
+        let _ = send_control(ws_tx, exec_frame("draining", &msg, active)).await;
+        if active == Some(0) {
+            break;
+        }
+        tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+    }
+
+    let _ = send_control(ws_tx, exec_frame("stopping", "останавливаю гостевой сервер…", None)).await;
+    let _ = tokio::task::spawn_blocking(|| crate::executor::ssh_run("sudo systemctl stop agent-web")).await;
+
+    let _ = send_control(ws_tx, exec_frame("stopping", "выключаю VM…", None)).await;
+    let _ = tokio::task::spawn_blocking(crate::executor::stop_graceful).await;
+    tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+    send_executor_status(ws_tx).await;
 }
 
 /// Subscribe to a keeper: announce the session, replay scrollback, and wire up

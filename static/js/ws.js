@@ -230,6 +230,11 @@ export function handleEvent(evt) {
         // shutting down for a restart — none of those earned a chime.
         finalizeTurn({ notify: false });
         break;
+      case "executor":
+        // Executor VM control status/progress — re-emit for the guest-server tab
+        // (guest.js listens; a DOM event avoids a ws.js↔guest.js import cycle).
+        window.dispatchEvent(new CustomEvent("cwi-executor", { detail: evt }));
+        break;
       case "no_session":
         break; // nothing live to attach to; keep whatever is shown
       case "error":
