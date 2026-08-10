@@ -80,7 +80,7 @@ fn main() {
 
 fn usage() {
     eprintln!(
-        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>|vm <selftest|status <name>|delete <name>>]"
+        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>|vm <start|stop|reset|status|info <name>|selftest|delete <name>>]"
     );
 }
 
@@ -694,15 +694,52 @@ mod vbox {
 /// `agentctl vm <selftest|status|delete> [name]` — Phase-2 VM controls. The full
 /// interactive integration (menus, base image, broker wiring) comes next; for now
 /// this exercises and exposes the VBoxManage lifecycle directly.
+// The executor VM conventions (matches the base image built in Phase 0).
+const EXECUTOR: &str = "executor";
+const CLEAN_SNAPSHOT: &str = "clean";
+const EXECUTOR_SSH_PORT: &str = "2222";
+const EXECUTOR_SSH_USER: &str = "insider";
+
+/// Path to the SSH key that authenticates into the executor VM (`%USERPROFILE%\.ssh\agent_vm_key`).
+fn executor_ssh_key() -> String {
+    let home = std::env::var("USERPROFILE").unwrap_or_default();
+    format!("{home}\\.ssh\\agent_vm_key")
+}
+
+/// True once the executor accepts a key-based SSH connection (i.e. it has booted
+/// far enough to be usable). Fast-fails via BatchMode + a short ConnectTimeout.
+fn executor_ssh_ready() -> bool {
+    Command::new("ssh")
+        .args([
+            "-i", &executor_ssh_key(),
+            "-o", "BatchMode=yes",
+            "-o", "StrictHostKeyChecking=accept-new",
+            "-o", "ConnectTimeout=3",
+            "-p", EXECUTOR_SSH_PORT,
+            &format!("{EXECUTOR_SSH_USER}@127.0.0.1"),
+            "true",
+        ])
+        // Quiet the expected "connection refused/timed out" churn while booting.
+        .stdout(std::process::Stdio::null())
+        .stderr(std::process::Stdio::null())
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(false)
+}
+
 fn vm_cli(args: &[String]) {
     match args.get(1).map(|s| s.as_str()) {
+        Some("start") => executor_start(),
+        Some("stop") => executor_stop(),
+        Some("reset") => executor_reset(),
+        Some("status") => executor_status(),
         Some("selftest") => vm_selftest(),
-        Some("status") => match args.get(2) {
+        Some("info") => match args.get(2) {
             Some(name) => match vbox::info(name) {
                 Some(i) => print!("{i}"),
                 None => eprintln!("VM '{name}' not found (or VBoxManage failed)."),
             },
-            None => eprintln!("usage: agentctl vm status <name>"),
+            None => eprintln!("usage: agentctl vm info <name>"),
         },
         Some("delete") => match args.get(2) {
             Some(name) => {
@@ -717,7 +754,76 @@ fn vm_cli(args: &[String]) {
             }
             None => eprintln!("usage: agentctl vm delete <name>"),
         },
-        _ => eprintln!("usage: agentctl vm [selftest|status <name>|delete <name>]"),
+        _ => eprintln!("usage: agentctl vm [start|stop|reset|status|info <name>|selftest|delete <name>]"),
+    }
+}
+
+/// Start a FRESH executor: restore the `clean` snapshot, boot headless, wait for
+/// SSH. Each session begins from the pristine base (disposable executor).
+fn executor_start() {
+    if !vbox::exists(EXECUTOR) {
+        eprintln!("VM '{EXECUTOR}' not found — build the base image (Phase 0) first.");
+        return;
+    }
+    if vbox::running(EXECUTOR) {
+        println!("Executor already running — powering off to start clean.");
+        let _ = vbox::poweroff(EXECUTOR);
+    }
+    if !vbox::snapshot_restore(EXECUTOR, CLEAN_SNAPSHOT) {
+        eprintln!("Failed to restore snapshot '{CLEAN_SNAPSHOT}'.");
+        return;
+    }
+    if !vbox::start_headless(EXECUTOR) {
+        eprintln!("Failed to start the executor VM.");
+        return;
+    }
+    print!("Executor booting from '{CLEAN_SNAPSHOT}', waiting for SSH");
+    for _ in 0..25 {
+        if executor_ssh_ready() {
+            println!("\nExecutor ready — SSH: 127.0.0.1:{EXECUTOR_SSH_PORT}, app: 127.0.0.1:18787");
+            return;
+        }
+        print!(".");
+        use std::io::Write;
+        let _ = std::io::stdout().flush();
+        std::thread::sleep(std::time::Duration::from_secs(3));
+    }
+    println!("\nStarted, but SSH not confirmed within ~75s (VM may still be booting).");
+}
+
+/// Stop the executor (hard power-off — state is disposable, discarded on next start).
+fn executor_stop() {
+    if vbox::running(EXECUTOR) && vbox::poweroff(EXECUTOR) {
+        println!("Executor stopped.");
+    } else {
+        eprintln!("Executor is not running.");
+    }
+}
+
+/// Discard the current session: power off (if running) and restore `clean`,
+/// leaving the VM powered off and pristine for the next start.
+fn executor_reset() {
+    if vbox::running(EXECUTOR) {
+        let _ = vbox::poweroff(EXECUTOR);
+    }
+    if vbox::snapshot_restore(EXECUTOR, CLEAN_SNAPSHOT) {
+        println!("Executor reset to '{CLEAN_SNAPSHOT}' (powered off).");
+    } else {
+        eprintln!("Failed to restore snapshot '{CLEAN_SNAPSHOT}'.");
+    }
+}
+
+fn executor_status() {
+    if !vbox::exists(EXECUTOR) {
+        println!("Executor VM '{EXECUTOR}': not created.");
+        return;
+    }
+    println!(
+        "Executor VM '{EXECUTOR}': {}",
+        if vbox::running(EXECUTOR) { "RUNNING" } else { "stopped" }
+    );
+    if let Some(snaps) = vbox::snapshot_list(EXECUTOR) {
+        print!("{snaps}");
     }
 }
 
