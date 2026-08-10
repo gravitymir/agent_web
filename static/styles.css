@@ -132,6 +132,9 @@ body.booted #chat-controls { opacity: 1; transition: opacity .3s ease; }
 
 /* --- Guest server (executor VM) panel --- */
 .guest-view { flex: 1; overflow-y: auto; padding: 14px; display: flex; flex-direction: column; gap: 12px; }
+/* `display: flex` above beats the UA `[hidden]{display:none}`, so restore it —
+   otherwise the guest panel leaks onto the "Чаты" tab. */
+.guest-view[hidden] { display: none; }
 .guest-status { display: flex; align-items: center; gap: 8px; font-size: 1rem; font-weight: 600; color: var(--text); }
 .guest-dot { width: 11px; height: 11px; border-radius: 50%; background: #bbb; flex-shrink: 0; }
 .guest-dot[data-state="ready"] { background: #16a34a; }
