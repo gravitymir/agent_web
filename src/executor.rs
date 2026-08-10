@@ -135,6 +135,49 @@ pub fn ssh_run(remote_cmd: &str) -> bool {
         .unwrap_or(false)
 }
 
+/// Run a guest command feeding `input` to its stdin (e.g. `cat > file`). Avoids
+/// shell-escaping the payload. Returns success.
+fn ssh_run_stdin(remote_cmd: &str, input: &[u8]) -> bool {
+    use std::io::Write;
+    let mut child = match Command::new("ssh")
+        .args(ssh_base_args())
+        .arg(SSH_PORT)
+        .arg(format!("{SSH_USER}@127.0.0.1"))
+        .arg(remote_cmd)
+        .stdin(Stdio::piped())
+        .stdout(Stdio::null())
+        .stderr(Stdio::null())
+        .spawn()
+    {
+        Ok(c) => c,
+        Err(_) => return false,
+    };
+    if let Some(mut si) = child.stdin.take() {
+        let _ = si.write_all(input);
+        // `si` drops here, closing the pipe so the remote `cat` sees EOF.
+    }
+    child.wait().map(|s| s.success()).unwrap_or(false)
+}
+
+/// The guest's `agent_web` config dir (matches its systemd unit: exe under
+/// `~/agent_web/target/release`, so the store is `…/chats/guest_tokens.json`).
+const GUEST_CONFIG_DIR: &str = "/home/insider/agent_web/target/release/chats";
+
+/// Push the owner's token-store JSON into the running executor's
+/// `guest_tokens.json` so its access gate validates codes minted on the host.
+/// `verify_code` reads the store live, so this takes effect without a restart.
+/// Best-effort: false if the VM is down or SSH fails.
+pub fn push_guest_tokens(json: &str) -> bool {
+    if !running() {
+        return false;
+    }
+    let remote = format!(
+        "mkdir -p {d} && cat > {d}/guest_tokens.json && chmod 600 {d}/guest_tokens.json",
+        d = GUEST_CONFIG_DIR
+    );
+    ssh_run_stdin(&remote, json.as_bytes())
+}
+
 /// Snapshot of the VM's state for the status UI.
 pub struct Status {
     pub exists: bool,

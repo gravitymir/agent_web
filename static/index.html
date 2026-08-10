@@ -148,7 +148,8 @@
   <aside id="sidebar" class="sidebar-drawer" aria-label="Боковая панель">
     <div class="sidebar-tabs">
       <button class="side-tab active" data-tab="chats">Чаты</button>
-      <button class="side-tab" data-tab="guest">Гостевой сервер</button>
+      <button class="side-tab admin-only" data-tab="guest" hidden>Гостевой сервер</button>
+      <button class="side-tab admin-only" data-tab="links" hidden>Ссылки</button>
     </div>
     <div class="sidebar-header" data-tab-body="chats">
       <button id="new-chat" class="btn-primary"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg> Новый чат</button>
@@ -169,6 +170,22 @@
         <button id="guest-stop" class="btn-danger guest-btn">Остановить</button>
       </div>
       <div id="guest-log" class="guest-log" aria-live="polite"></div>
+    </div>
+
+    <div id="links-view" class="guest-view admin-only" data-tab-body="links" hidden>
+      <p class="links-hint">Создайте ссылку для гостя. Она ведёт на изолированный executor и действует ограниченное время.</p>
+      <div class="links-form">
+        <input id="link-label" class="links-input" type="text" placeholder="метка (напр. alice)" autocomplete="off" />
+        <select id="link-ttl" class="links-input">
+          <option value="24h">24 часа</option>
+          <option value="7d">7 дней</option>
+          <option value="30d">30 дней</option>
+          <option value="1h">1 час</option>
+        </select>
+        <button id="link-create" class="btn-primary guest-btn">Создать ссылку</button>
+      </div>
+      <div id="link-result" class="link-result" hidden></div>
+      <ul id="links-list" class="links-list"></ul>
     </div>
   </aside>
 

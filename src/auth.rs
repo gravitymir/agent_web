@@ -20,7 +20,7 @@ use axum::{
     extract::{Query, State},
     http::{header, HeaderMap, StatusCode},
     response::{Html, IntoResponse, Redirect, Response},
-    Form,
+    Form, Json,
 };
 use hmac::{Hmac, Mac};
 use rand::RngCore;
@@ -54,6 +54,14 @@ struct Token {
     hash: String, // hex(sha256(code)) — never the code itself
     label: String,
     expires: u64, // unix seconds
+}
+
+/// API-facing summary of an active code (no secret material).
+#[derive(Serialize)]
+pub struct CodeInfo {
+    pub label: String,
+    pub expires: u64,     // unix seconds
+    pub expires_in: u64,  // seconds remaining
 }
 
 pub struct Auth {
@@ -169,6 +177,26 @@ impl Auth {
         toks.retain(|t| t.label != label_or_code && t.hash != code_hash);
         self.save_tokens(&toks);
         before - toks.len()
+    }
+
+    /// Active codes as API-friendly summaries — never the code or its hash.
+    pub fn list_public(&self) -> Vec<CodeInfo> {
+        let n = now();
+        self.active()
+            .into_iter()
+            .map(|t| CodeInfo {
+                label: t.label,
+                expires: t.expires,
+                expires_in: t.expires.saturating_sub(n),
+            })
+            .collect()
+    }
+
+    /// Raw JSON of the token store (hashed codes only), for pushing to the
+    /// disposable executor so its gate validates codes minted here. `None` if
+    /// the store doesn't exist yet.
+    pub fn store_json(&self) -> Option<String> {
+        fs::read_to_string(&self.store).ok()
     }
 
     /// Validate a code; returns the remaining lifetime (secs) on success, so the
@@ -308,6 +336,93 @@ fn authed_redirect(auth: &Auth, ttl: u64, secure: bool) -> Response {
         resp.headers_mut().insert(header::SET_COOKIE, v);
     }
     resp
+}
+
+// ---------------------------------------------------------------------------
+// Admin API: mint / list / revoke guest magic links from the master page.
+// Admin-only (`state.admin`) — on a guest instance (executor) these 403, so a
+// logged-in guest can't issue codes. The master page itself is protected by the
+// external tunnel gate (e.g. Cloudflare Access), per the deployment model.
+// ---------------------------------------------------------------------------
+
+/// Base URL for guest magic links — the *guest* tunnel, not the admin host.
+/// `CWI_GUEST_URL` overrides `CWI_PUBLIC_URL`; falls back to the local NAT port.
+fn guest_base() -> String {
+    std::env::var("CWI_GUEST_URL")
+        .ok()
+        .filter(|s| !s.trim().is_empty())
+        .or_else(|| std::env::var("CWI_PUBLIC_URL").ok().filter(|s| !s.trim().is_empty()))
+        .unwrap_or_else(|| format!("http://localhost:{}", crate::executor::GUEST_APP_PORT))
+        .trim_end_matches('/')
+        .to_string()
+}
+
+/// Push the current token store to the running executor so guests validate
+/// against codes minted here (the executor is disposable — its store is wiped by
+/// each snapshot restore). Best-effort; a no-op if the VM is down.
+async fn sync_to_executor(state: &Arc<AppState>) {
+    let Some(json) = state.auth.store_json() else { return };
+    let _ = tokio::task::spawn_blocking(move || crate::executor::push_guest_tokens(&json)).await;
+}
+
+#[derive(Deserialize)]
+pub struct MintReq {
+    label: String,
+    ttl: Option<String>,
+}
+
+#[derive(Serialize)]
+pub struct MintResp {
+    code: String,
+    magic_link: String,
+    label: String,
+    expires: u64,
+}
+
+/// `POST /api/links` — mint a guest magic link. Returns the code + link once.
+pub async fn links_create(
+    State(state): State<Arc<AppState>>,
+    Json(req): Json<MintReq>,
+) -> Response {
+    if !state.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let label = req.label.trim().to_string();
+    if label.is_empty() {
+        return (StatusCode::BAD_REQUEST, "label required").into_response();
+    }
+    let ttl = req.ttl.as_deref().and_then(parse_ttl).unwrap_or(86400);
+    let code = state.auth.mint(ttl, &label);
+    sync_to_executor(&state).await;
+    let base = guest_base();
+    Json(MintResp {
+        magic_link: format!("{base}/login?code={code}"),
+        code,
+        label,
+        expires: now() + ttl,
+    })
+    .into_response()
+}
+
+/// `GET /api/links` — list active guest codes (labels + expiry only).
+pub async fn links_list(State(state): State<Arc<AppState>>) -> Response {
+    if !state.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    Json(state.auth.list_public()).into_response()
+}
+
+/// `DELETE /api/links/{label}` — revoke every code with this label.
+pub async fn links_revoke(
+    State(state): State<Arc<AppState>>,
+    axum::extract::Path(label): axum::extract::Path<String>,
+) -> Response {
+    if !state.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let removed = state.auth.revoke(&label);
+    sync_to_executor(&state).await;
+    Json(serde_json::json!({ "removed": removed })).into_response()
 }
 
 fn login_html(error: bool) -> String {

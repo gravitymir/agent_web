@@ -89,6 +89,12 @@ pub struct AppState {
     pub broker: Arc<broker::Broker>,
     /// Shared HTTP client for the broker's upstream forwarding (connection reuse).
     pub http: reqwest::Client,
+    /// This instance manages guests (mint magic links, control the executor VM).
+    /// True on the owner's host; false on the disposable executor (which runs the
+    /// same binary). Admin-only routes 403 when false, so a logged-in guest on
+    /// the executor can't mint codes or drive the VM. Defaults to "the built-in
+    /// gate is off" (CWI_AUTH unset ⇒ owner instance); `CWI_ADMIN` overrides.
+    pub admin: bool,
 }
 
 /// Load `KEY=VALUE` lines from an env file (default `.env`, override with
@@ -230,6 +236,17 @@ async fn run() -> anyhow::Result<()> {
     if gate.enabled {
         tracing::info!("access gate ENABLED (CWI_AUTH) — every route requires a valid session");
     }
+    // Admin instance? Explicit CWI_ADMIN wins; otherwise "the gate is off" means
+    // this is the owner's host (guests run the executor with CWI_AUTH on).
+    let admin = std::env::var("CWI_ADMIN")
+        .map(|v| {
+            let v = v.trim();
+            v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+        })
+        .unwrap_or(!gate.enabled);
+    if admin {
+        tracing::info!("admin instance — guest magic-links and executor control enabled");
+    }
     let state = Arc::new(AppState {
         config: config.clone(),
         meta: meta.clone(),
@@ -237,6 +254,7 @@ async fn run() -> anyhow::Result<()> {
         auth: gate,
         broker: Arc::new(broker::Broker::load()),
         http: reqwest::Client::new(),
+        admin,
     });
 
     let static_dir = config.static_dir.clone();
@@ -250,6 +268,8 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
         .route("/api/usage", get(get_usage))
+        .route("/api/links", get(auth::links_list).post(auth::links_create))
+        .route("/api/links/{label}", axum::routing::delete(auth::links_revoke))
         .route("/api/drain/begin", post(drain_begin))
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
@@ -661,6 +681,7 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse
         "native": state.config.native_engine,
         "active": active_provider.name,
         "active_model": active_provider.model,
+        "admin": state.admin,
         "providers": providers,
     }))
 }

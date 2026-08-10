@@ -354,7 +354,7 @@ async fn send_executor_status(ws_tx: &mut WsSink) {
     .await;
 }
 
-async fn handle_executor(action: &str, _state: &Arc<AppState>, ws_tx: &mut WsSink) {
+async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink) {
     match action {
         "status" => send_executor_status(ws_tx).await,
 
@@ -369,6 +369,12 @@ async fn handle_executor(action: &str, _state: &Arc<AppState>, ws_tx: &mut WsSin
             let _ = send_control(ws_tx, exec_frame("booting", "жду SSH…", None)).await;
             for _ in 0..30 {
                 if tokio::task::spawn_blocking(crate::executor::ssh_ready).await.unwrap_or(false) {
+                    // The restored VM has an empty token store — push the current
+                    // guest codes so magic links minted on the host work.
+                    if let Some(json) = state.auth.store_json() {
+                        let _ = send_control(ws_tx, exec_frame("booting", "синхронизирую гостевые ссылки…", None)).await;
+                        let _ = tokio::task::spawn_blocking(move || crate::executor::push_guest_tokens(&json)).await;
+                    }
                     send_executor_status(ws_tx).await;
                     return;
                 }

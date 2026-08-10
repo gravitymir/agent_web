@@ -7,6 +7,7 @@ import "./ios-icons.js";
 import { setFaviconState } from "../favicon.js";
 import { init } from "./ui.js";
 import "./guest.js"; // "Гостевой сервер" tab (executor VM control)
+import "./links.js"; // "Ссылки" tab (guest magic-link management)
 
 setFaviconState("idle");
 init();
