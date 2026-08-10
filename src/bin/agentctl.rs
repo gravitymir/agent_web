@@ -1,67 +1,37 @@
-//! agentctl — interactive control panel for the Agent Web guest sandbox.
+//! agentctl — control panel for the Agent Web executor VM + Cloudflare tunnel.
 //!
-//! Aggregates the docker + tunnel commands and access-code minting behind an
-//! arrow-key menu (run with no args) or direct subcommands (scriptable):
+//! Arrow-key menu (no args) or direct subcommands (scriptable):
 //!
 //!   agentctl                 # interactive menu
-//!   agentctl up              # start tunnel + guest container
-//!   agentctl down            # stop guest container (tunnel left running)
-//!   agentctl start|drain|stop|status|list|build
-//!   agentctl code [label] [ttl]        # mint a magic link (default: guest 24h)
+//!   agentctl up              # start tunnel + executor VM
+//!   agentctl down            # stop executor VM (tunnel left running)
+//!   agentctl start|stop|reset|status
 //!   agentctl tunnel start|stop|status|autostart
+//!   agentctl vm <start|stop|reset|status|info <name>|selftest|delete <name>>
 //!
-//! The subscription token + public URL are read from .env; only those enter the
-//! container (least privilege). The container runs with --restart unless-stopped
-//! so it comes back after a reboot. The Cloudflare tunnel is a Windows service
-//! (Cloudflared); start/stop/autostart need an Administrator terminal.
+//! The executor is a disposable VirtualBox VM (driven via VBoxManage): each
+//! `start` restores the `clean` snapshot and boots headless. The Cloudflare
+//! tunnel is a Windows service (Cloudflared); start/stop/autostart need an
+//! Administrator terminal.
 
-use std::path::{Path, PathBuf};
-use std::process::{Command, ExitStatus};
+use std::process::Command;
 
-use dialoguer::{theme::ColorfulTheme, Confirm, Input, Select};
+use dialoguer::{theme::ColorfulTheme, Select};
 
-const IMAGE: &str = "agent-web:guest-sub";
-const CONTAINER: &str = "agent-guest";
-const HOST_PORT: &str = "127.0.0.1:8788";
-const DEFAULT_URL: &str = "https://guest.astechlab.dev";
 const TUNNEL_SVC: &str = "Cloudflared";
-// Container resource caps — defaults; overridable per-run (interactive prompt or
-// CWI_GUEST_CPUS / CWI_GUEST_MEMORY in .env).
-const DEFAULT_CPUS: &str = "2";
-const DEFAULT_MEMORY: &str = "2g";
 
 fn main() {
-    let base = base_dir();
     let args: Vec<String> = std::env::args().skip(1).collect();
     match args.first().map(|s| s.as_str()) {
         Some("up") => {
             tunnel_start();
-            let (cpus, memory) = resource_defaults(&base);
-            start(&base, &cpus, &memory);
+            executor_start();
         }
-        Some("down") => stop(),
-        Some("start") => {
-            let (cpus, memory) = resource_defaults(&base);
-            start(&base, &cpus, &memory);
-        }
-        Some("drain") => drain(),
-        Some("stop") => stop(),
+        Some("down") => executor_stop(),
+        Some("start") => executor_start(),
+        Some("stop") => executor_stop(),
+        Some("reset") => executor_reset(),
         Some("status") => status(),
-        Some("list") => list_codes(),
-        Some("build") => build(&base),
-        Some("code") => {
-            let label = args.get(1).cloned().unwrap_or_else(|| "guest".into());
-            let ttl = args.get(2).cloned().unwrap_or_else(|| "24h".into());
-            new_code(&base, &label, &ttl);
-        }
-        Some("revoke") => {
-            let label = args.get(1).cloned().unwrap_or_default();
-            if label.is_empty() {
-                eprintln!("usage: agentctl revoke <label>");
-            } else {
-                revoke(&label);
-            }
-        }
         Some("vm") => vm_cli(&args),
         Some("tunnel") => match args.get(1).map(|s| s.as_str()) {
             Some("start") => tunnel_start(),
@@ -74,18 +44,18 @@ fn main() {
             eprintln!("unknown command: {other}");
             usage();
         }
-        None => interactive(&base),
+        None => interactive(),
     }
 }
 
 fn usage() {
     eprintln!(
-        "usage: agentctl [up|down|start|drain|stop|status|list|build|code [label] [ttl]|revoke <label>|tunnel <start|stop|status|autostart>|vm <start|stop|reset|status|info <name>|selftest|delete <name>>]"
+        "usage: agentctl [up|down|start|stop|reset|status|tunnel <start|stop|status|autostart>|vm <start|stop|reset|status|info <name>|selftest|delete <name>>]"
     );
 }
 
-fn interactive(base: &Path) {
-    let items = ["Guest", "Tunnel", "Status", "Quit"];
+fn interactive() {
+    let items = ["Executor", "Tunnel", "Status", "Quit"];
     loop {
         println!();
         let sel = Select::with_theme(&ColorfulTheme::default())
@@ -95,7 +65,7 @@ fn interactive(base: &Path) {
             .interact()
             .unwrap_or(items.len() - 1);
         match items[sel] {
-            "Guest" => guest_menu(base),
+            "Executor" => executor_menu(),
             "Tunnel" => tunnel_menu(),
             "Status" => status(),
             _ => break,
@@ -103,36 +73,31 @@ fn interactive(base: &Path) {
     }
 }
 
-/// Guest submenu — start/stop shown by context; Codes opens the code manager.
-fn guest_menu(base: &Path) {
+/// Executor submenu — start/stop/reset shown by context (disposable VM).
+fn executor_menu() {
     loop {
-        let running = container_running();
+        let running = vbox::running(EXECUTOR);
         let mut items: Vec<&str> = Vec::new();
         if running {
-            items.push("Drain (finish active turns, then safe to stop)");
-            items.push("Stop container");
-            items.push("Codes (list / new / revoke)");
+            items.push("Stop");
+            items.push("Reset (discard → clean)");
         } else {
-            items.push("Start container");
+            items.push("Start (from clean snapshot)");
         }
-        items.push("Build image");
+        items.push("Status");
         items.push("(back)");
         println!();
         let sel = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt(if running { "Guest — running" } else { "Guest — stopped" })
+            .with_prompt(if running { "Executor — running" } else { "Executor — stopped" })
             .items(&items)
             .default(0)
             .interact()
             .unwrap_or(items.len() - 1);
         match items[sel] {
-            "Start container" => {
-                let (cpus, memory) = prompt_resources(base);
-                start(base, &cpus, &memory);
-            }
-            "Drain (finish active turns, then safe to stop)" => drain(),
-            "Stop container" => stop(),
-            "Codes (list / new / revoke)" => codes_menu(base),
-            "Build image" => build(base),
+            "Start (from clean snapshot)" => executor_start(),
+            "Stop" => executor_stop(),
+            "Reset (discard → clean)" => executor_reset(),
+            "Status" => executor_status(),
             _ => return,
         }
     }
@@ -156,320 +121,6 @@ fn tunnel_menu() {
             _ => return,
         }
     }
-}
-
-// ---------------------------------------------------------------------------
-// Guest container
-// ---------------------------------------------------------------------------
-
-fn start(base: &Path, cpus: &str, memory: &str) {
-    let token = env_var(base, "CLAUDE_CODE_OAUTH_TOKEN");
-    if token.is_empty() {
-        eprintln!(
-            "CLAUDE_CODE_OAUTH_TOKEN is not set in {}. Run `claude setup-token` and put it in .env.",
-            base.join(".env").display()
-        );
-        return;
-    }
-    let url = {
-        let u = env_var(base, "CWI_PUBLIC_URL");
-        if u.is_empty() { DEFAULT_URL.to_string() } else { u }
-    };
-    let ws = base.join("guest-workspace");
-    let _ = std::fs::create_dir_all(&ws);
-
-    // Owner usage snapshot (plan + limits) — mounted read-only so the guest badge
-    // can show them. Ensure the FILE exists (else Docker mounts a directory).
-    let snap = base.join("target").join("release").join("chats").join("usage_snapshot.json");
-    if let Some(dir) = snap.parent() {
-        let _ = std::fs::create_dir_all(dir);
-    }
-    if !snap.exists() {
-        let _ = std::fs::write(&snap, "{}");
-    }
-
-    let _ = docker(&["rm", "-f", CONTAINER]); // ignore "no such container"
-
-    let mount = format!("{}:/workspace", ws.display());
-    let snap_mount = format!("{}:/owner_usage.json:ro", snap.display());
-    let token_env = format!("CLAUDE_CODE_OAUTH_TOKEN={token}");
-    let url_env = format!("CWI_PUBLIC_URL={url}");
-    let port = format!("{HOST_PORT}:8787");
-    let args: Vec<&str> = vec![
-        "run", "-d", "--name", CONTAINER,
-        "--restart", "unless-stopped", // survive reboots / Docker restarts
-        "--read-only", "--cap-drop", "ALL",
-        // entrypoint (root) needs NET_ADMIN to install egress rules and
-        // SETUID/SETGID so gosu can drop to the unprivileged 'guest' user.
-        "--cap-add", "NET_ADMIN", "--cap-add", "SETUID", "--cap-add", "SETGID",
-        "--security-opt", "no-new-privileges",
-        "--pids-limit", "512", "--memory", memory, "--cpus", cpus, "--tmpfs", "/tmp",
-        "-v", "agent_guest_chats:/chats", "-v", &mount,
-        "-v", &snap_mount,
-        "-e", &token_env, "-e", &url_env,
-        "-e", "CWI_USAGE_FILE=/owner_usage.json",
-        "-p", &port, IMAGE,
-    ];
-    if docker(&args).map(|s| s.success()).unwrap_or(false) {
-        println!("\nGuest container started on http://{HOST_PORT}  (cpus={cpus}, memory={memory})");
-        println!("Public: {url}  (mint a code from this panel or with `agentctl code`)");
-    } else {
-        eprintln!("\nFailed to start. Is Docker running and the image built? (menu \"build image\")");
-    }
-}
-
-/// Ask Docker how much it can actually give a container: (NCPU, MemTotal bytes).
-/// This reflects the Docker/WSL2 VM's allocation, which is the real ceiling for
-/// `--cpus` / `--memory` (it can be less than the host's physical resources).
-fn docker_capacity() -> (Option<u64>, Option<u64>) {
-    let ncpu = docker_info("{{.NCPU}}").and_then(|s| s.parse().ok());
-    let mem = docker_info("{{.MemTotal}}").and_then(|s| s.parse().ok());
-    (ncpu, mem)
-}
-
-fn docker_info(fmt: &str) -> Option<String> {
-    let out = Command::new("docker").args(["info", "--format", fmt]).output().ok()?;
-    if !out.status.success() {
-        return None;
-    }
-    let s = String::from_utf8_lossy(&out.stdout).trim().to_string();
-    if s.is_empty() { None } else { Some(s) }
-}
-
-/// Non-interactive resource caps: `.env` overrides (CWI_GUEST_CPUS /
-/// CWI_GUEST_MEMORY), else the built-in defaults. Used by the `start`/`up`
-/// subcommands, which must not block on a prompt.
-fn resource_defaults(base: &Path) -> (String, String) {
-    let pick = |key: &str, default: &str| {
-        let v = env_var(base, key);
-        if v.is_empty() { default.to_string() } else { v }
-    };
-    (pick("CWI_GUEST_CPUS", DEFAULT_CPUS), pick("CWI_GUEST_MEMORY", DEFAULT_MEMORY))
-}
-
-/// Interactive resource picker: show what Docker can give, then prompt (Enter
-/// keeps the current default). Handy when the machine is otherwise idle and you
-/// want to hand the container more.
-fn prompt_resources(base: &Path) -> (String, String) {
-    let (max_cpu, max_mem) = docker_capacity();
-    let (def_cpu, def_mem) = resource_defaults(base);
-
-    let cpu_hint = max_cpu
-        .map(|c| format!(" (Docker sees {c} CPUs)"))
-        .unwrap_or_default();
-    let cpus: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("CPUs{cpu_hint}"))
-        .default(def_cpu.clone())
-        .interact_text()
-        .unwrap_or(def_cpu);
-
-    let mem_hint = max_mem
-        .map(|b| format!(" (Docker has ~{} GB)", b / 1_073_741_824))
-        .unwrap_or_default();
-    let memory: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt(format!("Memory — e.g. 2g, 512m{mem_hint}"))
-        .default(def_mem.clone())
-        .interact_text()
-        .unwrap_or(def_mem);
-
-    (cpus.trim().to_string(), memory.trim().to_string())
-}
-
-fn stop() {
-    if docker(&["stop", CONTAINER]).map(|s| s.success()).unwrap_or(false) {
-        println!("Guest container stopped. (data kept; `start` brings it back)");
-    } else {
-        eprintln!("Nothing to stop (container not running?).");
-    }
-}
-
-/// Graceful drain: tell the running app to stop accepting NEW turns (via SIGUSR1)
-/// and wait until every in-flight agent turn finishes, so `stop` won't cut a guest
-/// off mid-answer. Polls /api/health (exempt from the access gate) on the host
-/// loopback port; when `active_turns` hits zero it's safe to stop.
-fn drain() {
-    if !container_running() {
-        eprintln!("Guest container is not running — nothing to drain.");
-        return;
-    }
-    // Flip the app into draining mode. SIGUSR1 is caught by the app (unix only);
-    // `docker kill --signal` just delivers the signal, it does not stop the box.
-    println!("Draining: telling the app to refuse new turns and finish active ones...");
-    if !docker(&["kill", "--signal=SIGUSR1", CONTAINER])
-        .map(|s| s.success())
-        .unwrap_or(false)
-    {
-        eprintln!("Could not send the drain signal (SIGUSR1) to the container.");
-        return;
-    }
-
-    let url = format!("http://{HOST_PORT}/api/health");
-    // Poll for up to ~10 minutes; a single turn rarely runs longer, and the
-    // operator can Ctrl-C and re-run at any time (drain state is sticky).
-    const MAX_POLLS: u32 = 200;
-    const EVERY: std::time::Duration = std::time::Duration::from_secs(3);
-    let mut last = u64::MAX;
-    for i in 0..MAX_POLLS {
-        std::thread::sleep(EVERY);
-        let Some(body) = http_get(&url) else {
-            eprintln!("  (health check unreachable — retrying)");
-            continue;
-        };
-        let json: serde_json::Value = match serde_json::from_str(&body) {
-            Ok(v) => v,
-            Err(_) => continue,
-        };
-        let draining = json.get("draining").and_then(serde_json::Value::as_bool).unwrap_or(false);
-        let active = json.get("active_turns").and_then(serde_json::Value::as_u64).unwrap_or(0);
-        if !draining {
-            // The app didn't pick up the signal (older build without the handler?).
-            eprintln!("  App is not in draining mode — is this build drain-aware? Aborting.");
-            return;
-        }
-        if active != last {
-            println!("  active turns: {active}");
-            last = active;
-        }
-        if active == 0 {
-            println!("\nDrained — no active turns. It's now safe to stop:");
-            println!("  agentctl stop");
-            return;
-        }
-        if i + 1 == MAX_POLLS {
-            eprintln!("\nStill {active} active turn(s) after waiting. Left in draining mode.");
-            eprintln!("Re-run `agentctl drain` to keep waiting, or `agentctl stop` to force.");
-        }
-    }
-}
-
-/// Minimal HTTP GET via the system `curl` (built in on Windows 11 and Linux).
-/// Returns the response body, or None on any failure.
-fn http_get(url: &str) -> Option<String> {
-    let out = Command::new("curl")
-        .args(["-s", "--max-time", "5", url])
-        .output()
-        .ok()?;
-    if !out.status.success() || out.stdout.is_empty() {
-        return None;
-    }
-    Some(String::from_utf8_lossy(&out.stdout).into_owned())
-}
-
-fn new_code(base: &Path, label: &str, ttl: &str) {
-    if !container_running() {
-        eprintln!("Guest container is not running — start it first.");
-        return;
-    }
-    let url = {
-        let u = env_var(base, "CWI_PUBLIC_URL");
-        if u.is_empty() { DEFAULT_URL.to_string() } else { u }
-    };
-    let _ = docker(&[
-        "exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "new",
-        "--ttl", ttl, "--label", label, "--url", &url,
-    ]);
-}
-
-fn list_codes() {
-    if !container_running() {
-        eprintln!("Guest container is not running — start it first.");
-        return;
-    }
-    // Only labels + expiry can be listed — codes are stored hashed and shown
-    // once at mint time (a leaked store yields no usable links).
-    let _ = docker(&["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "list"]);
-}
-
-/// Active codes as (label, display) — parsed from `guest list`. Display is the
-/// full "label … expires in …" line; label (first token) is what revoke needs.
-/// Assumes single-word labels.
-fn active_entries() -> Vec<(String, String)> {
-    let Ok(out) = Command::new("docker")
-        .args(["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "list"])
-        .output()
-    else {
-        return vec![];
-    };
-    String::from_utf8_lossy(&out.stdout)
-        .lines()
-        .map(|l| l.trim())
-        .filter(|l| !l.is_empty() && !l.starts_with("no active"))
-        .filter_map(|l| l.split_whitespace().next().map(|lbl| (lbl.to_string(), l.to_string())))
-        .collect()
-}
-
-fn revoke(label: &str) {
-    if !container_running() {
-        eprintln!("Guest container is not running — start it first.");
-        return;
-    }
-    let _ = docker(&["exec", "-u", "10001", CONTAINER, "/app/agent_web", "guest", "revoke", label]);
-}
-
-/// Interactive codes submenu: `[ new code ]` plus each active code. Picking a
-/// code confirms and revokes it; picking new mints one. Loops until "(back)".
-fn codes_menu(base: &Path) {
-    if !container_running() {
-        eprintln!("Guest container is not running — start it first.");
-        return;
-    }
-    loop {
-        let entries = active_entries();
-        let mut items: Vec<String> = vec!["[ new code ]".into()];
-        for (_, d) in &entries {
-            items.push(d.clone());
-        }
-        items.push("(back)".into());
-        println!();
-        let sel = Select::with_theme(&ColorfulTheme::default())
-            .with_prompt("Codes — pick a code to revoke, or create a new one")
-            .items(&items)
-            .default(0)
-            .interact()
-            .unwrap_or(items.len() - 1);
-        if sel == 0 {
-            let (label, ttl) = prompt_new();
-            new_code(base, &label, &ttl);
-        } else if sel == items.len() - 1 {
-            return; // (back)
-        } else {
-            let (label, _) = &entries[sel - 1];
-            let yes = Confirm::with_theme(&ColorfulTheme::default())
-                .with_prompt(format!("Revoke '{label}'? This immediately kills its magic link"))
-                .default(false)
-                .interact()
-                .unwrap_or(false);
-            if yes {
-                revoke(label);
-            }
-        }
-    }
-}
-
-/// Prompt for a label + TTL when minting a code interactively.
-fn prompt_new() -> (String, String) {
-    let label: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Label (who is this for)")
-        .default("guest".into())
-        .interact_text()
-        .unwrap_or_else(|_| "guest".into());
-    let ttl: String = Input::with_theme(&ColorfulTheme::default())
-        .with_prompt("Valid for (e.g. 24h, 7d, 30m)")
-        .default("24h".into())
-        .interact_text()
-        .unwrap_or_else(|_| "24h".into());
-    (label, ttl)
-}
-
-fn build(base: &Path) {
-    println!("Building {IMAGE} (this takes a few minutes)...");
-    let ok = Command::new("docker")
-        .args(["build", "-f", "Dockerfile.guest", "-t", IMAGE, "."])
-        .current_dir(base)
-        .status()
-        .map(|s| s.success())
-        .unwrap_or(false);
-    if ok { println!("Image built."); } else { eprintln!("Build failed. Is Docker running?"); }
 }
 
 // ---------------------------------------------------------------------------
@@ -523,11 +174,8 @@ fn tunnel_autostart() {
 // ---------------------------------------------------------------------------
 
 fn status() {
-    println!("== Guest container ==");
-    let _ = docker(&[
-        "ps", "-a", "--filter", &format!("name={CONTAINER}"),
-        "--format", "table {{.Names}}\t{{.Status}}\t{{.Ports}}",
-    ]);
+    println!("== Executor VM ==");
+    executor_status();
     println!("\n== Tunnel (service {TUNNEL_SVC}) ==");
     tunnel_status();
 }
@@ -535,10 +183,6 @@ fn status() {
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
-fn docker(args: &[&str]) -> std::io::Result<ExitStatus> {
-    Command::new("docker").args(args).status()
-}
 
 /// Run a PowerShell command elevated (via a UAC prompt) and wait for it — used
 /// for the Cloudflared Windows-service ops, which require Administrator. Returns
@@ -555,49 +199,6 @@ fn ps_elevated(inner: &str) -> bool {
         .status()
         .map(|s| s.success())
         .unwrap_or(false)
-}
-
-fn container_running() -> bool {
-    Command::new("docker")
-        .args(["ps", "--filter", &format!("name={CONTAINER}"), "--format", "{{.Names}}"])
-        .output()
-        .map(|o| String::from_utf8_lossy(&o.stdout).contains(CONTAINER))
-        .unwrap_or(false)
-}
-
-/// Directory that holds `.env` — checks cwd, then next to the exe, then the dev
-/// `target/<profile>/` layout (exe/../..). Falls back to cwd.
-fn base_dir() -> PathBuf {
-    let mut cands = vec![std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))];
-    if let Ok(exe) = std::env::current_exe()
-        && let Some(d) = exe.parent() {
-            cands.push(d.to_path_buf());
-            cands.push(d.join("..").join(".."));
-        }
-    for c in &cands {
-        if c.join(".env").is_file() {
-            return c.clone();
-        }
-    }
-    cands.into_iter().next().unwrap()
-}
-
-/// Read a single KEY=VALUE from `<base>/.env`, ignoring commented lines.
-fn env_var(base: &Path, name: &str) -> String {
-    let Ok(content) = std::fs::read_to_string(base.join(".env")) else {
-        return String::new();
-    };
-    for line in content.lines() {
-        let line = line.trim();
-        if line.is_empty() || line.starts_with('#') {
-            continue;
-        }
-        if let Some((k, v)) = line.split_once('=')
-            && k.trim() == name {
-                return v.trim().trim_matches('"').to_string();
-            }
-    }
-    String::new()
 }
 
 // ---------------------------------------------------------------------------
@@ -691,9 +292,6 @@ mod vbox {
     }
 }
 
-/// `agentctl vm <selftest|status|delete> [name]` — Phase-2 VM controls. The full
-/// interactive integration (menus, base image, broker wiring) comes next; for now
-/// this exercises and exposes the VBoxManage lifecycle directly.
 // The executor VM conventions (matches the base image built in Phase 0).
 const EXECUTOR: &str = "executor";
 const CLEAN_SNAPSHOT: &str = "clean";
