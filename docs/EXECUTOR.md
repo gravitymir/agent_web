@@ -149,7 +149,26 @@ CWI_AGENT_PROVIDER=broker
 CWI_AGENT_API_KEY=<broker session-token>
 CWI_AGENT_BASE_URL=http://10.0.2.2:8787/broker
 CWI_BIND=0.0.0.0:8787
+CWI_AUTH=1     # включает гейт: гость входит только по magic-link
+CWI_ADMIN=0   # это гость — админ-роуты (/api/links, VM) отвечают 403
 ```
+
+### Гостевые magic-link'и (выпуск с мастер-страницы)
+
+Ссылки выпускаются **только с мастер-страницы** (вкладка «Ссылки»,
+`POST /api/links`) — она за внешним гейтом туннеля (Cloudflare Access).
+Проверяются коды на executor'е (у него `CWI_AUTH=1`).
+
+- Хранилище кодов на хосте: `<config>/guest_tokens.json` (только SHA-256 хэши).
+- Executor одноразовый — его хранилище чистое после каждого restore. Хост
+  **пушит** активные коды в гостя по SSH (`executor::push_guest_tokens`,
+  `cat > …/target/release/chats/guest_tokens.json`) при каждом Start, а также
+  на каждый mint/revoke, пока VM запущена. `verify_code` читает файл вживую —
+  рестарт не нужен.
+- База в magic-link'е = `CWI_GUEST_URL` на хосте (иначе `CWI_PUBLIC_URL`,
+  иначе `http://localhost:8788`). В проде укажи гостевой домен туннеля,
+  например `https://guest.astechlab.dev` → cloudflared → host:8788 → NAT →
+  executor:8787.
 
 Юнит `/etc/systemd/system/agent-web.service`:
 
