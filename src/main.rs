@@ -63,6 +63,13 @@ async fn add_security_headers(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
+    // Static assets (HTML/CSS/JS) change on every deploy; `no-cache` makes the
+    // browser revalidate (cheap 304s) and stops Cloudflare from serving a stale
+    // edge copy — otherwise a UI fix isn't visible until caches expire.
+    h.insert(
+        axum::http::header::CACHE_CONTROL,
+        axum::http::HeaderValue::from_static("no-cache"),
+    );
     resp
 }
 
