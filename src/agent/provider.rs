@@ -95,6 +95,18 @@ impl Provider {
                 None::<&str>,
                 Kind::AnthropicMessages,
             ),
+            // The executor points here: base URL = the broker (via
+            // CWI_AGENT_BASE_URL, e.g. http://10.0.2.2:8787/broker), API key = its
+            // session token (CWI_AGENT_API_KEY). The broker holds the real key and
+            // picks the model, so the values here are placeholders.
+            "broker" => (
+                "http://127.0.0.1:8787/broker",
+                "broker",
+                Auth::Bearer,
+                false,
+                None::<&str>,
+                Kind::AnthropicMessages,
+            ),
             // "-latest" aliases auto-track Google's current recommended release
             // instead of pinning an exact version that gets deprecated (Gemini
             // model ids churn quickly — see gemini.rs).
@@ -127,6 +139,7 @@ impl Provider {
             "kimi" | "moonshot" => "CWI_AGENT_KIMI_API_KEY",
             "glm" | "zhipu" | "zai" => "CWI_AGENT_GLM_API_KEY",
             "qwen" | "dashscope" | "alibaba" => "CWI_AGENT_QWEN_API_KEY",
+            "broker" => "CWI_AGENT_BROKER_TOKEN",
             "gemini" | "google" => "CWI_AGENT_GEMINI_API_KEY",
             _ => "CWI_AGENT_CLAUDE_API_KEY",
         };

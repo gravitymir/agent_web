@@ -1,6 +1,7 @@
 mod agent;
 mod auth;
 mod banner;
+mod broker;
 mod claude;
 mod config;
 mod history;
@@ -19,7 +20,7 @@ use axum::{
     extract::{Path, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
-    routing::{get, put},
+    routing::{get, post, put},
     Json, Router,
 };
 use serde::Deserialize;
@@ -76,6 +77,10 @@ pub struct AppState {
     pub sessions: Arc<SessionManager>,
     /// Optional built-in access gate (CWI_AUTH); a no-op when disabled.
     pub auth: Arc<auth::Auth>,
+    /// Per-session broker tokens for the executor proxy (`/broker/v1/messages`).
+    pub broker: Arc<broker::Broker>,
+    /// Shared HTTP client for the broker's upstream forwarding (connection reuse).
+    pub http: reqwest::Client,
 }
 
 /// Load `KEY=VALUE` lines from an env file (default `.env`, override with
@@ -150,6 +155,11 @@ fn main() -> anyhow::Result<()> {
         auth::run_cli(&argv[2..]);
         return Ok(());
     }
+    // `agent_web broker <new|list|revoke>` — manage executor session tokens.
+    if argv.get(1).map(|s| s == "broker").unwrap_or(false) {
+        broker::run_cli(&argv[2..]);
+        return Ok(());
+    }
 
     // Interactive engine/port picker (only on a TTY; skipped for pipes/services
     // and when CWI_NO_MENU is set). Sets CWI_* env vars that Config reads below.
@@ -217,6 +227,8 @@ async fn run() -> anyhow::Result<()> {
         meta: meta.clone(),
         sessions: SessionManager::new(config.clone(), mcp, meta),
         auth: gate,
+        broker: Arc::new(broker::Broker::load()),
+        http: reqwest::Client::new(),
     });
 
     let static_dir = config.static_dir.clone();
@@ -232,6 +244,7 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/usage", get(get_usage))
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
+        .route("/broker/v1/messages", post(broker::messages))
         .route("/ws", get(ws_upgrade))
         .route("/login", get(auth::login_get).post(auth::login_post))
         .fallback_service(ServeDir::new(static_dir))

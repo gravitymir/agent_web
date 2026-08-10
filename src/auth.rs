@@ -35,7 +35,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// Write a secret file with owner-only permissions. On Unix the file is chmod'd
 /// to `0o600` (matters on multi-user hosts); on other platforms this is a plain
 /// write. Best-effort — a failed chmod doesn't fail the write.
-fn write_private(path: &Path, contents: &[u8]) {
+pub(crate) fn write_private(path: &Path, contents: &[u8]) {
     let wrote = fs::write(path, contents).is_ok();
     #[cfg(unix)]
     if wrote {
@@ -62,14 +62,14 @@ pub struct Auth {
     store: PathBuf,  // guest_tokens.json
 }
 
-fn now() -> u64 {
+pub(crate) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .map(|d| d.as_secs())
         .unwrap_or(0)
 }
 
-fn sha256_hex(s: &str) -> String {
+pub(crate) fn sha256_hex(s: &str) -> String {
     let mut h = Sha256::new();
     h.update(s.as_bytes());
     hex::encode(h.finalize())
@@ -227,9 +227,10 @@ fn is_secure(h: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Paths reachable without a session (the login page itself, and a health probe).
+/// Paths reachable without a session cookie: the login page, a health probe, and
+/// the broker endpoint (which has its own per-session bearer-token auth).
 fn is_public(path: &str) -> bool {
-    path == "/login" || path == "/api/health"
+    path == "/login" || path == "/api/health" || path.starts_with("/broker/")
 }
 
 /// Guard every route when the gate is enabled. No session → redirect browsers to
