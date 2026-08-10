@@ -2,7 +2,7 @@
   "version": "0.0.1",
   "configurations": [
     {
-      "name": "claude-web",
+      "name": "agent-web",
       "runtimeExecutable": "cargo",
       "runtimeArgs": ["run"],
       "port": 8787
