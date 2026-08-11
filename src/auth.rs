@@ -255,10 +255,18 @@ fn is_secure(h: &HeaderMap) -> bool {
         .unwrap_or(false)
 }
 
-/// Paths reachable without a session cookie: the login page, a health probe, and
-/// the broker endpoint (which has its own per-session bearer-token auth).
+/// Paths reachable without a session cookie: the login page, a health probe, the
+/// broker endpoint (which has its own per-session bearer-token auth), and the
+/// drain trigger. `/api/drain/begin` is the host→guest control channel for
+/// Drain-Stop: the host (over the NAT forward) flips the guest into "no new
+/// turns" before waiting on `/api/health`. It carries no session cookie, and is
+/// idempotent + non-destructive (only sets a flag), so it must bypass the gate —
+/// otherwise a gated guest's Drain-Stop can't refuse new turns during the drain.
 fn is_public(path: &str) -> bool {
-    path == "/login" || path == "/api/health" || path.starts_with("/broker/")
+    path == "/login"
+        || path == "/api/health"
+        || path == "/api/drain/begin"
+        || path.starts_with("/broker/")
 }
 
 /// Guard every route when the gate is enabled. No session → redirect browsers to
