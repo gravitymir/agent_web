@@ -211,9 +211,12 @@ Native engine может подключать внешние [MCP](https://model
 - Токены брокера: `agent_web broker <new|list|revoke>` (TTL + бюджет, на диск — только SHA-256).
 - Одноразовый цикл: `restore clean` → холодный буст → systemd `agent-web` встаёт сам (~12 с).
 - Для боевого прогона выбери на хосте движок **«Native — Anthropic API»** (брокер форвардит в Anthropic-формате).
+- Гостевые доступы — вкладка **«Ссылки»** на мастер-странице: выпуск/список/отзыв
+  magic-link'ов (валидируются на executor'е, коды пушатся туда с хоста).
 
 Полное описание — архитектура, провижнинг снапшота `clean`, семантика Drain-Stop,
-пере-провижнинг — в [`docs/EXECUTOR.md`](docs/EXECUTOR.md).
+пере-провижнинг — в [`docs/EXECUTOR.md`](docs/EXECUTOR.md); подъём «наружу»
+(Cloudflare-туннель, admin/guest домены, go-live) — в [`docs/GO_LIVE.md`](docs/GO_LIVE.md).
 
 ## HTTP-эндпоинты
 
