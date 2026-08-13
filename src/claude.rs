@@ -65,7 +65,9 @@ pub fn spawn_claude(
         .arg("--include-partial-messages")
         .arg("--verbose")
         .arg("--permission-mode")
-        .arg(&config.permission_mode)
+        // Sandbox sessions bypass permission prompts: the disposable guest IS the
+        // safety boundary, and `--tools` below removes every host-touching tool.
+        .arg(if config.sandbox { "bypassPermissions" } else { config.permission_mode.as_str() })
         // Without this, any tool needing a decision beyond `permission_mode`'s
         // own auto-approvals (Bash, WebFetch, AskUserQuestion, ...) silently
         // auto-denies in headless `--print` mode. This routes those decisions
@@ -73,6 +75,18 @@ pub fn spawn_claude(
         // the same stdout/stdin — see `run_actor` in session.rs.
         .arg("--permission-prompt-tool")
         .arg("stdio");
+
+    // Sandbox mode: restrict the model to our `mcp__guest__*` tools so every
+    // file/shell action runs inside the disposable executor VM over SSH — never
+    // on the host. Removing the built-in Bash/Write/Read/Edit is what enforces
+    // it; the subscription token stays on the host either way.
+    if config.sandbox {
+        if let Some(cfg) = sandbox_mcp_config() {
+            cmd.arg("--mcp-config").arg(cfg).arg("--strict-mcp-config");
+        }
+        cmd.arg("--tools")
+            .args(["mcp__guest__bash", "mcp__guest__read_file", "mcp__guest__write_file"]);
+    }
 
     if resume {
         cmd.arg("--resume").arg(&id);
@@ -127,6 +141,23 @@ fn jsonl_has_conversation(path: &std::path::Path) -> bool {
             .and_then(|v| v.get("type").and_then(|t| t.as_str()).map(str::to_string))
             .is_some_and(|t| t == "user" || t == "assistant")
     })
+}
+
+/// Write (idempotently) the MCP config pointing Claude Code at our own
+/// `mcp-guest` server — the stdio server whose tools run inside the executor
+/// guest over SSH — and return its path. `None` if the exe path or the write
+/// fails; the caller still passes `--tools` (restricting to the guest tools),
+/// so a missing MCP config yields no tools rather than host access.
+fn sandbox_mcp_config() -> Option<std::path::PathBuf> {
+    let exe = std::env::current_exe().ok()?;
+    let path = crate::config::claude_config_dir().join("guest-mcp.json");
+    let cfg = serde_json::json!({
+        "mcpServers": {
+            "guest": { "command": exe.to_string_lossy(), "args": ["mcp-guest"] }
+        }
+    });
+    std::fs::write(&path, serde_json::to_vec_pretty(&cfg).ok()?).ok()?;
+    Some(path)
 }
 
 /// Build the base [`Command`]. On Windows the CLI ships as `claude.cmd`, which

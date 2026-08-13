@@ -35,6 +35,12 @@ pub struct Config {
     pub native_engine: bool,
     /// Directory served for the frontend (`CWI_STATIC_DIR`, default `static`).
     pub static_dir: String,
+    /// Run CLI sessions **sandboxed in the executor guest** (`CWI_SANDBOX=1`):
+    /// the `claude` CLI launches with only the `mcp__guest__*` tools, so the
+    /// model's file/shell actions execute inside the disposable VM over SSH, not
+    /// on the host. The subscription token stays on the host. Intended for the
+    /// guest-facing instance (behind a magic-link gate).
+    pub sandbox: bool,
 }
 
 /// Locate the frontend `static/` directory robustly, so the app serves the web
@@ -110,6 +116,13 @@ impl Config {
 
         let static_dir = resolve_static_dir();
 
+        let sandbox = std::env::var("CWI_SANDBOX")
+            .map(|v| {
+                let v = v.trim();
+                v == "1" || v.eq_ignore_ascii_case("true") || v.eq_ignore_ascii_case("on")
+            })
+            .unwrap_or(false);
+
         Self {
             bind_addr,
             workspace_dir,
@@ -119,6 +132,7 @@ impl Config {
             projects_root,
             native_engine,
             static_dir,
+            sandbox,
         }
     }
 
