@@ -62,11 +62,15 @@ pub fn print_startup(config: &Config) {
 
     let config_dir = config.projects_root.parent().unwrap_or(&config.projects_root);
     let ver = env!("CARGO_PKG_VERSION");
+    // Local wall-clock at launch, so a long-lived terminal shows since when this
+    // instance has been up (the tracing logs are UTC and easy to miss).
+    let started = chrono::Local::now().format("%Y-%m-%d %H:%M:%S").to_string();
 
     // Right column: (label, value). Empty label => a plain heading line.
     let mut rows: Vec<(String, String)> = vec![
         (String::new(), paint(&format!("Agent Web  v{ver}"), &format!("1;{ORANGE}"))),
         (String::new(), paint("──────────────────────────", &format!("2;{ORANGE}"))),
+        ("STARTED".into(), started),
         (
             "ENGINE".into(),
             format!("{} {}  {}", paint("▶", &engine_code), paint(engine, &engine_code), detail),
