@@ -7,6 +7,7 @@ mod config;
 mod executor;
 mod history;
 mod ids;
+mod mcp_guest;
 mod models;
 mod ratelimit;
 mod session;
@@ -172,6 +173,14 @@ fn main() -> anyhow::Result<()> {
     // `agent_web broker <new|list|revoke>` — manage executor session tokens.
     if argv.get(1).map(|s| s == "broker").unwrap_or(false) {
         broker::run_cli(&argv[2..]);
+        return Ok(());
+    }
+    // `agent_web mcp-guest` — MCP stdio server whose tools run inside the executor
+    // guest over SSH. The subscription `claude` CLI uses these instead of its own
+    // Bash/Read/Write, so the model's hands act only in the sandbox. STDOUT is the
+    // protocol channel: no banner, no wizard, no logging to stdout.
+    if argv.get(1).map(|s| s == "mcp-guest").unwrap_or(false) {
+        mcp_guest::run();
         return Ok(());
     }
 
