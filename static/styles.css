@@ -1030,7 +1030,7 @@ body.drag-over::after {
   right: 12px;
 }
 .settings-badge svg { width: 1.35em; height: 1.35em; }
-.settings-badge.open { right: 332px; }
+.settings-badge.open { right: 492px; }
 
 /* Per-chat token counter — aligned above the settings control. */
 .usage-badge {
@@ -1047,9 +1047,8 @@ body.drag-over::after {
 .usage-badge:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .usage-badge:active { transform: translateY(0); }
 .usage-badge[hidden] { display: none; }
-/* Ride the settings drawer's edge (like the left badges) instead of hiding. */
-.usage-badge.open { right: 332px; }
-/* The usage drawer is wider (480px) — ride its edge instead. */
+/* Both right drawers are 480px wide now — badges ride the same 492px edge. */
+.usage-badge.open { right: 492px; }
 .usage-badge.usage-open, .settings-badge.usage-open { right: 492px; }
 /* Table variant: one row per metric — label (left) … value (right), spread with
    space-between. The box grows to fit its widest row (e.g. "контекст кэш");
@@ -1191,7 +1190,7 @@ body.drag-over::after {
 .settings-overlay { position: fixed; inset: 0; z-index: 55; background: rgba(0, 0, 0, 0.25); }
 
 .settings-panel {
-  position: fixed; top: 0; right: 0; height: 100%; width: 320px; z-index: 58;
+  position: fixed; top: 0; right: 0; height: 100%; width: 480px; max-width: 92vw; z-index: 58;
   background: var(--bg-elev); border-left: 1px solid var(--border);
   box-shadow: -4px 0 24px var(--shadow);
   transform: translateX(100%); transition: transform .28s ease;

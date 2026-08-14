@@ -1541,6 +1541,7 @@ export function renderUsageDetail() {
 
 export function setUsage(open) {
   if (open && !state.sessionId) return; // nothing to show without an open chat
+  if (open) setSettings(false); // only one right drawer at a time
   el.usagePanel.classList.toggle("open", open);
   el.usageOverlay.hidden = !open;
   // Right badges ride the (wider) usage drawer's edge instead of hiding — matches

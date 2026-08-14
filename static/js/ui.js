@@ -877,6 +877,7 @@ export function showBadgeSoon(badge) {
 
 // Settings drawer (right) — open via the gear, close by clicking outside.
 export function setSettings(open) {
+  if (open) setUsage(false); // only one right drawer at a time
   el.settingsPanel.classList.toggle("open", open);
   el.settingsOverlay.hidden = !open;
   // Right badges ride the drawer's left edge (via `.open`) instead of hiding.
