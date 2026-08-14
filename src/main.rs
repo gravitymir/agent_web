@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "016";
+pub const BUILD: &str = "017";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -282,6 +282,7 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/workspace.zip", get(download_workspace))
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
+        .route("/api/session", get(auth::session_info))
         .route("/api/usage", get(get_usage))
         .route("/api/links", get(auth::links_list).post(auth::links_create))
         .route(

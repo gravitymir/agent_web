@@ -735,7 +735,7 @@ export function finalizeTurn({ notify = true, error = false } = {}) {
   // only a turn that just finished live should chime/notify (never on error).
   if (!state.replayMode && notify && !error) {
     if (settings.sound) playCompletionChime();
-    if (settings.notify) notifyTurnComplete((el.title.textContent || "").trim(), answerPreview);
+    if (settings.notify) notifyTurnComplete((el.titleName.textContent || "").trim(), answerPreview);
   }
   loadChatList().then(updateUsageBadge); // authoritative token total from the .jsonl
   loadUsage(); // refresh subscription %s at turn end (cached ~20s server-side)

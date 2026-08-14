@@ -54,6 +54,8 @@ export const el = {
   bigNewChat: document.getElementById("big-new-chat"),
   attachPreview: document.getElementById("attach-preview"),
   title: document.getElementById("chat-title"),
+  titleName: document.getElementById("chat-title-name"),
+  sessionTimer: document.getElementById("session-timer"),
   chatControls: document.getElementById("chat-controls"),
   model: document.getElementById("model-select"),
   provider: document.getElementById("provider-select"),

@@ -64,6 +64,41 @@ pub struct CodeInfo {
     pub expires_in: u64, // seconds remaining
 }
 
+/// Current session state for the client — drives the guest's access countdown.
+#[derive(Serialize)]
+pub struct SessionInfo {
+    /// True when the access gate is on (a guest instance behind a magic link).
+    pub gated: bool,
+    /// Unix seconds when access expires (None when not gated / no valid session).
+    pub expires: Option<u64>,
+    /// Seconds remaining (None as above). A hint only — the client ticks locally.
+    pub expires_in: Option<u64>,
+}
+
+/// `GET /api/session` — the current session's expiry so the client can show a
+/// countdown to access expiry. A gated route: on a guest it runs only for a valid
+/// session; on the owner (gate off) it reports `gated: false`.
+pub async fn session_info(
+    State(state): State<Arc<AppState>>,
+    headers: HeaderMap,
+) -> Json<SessionInfo> {
+    if !state.auth.enabled {
+        return Json(SessionInfo {
+            gated: false,
+            expires: None,
+            expires_in: None,
+        });
+    }
+    let cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok());
+    let exp = state.auth.session_expiry(cookie);
+    let n = now();
+    Json(SessionInfo {
+        gated: true,
+        expires: exp,
+        expires_in: exp.map(|e| e.saturating_sub(n)),
+    })
+}
+
 pub struct Auth {
     pub enabled: bool,
     secret: Vec<u8>, // HMAC key for session cookies
@@ -227,25 +262,25 @@ impl Auth {
         format!("{COOKIE}={val}; Path=/; HttpOnly; SameSite=Lax; Max-Age={ttl}{sec}")
     }
 
-    fn valid_session(&self, cookie_header: Option<&str>) -> bool {
-        let Some(h) = cookie_header else { return false };
-        let Some(val) = h
+    /// The session cookie's expiry (unix secs) when the cookie is present, validly
+    /// signed, and not yet expired — else None. The basis for both the gate and
+    /// the client-facing access countdown.
+    pub fn session_expiry(&self, cookie_header: Option<&str>) -> Option<u64> {
+        let h = cookie_header?;
+        let val = h
             .split(';')
             .map(|c| c.trim())
-            .find_map(|c| c.strip_prefix(COOKIE).and_then(|r| r.strip_prefix('=')))
-        else {
-            return false;
-        };
-        let Some((exp_s, sig)) = val.split_once('.') else {
-            return false;
-        };
-        let Ok(exp) = exp_s.parse::<u64>() else {
-            return false;
-        };
+            .find_map(|c| c.strip_prefix(COOKIE).and_then(|r| r.strip_prefix('=')))?;
+        let (exp_s, sig) = val.split_once('.')?;
+        let exp = exp_s.parse::<u64>().ok()?;
         if exp <= now() {
-            return false;
+            return None;
         }
-        ct_eq(&self.sign(exp), sig)
+        ct_eq(&self.sign(exp), sig).then_some(exp)
+    }
+
+    fn valid_session(&self, cookie_header: Option<&str>) -> bool {
+        self.session_expiry(cookie_header).is_some()
     }
 }
 

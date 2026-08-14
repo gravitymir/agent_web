@@ -315,7 +315,7 @@ function currentChat() {
     return { id: active.dataset.id, title: active.dataset.title, icon: active.dataset.icon || null };
   }
   // Brand-new chat not yet in the list: fall back to the open session/title.
-  return { id: state.sessionId, title: (el.title.textContent || "").trim(), icon: null };
+  return { id: state.sessionId, title: (el.titleName.textContent || "").trim(), icon: null };
 }
 document.getElementById("cc-export-md").addEventListener("click", () => {
   const c = currentChat();
@@ -480,7 +480,7 @@ export async function createChat() {
   state.streaming = false;
   setStreamingUI(false);
   setFaviconState("idle");
-  el.title.innerHTML = (modalIcon ? iIcon(modalIcon, 18, "inline") + "  " : "") + escapeHtml(title);
+  el.titleName.innerHTML = (modalIcon ? iIcon(modalIcon, 18, "inline") + "  " : "") + escapeHtml(title);
   el.messages.innerHTML = "";
   const empty = document.createElement("div");
   empty.className = "empty-state";
@@ -1033,7 +1033,7 @@ export async function deleteChat(id, title, item) {
     state.isNew = true;
     state.current = null;
     state.transcript = null; // don't let a later new chat re-render this history
-    el.title.textContent = "";
+    el.titleName.textContent = "";
     resetMessages();
     el.messages.innerHTML =
       '<div class="empty-state"><h1>Agent Web</h1><p>Чат удалён. Выберите другой или создайте новый.</p></div>';
@@ -1131,7 +1131,7 @@ export async function openChat(id, title, icon, item) {
   state.isNew = false; // existing chat -> resume on next turn
   state.current = null;
   setFaviconState("idle");
-  el.title.innerHTML = (icon ? iIcon(icon, 18, "inline") + "  " : "") + escapeHtml(title);
+  el.titleName.innerHTML = (icon ? iIcon(icon, 18, "inline") + "  " : "") + escapeHtml(title);
   document.querySelectorAll(".chat-item.active").forEach((n) => n.classList.remove("active"));
   if (item) item.classList.add("active");
   updateUsageBadge(); // reflect the newly-opened chat's token total
@@ -1253,6 +1253,43 @@ function reveal() {
   }
 }
 
+// Guest access countdown: fetch when this session's access expires and tick it
+// live as the second line of the chat-title capsule. Owner instances (gate off)
+// report gated:false and show nothing.
+async function loadSessionTimer() {
+  let info;
+  try {
+    const r = await fetch("/api/session");
+    if (!r.ok) return;
+    info = await r.json();
+  } catch (e) {
+    return;
+  }
+  if (!info || !info.gated || info.expires == null) return;
+  const expiresAtMs = info.expires * 1000;
+  const tick = () => {
+    el.sessionTimer.textContent = fmtRemaining(expiresAtMs - Date.now());
+    el.sessionTimer.hidden = false;
+  };
+  tick();
+  setInterval(tick, 1000);
+}
+
+function fmtRemaining(ms) {
+  if (ms <= 0) return "доступ истёк";
+  const s = Math.floor(ms / 1000);
+  const d = Math.floor(s / 86400);
+  const h = Math.floor((s % 86400) / 3600);
+  const m = Math.floor((s % 3600) / 60);
+  const sec = s % 60;
+  let body;
+  if (d > 0) body = `${d}д ${h}ч`;
+  else if (h > 0) body = `${h}ч ${m}м`;
+  else if (m > 0) body = `${m}м ${sec}с`;
+  else body = `${sec}с`;
+  return `истекает через ${body}`;
+}
+
 export async function init() {
   applySettings();
   connect();
@@ -1282,6 +1319,7 @@ export async function init() {
   if (!state.sessionId) setSidebar(true); // no chat restored → reveal the list
   reveal();
   loadUsage(); // subscription limits for the badge + sidebar (refreshed rarely)
+  loadSessionTimer(); // guest-only: countdown to access expiry in the title capsule
   el.input.focus();
   // The chat list is loaded on page load and refreshed when a chat is created
   // (see createNewChat) — no periodic polling.
