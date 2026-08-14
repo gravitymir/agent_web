@@ -2,3 +2,10 @@
 # even when checked out on Windows.
 *.sh text eol=lf
 docker/entrypoint.sh text eol=lf
+
+# Keep source/config files LF-normalized across Windows checkouts; rustfmt emits LF.
+*.rs text eol=lf
+*.toml text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf
+.gitattributes text eol=lf

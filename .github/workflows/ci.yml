@@ -18,9 +18,12 @@ jobs:
       # edition 2024 needs a recent stable toolchain (>= 1.85).
       - uses: dtolnay/rust-toolchain@stable
         with:
-          components: clippy
+          components: clippy, rustfmt
 
       - uses: Swatinem/rust-cache@v2
+
+      - name: Format
+        run: cargo fmt --check
 
       # Lint gate: any clippy warning fails the build (matches local `-D warnings`).
       - name: Clippy
