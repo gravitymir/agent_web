@@ -286,6 +286,10 @@ async fn handle_client(
         }
 
         ClientMsg::Executor { action } => {
+            if !state.admin {
+                let _ = send_control(ws_tx, exec_frame("error", "executor control is admin-only", None)).await;
+                return true;
+            }
             handle_executor(&action, state, ws_tx).await;
         }
         ClientMsg::Ping => {
