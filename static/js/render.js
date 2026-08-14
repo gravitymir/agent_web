@@ -1543,8 +1543,11 @@ export function setUsage(open) {
   if (open && !state.sessionId) return; // nothing to show without an open chat
   el.usagePanel.classList.toggle("open", open);
   el.usageOverlay.hidden = !open;
-  if (open) { renderUsageDetail(); loadUsage(); hideBadge(el.usageBadge); hideBadge(el.settingsBadge); }
-  else { showBadgeSoon(el.usageBadge); showBadgeSoon(el.settingsBadge); }
+  // Right badges ride the (wider) usage drawer's edge instead of hiding — matches
+  // the settings/left drawers. `.usage-open` shifts them to right:492px.
+  el.usageBadge.classList.toggle("usage-open", open);
+  el.settingsBadge.classList.toggle("usage-open", open);
+  if (open) { renderUsageDetail(); loadUsage(); }
 }
 
 // Keep send in its fixed place; expose the stop button beside it while the

@@ -1049,6 +1049,8 @@ body.drag-over::after {
 .usage-badge[hidden] { display: none; }
 /* Ride the settings drawer's edge (like the left badges) instead of hiding. */
 .usage-badge.open { right: 332px; }
+/* The usage drawer is wider (480px) — ride its edge instead. */
+.usage-badge.usage-open, .settings-badge.usage-open { right: 492px; }
 /* Table variant: one row per metric — label (left) … value (right), spread with
    space-between. The box grows to fit its widest row (e.g. "контекст кэш");
    `min-width` keeps it stable at small values without drifting into the
