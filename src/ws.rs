@@ -518,17 +518,44 @@ async fn handle_drain(ws_tx: &mut WsSink) {
         .send()
         .await;
 
-    // Wait for the guest's agents to finish (up to ~10 min).
+    // Wait for the guest's agents to finish (up to ~10 min). If the guest server
+    // can't be reached (health poll returns None) a few times running, there's
+    // nothing to wait for — the VM is down/booting — so stop waiting instead of
+    // spinning the full 10 minutes on a dead endpoint.
+    const MAX_UNREACHABLE: u32 = 3;
+    let mut unreachable = 0u32;
     for _ in 0..120 {
-        let active = guest_active_turns(&client, &base).await;
-        let msg = match active {
-            Some(0) => "все агенты завершили".to_string(),
-            Some(n) => format!("жду завершения агентов: активно {n}"),
-            None => "жду завершения агентов…".to_string(),
-        };
-        let _ = send_control(ws_tx, exec_frame("draining", &msg, active)).await;
-        if active == Some(0) {
-            break;
+        match guest_active_turns(&client, &base).await {
+            Some(0) => {
+                let _ = send_control(
+                    ws_tx,
+                    exec_frame("draining", "все агенты завершили", Some(0)),
+                )
+                .await;
+                break;
+            }
+            Some(n) => {
+                unreachable = 0;
+                let msg = format!("жду завершения агентов: активно {n}");
+                let _ = send_control(ws_tx, exec_frame("draining", &msg, Some(n))).await;
+            }
+            None => {
+                unreachable += 1;
+                if unreachable >= MAX_UNREACHABLE {
+                    let _ = send_control(
+                        ws_tx,
+                        exec_frame(
+                            "draining",
+                            "гостевой сервер не отвечает — останавливаю",
+                            None,
+                        ),
+                    )
+                    .await;
+                    break;
+                }
+                let msg = format!("гостевой сервер не отвечает ({unreachable}/{MAX_UNREACHABLE})…");
+                let _ = send_control(ws_tx, exec_frame("draining", &msg, None)).await;
+            }
         }
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
