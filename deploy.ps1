@@ -37,11 +37,17 @@ Copy-Item "static" "$dst\static" -Recurse -Force
 if (Test-Path ".env") { Copy-Item ".env" (Join-Path $dst ".env") -Force }
 
 Write-Host ""
-Write-Host "[ok] Deployed to $dst  --  launching the app..."
-Write-Host ""
+Write-Host "[ok] Deployed to $dst"
 
-# Build succeeded and the copy is done -> run the freshly deployed binary from the
-# prod folder (so static/, .env and chats/ resolve next to it, and the launch
-# wizard/banner appear in this console).
+# Relaunch the guest sandbox (:8790) on the new binary — the stop step above kills
+# it too (same exe path), so bring it back or guest.astechlab.dev 502s. run-guest.ps1
+# sets & clears its own env, so the owner launch below stays clean.
+Write-Host "Relaunching the guest sandbox (:8790)..."
+& (Join-Path $PSScriptRoot "run-guest.ps1")
+
+# Run the freshly deployed OWNER binary in this console (static/, .env, chats/
+# resolve next to it; the launch wizard/banner appear here).
+Write-Host ""
+Write-Host "Launching the owner app..."
 Set-Location -LiteralPath $dst
 & $prodExe
