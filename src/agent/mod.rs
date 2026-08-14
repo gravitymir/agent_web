@@ -14,11 +14,11 @@ pub mod tools;
 
 use std::collections::BTreeMap;
 use std::path::PathBuf;
-use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Instant;
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::session::ImageData;
 use provider::Provider;
@@ -102,7 +102,9 @@ impl Engine {
             return;
         }
         let mut drop_to = self.stored.messages.len() - MAX_MESSAGES;
-        while drop_to < self.stored.messages.len() && !is_user_prompt(&self.stored.messages[drop_to]) {
+        while drop_to < self.stored.messages.len()
+            && !is_user_prompt(&self.stored.messages[drop_to])
+        {
             drop_to += 1;
         }
         if drop_to > 0 && drop_to < self.stored.messages.len() {
@@ -192,17 +194,24 @@ impl Engine {
             }
             steps += 1;
             if steps > MAX_STEPS {
-                emit.line(json!({
-                    "cwi": "error",
-                    "message": format!("Reached the {MAX_STEPS}-step tool loop cap.")
-                }).to_string());
+                emit.line(
+                    json!({
+                        "cwi": "error",
+                        "message": format!("Reached the {MAX_STEPS}-step tool loop cap.")
+                    })
+                    .to_string(),
+                );
                 break;
             }
 
             let is_gemini = self.provider.kind == provider::Kind::Gemini;
             // Gemini builds its own request shape from the raw pieces (see
             // agent::gemini) — no point assembling the Anthropic body for it.
-            let body = if is_gemini { Value::Null } else { self.build_body() };
+            let body = if is_gemini {
+                Value::Null
+            } else {
+                self.build_body()
+            };
             let system = prompt::system_prompt(&self.workspace);
             let tool_list = self.tool_list();
             let mut acc: Accumulator;
@@ -227,7 +236,16 @@ impl Engine {
                         &system,
                         self.provider.max_tokens,
                         self.provider.thinking,
-                        |ev| handle_stream_event(ev, &emit_c, &mut acc, &mut think_start, &mut think_emitted, &mut got_event),
+                        |ev| {
+                            handle_stream_event(
+                                ev,
+                                &emit_c,
+                                &mut acc,
+                                &mut think_start,
+                                &mut think_emitted,
+                                &mut got_event,
+                            )
+                        },
                         interrupt,
                     )
                     .await
@@ -236,7 +254,16 @@ impl Engine {
                         &self.provider,
                         &self.http,
                         body.clone(),
-                        |ev| handle_stream_event(ev, &emit_c, &mut acc, &mut think_start, &mut think_emitted, &mut got_event),
+                        |ev| {
+                            handle_stream_event(
+                                ev,
+                                &emit_c,
+                                &mut acc,
+                                &mut think_start,
+                                &mut think_emitted,
+                                &mut got_event,
+                            )
+                        },
                         interrupt,
                     )
                     .await
@@ -257,7 +284,9 @@ impl Engine {
                             continue;
                         }
                         log_turn_error(&self.session_id, &self.provider.model, &e);
-                        emit.line(json!({ "cwi": "error", "message": format!("agent: {e}") }).to_string());
+                        emit.line(
+                            json!({ "cwi": "error", "message": format!("agent: {e}") }).to_string(),
+                        );
                         stream_failed = true;
                         break;
                     }
@@ -289,10 +318,13 @@ impl Engine {
 
             let content = acc.assistant_content();
             // Complete assistant message → frontend renders tool cards from this.
-            emit.line(json!({
-                "type": "assistant",
-                "message": { "role": "assistant", "content": content }
-            }).to_string());
+            emit.line(
+                json!({
+                    "type": "assistant",
+                    "message": { "role": "assistant", "content": content }
+                })
+                .to_string(),
+            );
             self.stored
                 .messages
                 .push(json!({ "role": "assistant", "content": content }));
@@ -316,7 +348,10 @@ impl Engine {
                         None => (format!("No MCP server for {name}"), true),
                     }
                 } else if !self.caps.allows(&name) {
-                    (format!("Tool '{name}' is disabled in the user's settings."), true)
+                    (
+                        format!("Tool '{name}' is disabled in the user's settings."),
+                        true,
+                    )
                 } else {
                     let out = tools::execute(&name, &input, &self.workspace).await;
                     (out.content, out.is_error)
@@ -331,23 +366,29 @@ impl Engine {
                 }));
             }
             // Tool results come back as a user message (frontend counts these).
-            emit.line(json!({
-                "type": "user",
-                "message": { "role": "user", "content": results }
-            }).to_string());
+            emit.line(
+                json!({
+                    "type": "user",
+                    "message": { "role": "user", "content": results }
+                })
+                .to_string(),
+            );
             self.stored
                 .messages
                 .push(json!({ "role": "user", "content": results }));
             self.save().await;
         }
 
-        emit.line(json!({
-            "type": "result",
-            "model": self.stored.model,
-            "usage": { "input_tokens": turn_input, "output_tokens": turn_tokens },
-            "duration_ms": started.elapsed().as_millis() as u64,
-            "num_turns": steps
-        }).to_string());
+        emit.line(
+            json!({
+                "type": "result",
+                "model": self.stored.model,
+                "usage": { "input_tokens": turn_input, "output_tokens": turn_tokens },
+                "duration_ms": started.elapsed().as_millis() as u64,
+                "num_turns": steps
+            })
+            .to_string(),
+        );
 
         tracing::info!(
             session = %self.session_id,
@@ -378,7 +419,11 @@ fn handle_stream_event(
     // Measure reasoning wall-clock and emit it once as a `cwi:think` frame when
     // thinking ends (a non-thinking block starts), so the block's timer
     // survives replay/reconnect (which streams instantly).
-    if ev.get("delta").and_then(|d| d.get("type")).and_then(Value::as_str) == Some("thinking_delta")
+    if ev
+        .get("delta")
+        .and_then(|d| d.get("type"))
+        .and_then(Value::as_str)
+        == Some("thinking_delta")
         && think_start.is_none()
     {
         *think_start = Some(Instant::now());
@@ -386,10 +431,11 @@ fn handle_stream_event(
     if !*think_emitted
         && ev.get("type").and_then(Value::as_str) == Some("content_block_start")
         && ev["content_block"].get("type").and_then(Value::as_str) != Some("thinking")
-        && let Some(s) = *think_start {
-            emit_c.line(json!({ "cwi": "think", "ms": s.elapsed().as_millis() as u64 }).to_string());
-            *think_emitted = true;
-        }
+        && let Some(s) = *think_start
+    {
+        emit_c.line(json!({ "cwi": "think", "ms": s.elapsed().as_millis() as u64 }).to_string());
+        *think_emitted = true;
+    }
     acc.on_event(&ev);
 }
 
@@ -404,8 +450,16 @@ fn log_turn_error(session_id: &str, model: &str, err: &anyhow::Error) {
         .nth(1)
         .and_then(|s| s.split([':', ' ']).next())
         .unwrap_or("-");
-    if let Some(body) = raw.find('{').and_then(|i| serde_json::from_str::<Value>(&raw[i..]).ok()) {
-        let field = |k: &str| body.get(k).and_then(Value::as_str).unwrap_or("").to_string();
+    if let Some(body) = raw
+        .find('{')
+        .and_then(|i| serde_json::from_str::<Value>(&raw[i..]).ok())
+    {
+        let field = |k: &str| {
+            body.get(k)
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string()
+        };
         tracing::error!(
             session = %session_id,
             model = %model,
@@ -436,10 +490,11 @@ fn normalize_content(messages: &mut [Value]) {
                 if let Some(arr) = m["content"].as_array_mut() {
                     for b in arr.iter_mut() {
                         if b.get("type").and_then(Value::as_str) == Some("tool_result")
-                            && let Some(Value::String(s)) = b.get("content") {
-                                let s = s.clone();
-                                b["content"] = json!([{ "type": "text", "text": s }]);
-                            }
+                            && let Some(Value::String(s)) = b.get("content")
+                        {
+                            let s = s.clone();
+                            b["content"] = json!([{ "type": "text", "text": s }]);
+                        }
                     }
                 }
             }
@@ -463,7 +518,10 @@ fn sanitize_messages(messages: &mut Vec<Value>) {
                 .unwrap_or_default()
                 .into_iter()
                 .collect();
-            let missing: Vec<String> = tool_ids.into_iter().filter(|id| !answered.contains(id)).collect();
+            let missing: Vec<String> = tool_ids
+                .into_iter()
+                .filter(|id| !answered.contains(id))
+                .collect();
             if !missing.is_empty() {
                 let results: Vec<Value> = missing
                     .iter()
@@ -501,7 +559,11 @@ fn tool_result_ids(m: &Value) -> Vec<String> {
         .map(|arr| {
             arr.iter()
                 .filter(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
-                .filter_map(|b| b.get("tool_use_id").and_then(Value::as_str).map(String::from))
+                .filter_map(|b| {
+                    b.get("tool_use_id")
+                        .and_then(Value::as_str)
+                        .map(String::from)
+                })
                 .collect()
         })
         .unwrap_or_default()
@@ -547,9 +609,10 @@ fn is_retryable(e: &anyhow::Error) -> bool {
 /// `Retry-After` (capped), else exponential backoff (0.5s, 1s, 2s, …).
 fn retry_delay(e: &anyhow::Error, attempt: u32) -> std::time::Duration {
     if let Some(api) = e.downcast_ref::<client::ApiError>()
-        && let Some(secs) = api.retry_after {
-            return std::time::Duration::from_secs(secs.min(MAX_BACKOFF_SECS));
-        }
+        && let Some(secs) = api.retry_after
+    {
+        return std::time::Duration::from_secs(secs.min(MAX_BACKOFF_SECS));
+    }
     let ms = (500u64 * 2u64.pow(attempt.saturating_sub(1))).min(MAX_BACKOFF_SECS * 1000);
     std::time::Duration::from_millis(ms)
 }
@@ -590,13 +653,31 @@ impl Accumulator {
             Some("content_block_start") => {
                 let idx = ev.get("index").and_then(Value::as_u64).unwrap_or(0) as usize;
                 let cb = &ev["content_block"];
-                let kind = cb.get("type").and_then(Value::as_str).unwrap_or("text").to_string();
-                let mut b = Block { kind: kind.clone(), ..Default::default() };
+                let kind = cb
+                    .get("type")
+                    .and_then(Value::as_str)
+                    .unwrap_or("text")
+                    .to_string();
+                let mut b = Block {
+                    kind: kind.clone(),
+                    ..Default::default()
+                };
                 if kind == "tool_use" {
-                    b.tool_id = cb.get("id").and_then(Value::as_str).unwrap_or("").to_string();
-                    b.tool_name = cb.get("name").and_then(Value::as_str).unwrap_or("").to_string();
-                    b.tool_signature =
-                        cb.get("_gemini_signature").and_then(Value::as_str).unwrap_or("").to_string();
+                    b.tool_id = cb
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    b.tool_name = cb
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
+                    b.tool_signature = cb
+                        .get("_gemini_signature")
+                        .and_then(Value::as_str)
+                        .unwrap_or("")
+                        .to_string();
                 }
                 self.blocks.insert(idx, b);
             }
@@ -617,9 +698,9 @@ impl Accumulator {
                             b.text.push_str(t);
                             think_add = t.chars().count();
                         }
-                        Some("input_json_delta") => {
-                            b.input_json.push_str(d.get("partial_json").and_then(Value::as_str).unwrap_or(""))
-                        }
+                        Some("input_json_delta") => b
+                            .input_json
+                            .push_str(d.get("partial_json").and_then(Value::as_str).unwrap_or("")),
                         _ => {}
                     }
                 }
@@ -668,7 +749,8 @@ impl Accumulator {
             match b.kind.as_str() {
                 "text" if !b.text.is_empty() => out.push(json!({ "type": "text", "text": b.text })),
                 "tool_use" => {
-                    let input: Value = serde_json::from_str(&b.input_json).unwrap_or_else(|_| json!({}));
+                    let input: Value =
+                        serde_json::from_str(&b.input_json).unwrap_or_else(|_| json!({}));
                     let mut tu = json!({ "type": "tool_use", "id": b.tool_id, "name": b.tool_name, "input": input });
                     // Preserve Gemini's thoughtSignature for the round-trip (ignored
                     // by other providers, which never set it).
@@ -688,7 +770,8 @@ impl Accumulator {
             .values()
             .filter(|b| b.kind == "tool_use")
             .map(|b| {
-                let input: Value = serde_json::from_str(&b.input_json).unwrap_or_else(|_| json!({}));
+                let input: Value =
+                    serde_json::from_str(&b.input_json).unwrap_or_else(|_| json!({}));
                 (b.tool_id.clone(), b.tool_name.clone(), input)
             })
             .collect()
@@ -697,8 +780,11 @@ impl Accumulator {
 
 #[cfg(test)]
 mod tests {
-    use super::{is_retryable, normalize_content, retry_delay, sanitize_messages, Accumulator, MAX_BACKOFF_SECS};
-    use serde_json::{json, Value};
+    use super::{
+        Accumulator, MAX_BACKOFF_SECS, is_retryable, normalize_content, retry_delay,
+        sanitize_messages,
+    };
+    use serde_json::{Value, json};
 
     #[test]
     fn normalize_rewrites_string_content_to_blocks() {
@@ -744,7 +830,9 @@ mod tests {
     #[test]
     fn accumulates_text_and_tokens() {
         let mut acc = Accumulator::default();
-        acc.on_event(&json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}));
+        acc.on_event(
+            &json!({"type":"content_block_start","index":0,"content_block":{"type":"text"}}),
+        );
         acc.on_event(&json!({"type":"content_block_delta","index":0,"delta":{"type":"text_delta","text":"Привет"}}));
         acc.on_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},"usage":{"output_tokens":7}}));
         assert_eq!(acc.output_tokens, 7);
@@ -780,8 +868,10 @@ mod tests {
 
         // Gemini reports them on the (synthetic) message_delta instead.
         let mut g = Accumulator::default();
-        g.on_event(&json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
-            "usage":{"output_tokens":10,"input_tokens":70,"cache_read_input_tokens":30}}));
+        g.on_event(
+            &json!({"type":"message_delta","delta":{"stop_reason":"end_turn"},
+            "usage":{"output_tokens":10,"input_tokens":70,"cache_read_input_tokens":30}}),
+        );
         assert_eq!(g.input_tokens, 70);
         assert_eq!(g.cache_read, 30);
     }
@@ -789,8 +879,10 @@ mod tests {
     #[test]
     fn preserves_gemini_thought_signature_on_tool_use() {
         let mut acc = Accumulator::default();
-        acc.on_event(&json!({"type":"content_block_start","index":0,"content_block":
-            {"type":"tool_use","id":"gemini-call-1","name":"Read","_gemini_signature":"SIG123"}}));
+        acc.on_event(
+            &json!({"type":"content_block_start","index":0,"content_block":
+            {"type":"tool_use","id":"gemini-call-1","name":"Read","_gemini_signature":"SIG123"}}),
+        );
         let content = acc.assistant_content();
         assert_eq!(content[0]["type"], "tool_use");
         assert_eq!(content[0]["_gemini_signature"], "SIG123"); // survives into storage
@@ -799,7 +891,9 @@ mod tests {
     #[test]
     fn thinking_counts_separately() {
         let mut acc = Accumulator::default();
-        acc.on_event(&json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}));
+        acc.on_event(
+            &json!({"type":"content_block_start","index":0,"content_block":{"type":"thinking"}}),
+        );
         acc.on_event(&json!({"type":"content_block_delta","index":0,"delta":{"type":"thinking_delta","thinking":"hmm"}}));
         assert_eq!(acc.thinking_chars, 3);
         // thinking blocks are NOT part of the round-trip content
@@ -831,16 +925,28 @@ mod tests {
         assert_eq!(retry_delay(&e429, 1), Duration::from_secs(7));
 
         // Overloaded is retryable; with no Retry-After we fall back to backoff.
-        let e529 = anyhow::Error::from(ApiError { status: Some(529), retry_after: None, message: "busy".into() });
+        let e529 = anyhow::Error::from(ApiError {
+            status: Some(529),
+            retry_after: None,
+            message: "busy".into(),
+        });
         assert!(is_retryable(&e529));
         assert_eq!(retry_delay(&e529, 1), Duration::from_millis(500));
 
         // A huge Retry-After is capped.
-        let big = anyhow::Error::from(ApiError { status: Some(429), retry_after: Some(9999), message: "x".into() });
+        let big = anyhow::Error::from(ApiError {
+            status: Some(429),
+            retry_after: Some(9999),
+            message: "x".into(),
+        });
         assert_eq!(retry_delay(&big, 1), Duration::from_secs(MAX_BACKOFF_SECS));
 
         // 4xx (other than 408/409/429) is fatal.
-        let e400 = anyhow::Error::from(ApiError { status: Some(400), retry_after: None, message: "bad".into() });
+        let e400 = anyhow::Error::from(ApiError {
+            status: Some(400),
+            retry_after: None,
+            message: "bad".into(),
+        });
         assert!(!is_retryable(&e400));
     }
 }

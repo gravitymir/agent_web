@@ -17,18 +17,18 @@ use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
-    extract::{Query, State},
-    http::{header, HeaderMap, StatusCode},
-    response::{Html, IntoResponse, Redirect, Response},
     Form, Json,
+    extract::{Query, State},
+    http::{HeaderMap, StatusCode, header},
+    response::{Html, IntoResponse, Redirect, Response},
 };
 use hmac::{Hmac, Mac};
 use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 
-use crate::config::claude_config_dir;
 use crate::AppState;
+use crate::config::claude_config_dir;
 
 type HmacSha256 = Hmac<Sha256>;
 
@@ -60,8 +60,8 @@ struct Token {
 #[derive(Serialize)]
 pub struct CodeInfo {
     pub label: String,
-    pub expires: u64,     // unix seconds
-    pub expires_in: u64,  // seconds remaining
+    pub expires: u64,    // unix seconds
+    pub expires_in: u64, // seconds remaining
 }
 
 pub struct Auth {
@@ -100,9 +100,10 @@ fn load_or_create_secret(dir: &Path) -> Vec<u8> {
     let p = dir.join("auth_secret");
     if let Ok(s) = fs::read_to_string(&p)
         && let Ok(b) = hex::decode(s.trim())
-            && b.len() >= 32 {
-                return b;
-            }
+        && b.len() >= 32
+    {
+        return b;
+    }
     let mut b = vec![0u8; 32];
     rand::thread_rng().fill_bytes(&mut b);
     write_private(&p, hex::encode(&b).as_bytes());
@@ -166,7 +167,10 @@ impl Auth {
     /// Active (non-expired) tokens.
     fn active(&self) -> Vec<Token> {
         let n = now();
-        self.load_tokens().into_iter().filter(|t| t.expires > n).collect()
+        self.load_tokens()
+            .into_iter()
+            .filter(|t| t.expires > n)
+            .collect()
     }
 
     /// Remove tokens by label or by a full code. Returns how many were removed.
@@ -232,8 +236,12 @@ impl Auth {
         else {
             return false;
         };
-        let Some((exp_s, sig)) = val.split_once('.') else { return false };
-        let Ok(exp) = exp_s.parse::<u64>() else { return false };
+        let Some((exp_s, sig)) = val.split_once('.') else {
+            return false;
+        };
+        let Ok(exp) = exp_s.parse::<u64>() else {
+            return false;
+        };
         if exp <= now() {
             return false;
         }
@@ -359,7 +367,11 @@ fn guest_base() -> String {
     std::env::var("CWI_GUEST_URL")
         .ok()
         .filter(|s| !s.trim().is_empty())
-        .or_else(|| std::env::var("CWI_PUBLIC_URL").ok().filter(|s| !s.trim().is_empty()))
+        .or_else(|| {
+            std::env::var("CWI_PUBLIC_URL")
+                .ok()
+                .filter(|s| !s.trim().is_empty())
+        })
         .unwrap_or_else(|| format!("http://localhost:{}", crate::executor::GUEST_APP_PORT))
         .trim_end_matches('/')
         .to_string()
@@ -369,7 +381,9 @@ fn guest_base() -> String {
 /// against codes minted here (the executor is disposable — its store is wiped by
 /// each snapshot restore). Best-effort; a no-op if the VM is down.
 async fn sync_to_executor(state: &Arc<AppState>) {
-    let Some(json) = state.auth.store_json() else { return };
+    let Some(json) = state.auth.store_json() else {
+        return;
+    };
     let _ = tokio::task::spawn_blocking(move || crate::executor::push_guest_tokens(&json)).await;
 }
 
@@ -514,7 +528,10 @@ fn human_ttl(secs: u64) -> String {
 }
 
 fn arg_val(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Handle the `guest` subcommand and exit. `args` is everything after `guest`.
@@ -576,7 +593,12 @@ mod tests {
     fn public_paths_bypass_the_gate() {
         // Reachable without a session: login, health, the broker (own bearer
         // auth), and the host→guest drain trigger.
-        for p in ["/login", "/api/health", "/api/drain/begin", "/broker/v1/messages"] {
+        for p in [
+            "/login",
+            "/api/health",
+            "/api/drain/begin",
+            "/broker/v1/messages",
+        ] {
             assert!(is_public(p), "{p} should be public");
         }
     }

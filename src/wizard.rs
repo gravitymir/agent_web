@@ -6,7 +6,7 @@
 //! reads (`CWI_ENGINE`, `CWI_AGENT_PROVIDER`, `CWI_BIND`), so there is a single
 //! source of truth and the spawned `claude`/provider inherit them.
 
-use dialoguer::{theme::ColorfulTheme, Select};
+use dialoguer::{Select, theme::ColorfulTheme};
 use std::io::IsTerminal;
 
 // (label, provider). `None` => Cloud subscription via the Claude Code CLI.

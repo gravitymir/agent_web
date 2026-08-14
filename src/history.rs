@@ -131,11 +131,14 @@ fn cached_summary(
     let Ok(mtime) = std::fs::metadata(path).and_then(|m| m.modified()) else {
         return compute(path, id);
     };
-    if let Some((cached_mtime, sum)) =
-        SUMMARY_CACHE.lock().unwrap_or_else(|e| e.into_inner()).get(path)
-        && *cached_mtime == mtime {
-            return Some(sum.clone());
-        }
+    if let Some((cached_mtime, sum)) = SUMMARY_CACHE
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(path)
+        && *cached_mtime == mtime
+    {
+        return Some(sum.clone());
+    }
     let sum = compute(path, id)?;
     SUMMARY_CACHE
         .lock()
@@ -233,9 +236,10 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
 
         // Prefer an explicit AI-generated title if present.
         if v.get("type").and_then(Value::as_str) == Some("summary")
-            && let Some(s) = v.get("summary").and_then(Value::as_str) {
-                title = Some(truncate(s, 120));
-            }
+            && let Some(s) = v.get("summary").and_then(Value::as_str)
+        {
+            title = Some(truncate(s, 120));
+        }
 
         if let Some(ts) = v.get("timestamp").and_then(Value::as_str) {
             last_ts = Some(ts.to_string());
@@ -259,10 +263,14 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
             message_count += 1;
             if ty == Some("assistant") {
                 turns += 1;
-                if let Some(mdl) = v.get("message").and_then(|m| m.get("model")).and_then(Value::as_str)
-                    && !mdl.is_empty() {
-                        model = mdl.to_string();
-                    }
+                if let Some(mdl) = v
+                    .get("message")
+                    .and_then(|m| m.get("model"))
+                    .and_then(Value::as_str)
+                    && !mdl.is_empty()
+                {
+                    model = mdl.to_string();
+                }
                 if let Some(u) = v.get("message").and_then(|m| m.get("usage")) {
                     let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
                     // output_tokens includes the thinking budget.
@@ -270,17 +278,20 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
                     input_tokens += get("input_tokens");
                     cache_read += get("cache_read_input_tokens");
                     cache_creation += get("cache_creation_input_tokens");
-                    last_context_tokens =
-                        get("input_tokens") + get("cache_read_input_tokens") + get("cache_creation_input_tokens");
+                    last_context_tokens = get("input_tokens")
+                        + get("cache_read_input_tokens")
+                        + get("cache_creation_input_tokens");
                 }
             }
-            if title.is_none() && ty == Some("user")
-                && let Some(text) = extract_text(&v) {
-                    let text = text.trim();
-                    if !text.is_empty() {
-                        title = Some(truncate(text, 120));
-                    }
+            if title.is_none()
+                && ty == Some("user")
+                && let Some(text) = extract_text(&v)
+            {
+                let text = text.trim();
+                if !text.is_empty() {
+                    title = Some(truncate(text, 120));
                 }
+            }
         }
     }
 
@@ -445,7 +456,10 @@ fn load_native_chat(path: &Path) -> Vec<ChatMessage> {
         if role == "user" && is_native_tool_result(&m) {
             continue;
         }
-        let text = extract_native_text(&m).unwrap_or_default().trim().to_string();
+        let text = extract_native_text(&m)
+            .unwrap_or_default()
+            .trim()
+            .to_string();
         let tools = extract_native_tools(&m);
         if text.is_empty() && tools.is_empty() {
             continue;
@@ -465,7 +479,12 @@ fn load_native_chat(path: &Path) -> Vec<ChatMessage> {
 fn is_native_tool_result(v: &Value) -> bool {
     v.get("content")
         .and_then(Value::as_array)
-        .map(|arr| !arr.is_empty() && arr.iter().all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result")))
+        .map(|arr| {
+            !arr.is_empty()
+                && arr
+                    .iter()
+                    .all(|b| b.get("type").and_then(Value::as_str) == Some("tool_result"))
+        })
         .unwrap_or(false)
 }
 
@@ -533,9 +552,10 @@ fn extract_text(v: &Value) -> Option<String> {
         let mut out = String::new();
         for block in arr {
             if let Some("text") = block.get("type").and_then(Value::as_str)
-                && let Some(t) = block.get("text").and_then(Value::as_str) {
-                    out.push_str(t);
-                }
+                && let Some(t) = block.get("text").and_then(Value::as_str)
+            {
+                out.push_str(t);
+            }
         }
         if out.is_empty() {
             return None;
@@ -558,9 +578,10 @@ fn extract_native_text(v: &Value) -> Option<String> {
         let mut out = String::new();
         for block in arr {
             if let Some("text") = block.get("type").and_then(Value::as_str)
-                && let Some(t) = block.get("text").and_then(Value::as_str) {
-                    out.push_str(t);
-                }
+                && let Some(t) = block.get("text").and_then(Value::as_str)
+            {
+                out.push_str(t);
+            }
         }
         if out.is_empty() {
             return None;

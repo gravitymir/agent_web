@@ -5,7 +5,7 @@
 use serde::Serialize;
 
 use crate::agent::provider::Auth;
-use crate::models::{fetch_model_list, ModelInfo};
+use crate::models::{ModelInfo, fetch_model_list};
 
 struct ProviderMeta {
     id: &'static str,
@@ -32,7 +32,12 @@ fn registry() -> Vec<ProviderMeta> {
             models_url: "https://api.moonshot.ai/v1/models",
             auth: Auth::Bearer,
             key_var: "CWI_AGENT_KIMI_API_KEY",
-            fallback: &["kimi-k2.7-code", "kimi-k2.7-code-highspeed", "kimi-k2.6", "kimi-k3"],
+            fallback: &[
+                "kimi-k2.7-code",
+                "kimi-k2.7-code-highspeed",
+                "kimi-k2.6",
+                "kimi-k3",
+            ],
         },
         ProviderMeta {
             id: "glm",
@@ -63,7 +68,11 @@ fn registry() -> Vec<ProviderMeta> {
             models_url: "https://generativelanguage.googleapis.com/v1beta/models",
             auth: Auth::GoogleApiKey,
             key_var: "CWI_AGENT_GEMINI_API_KEY",
-            fallback: &["gemini-pro-latest", "gemini-flash-latest", "gemini-flash-lite-latest"],
+            fallback: &[
+                "gemini-pro-latest",
+                "gemini-flash-latest",
+                "gemini-flash-lite-latest",
+            ],
         },
     ]
 }
@@ -85,10 +94,32 @@ pub struct ProviderInfo {
 fn is_chat_model(id: &str) -> bool {
     let m = id.to_ascii_lowercase();
     const NON_CHAT: &[&str] = &[
-        "image", "ocr", "video", "t2v", "i2v", "t2i", "wanx", "wan2", "wan-",
-        "audio", "-tts", "tts-", "-asr", "asr-", "cosyvoice", "paraformer",
-        "sambert", "speech", "voice", "embedding", "-embed", "rerank",
-        "diffusion", "flux", "sdxl", "sd3",
+        "image",
+        "ocr",
+        "video",
+        "t2v",
+        "i2v",
+        "t2i",
+        "wanx",
+        "wan2",
+        "wan-",
+        "audio",
+        "-tts",
+        "tts-",
+        "-asr",
+        "asr-",
+        "cosyvoice",
+        "paraformer",
+        "sambert",
+        "speech",
+        "voice",
+        "embedding",
+        "-embed",
+        "rerank",
+        "diffusion",
+        "flux",
+        "sdxl",
+        "sd3",
     ];
     !NON_CHAT.iter().any(|k| m.contains(k))
 }
@@ -99,7 +130,10 @@ async fn models_for(p: &ProviderMeta) -> Vec<ModelInfo> {
     let fallback = || -> Vec<ModelInfo> {
         p.fallback
             .iter()
-            .map(|id| ModelInfo { id: id.to_string(), display_name: id.to_string() })
+            .map(|id| ModelInfo {
+                id: id.to_string(),
+                display_name: id.to_string(),
+            })
             .collect()
     };
     let key = std::env::var(p.key_var).unwrap_or_default();
@@ -148,16 +182,31 @@ mod tests {
     fn keeps_chat_models_drops_media_and_embeddings() {
         // Chat / multimodal-chat models are kept.
         for id in [
-            "qwen3.8-max", "qwen3.7-plus", "qwen-max", "qwen3-vl-235b-a22b-thinking",
-            "claude-opus-5", "kimi-k2.7-code", "glm-5.2", "gemini-pro-latest",
+            "qwen3.8-max",
+            "qwen3.7-plus",
+            "qwen-max",
+            "qwen3-vl-235b-a22b-thinking",
+            "claude-opus-5",
+            "kimi-k2.7-code",
+            "glm-5.2",
+            "gemini-pro-latest",
         ] {
             assert!(is_chat_model(id), "should keep {id}");
         }
         // Media / OCR / embedding / rerank models are dropped.
         for id in [
-            "qwen-image-3.0-pro", "qwen-vl-ocr-2025-11-20", "wan2.5-t2v", "wanx-i2v",
-            "qwen-audio-turbo", "qwen-tts", "paraformer-realtime", "cosyvoice-v2",
-            "text-embedding-v4", "gte-rerank", "flux-schnell", "stable-diffusion-3",
+            "qwen-image-3.0-pro",
+            "qwen-vl-ocr-2025-11-20",
+            "wan2.5-t2v",
+            "wanx-i2v",
+            "qwen-audio-turbo",
+            "qwen-tts",
+            "paraformer-realtime",
+            "cosyvoice-v2",
+            "text-embedding-v4",
+            "gte-rerank",
+            "flux-schnell",
+            "stable-diffusion-3",
         ] {
             assert!(!is_chat_model(id), "should drop {id}");
         }

@@ -37,8 +37,8 @@ use serde::Deserialize;
 use serde_json::json;
 use tokio::sync::broadcast;
 
-use crate::session::{AttachGuard, ImageData, SessionKeeper};
 use crate::AppState;
+use crate::session::{AttachGuard, ImageData, SessionKeeper};
 
 type WsSink = SplitSink<WebSocket, Message>;
 
@@ -53,7 +53,11 @@ struct RateLimiter {
 
 impl RateLimiter {
     fn new() -> Self {
-        Self { hits: VecDeque::new(), max: 30, window: Duration::from_secs(10) }
+        Self {
+            hits: VecDeque::new(),
+            max: 30,
+            window: Duration::from_secs(10),
+        }
     }
 
     /// Record a request; return `false` if it exceeds the window budget.
@@ -159,7 +163,17 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
         } else {
             match ws_rx.next().await {
                 Some(Ok(m)) => {
-                    if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
+                    if !handle_client(
+                        m,
+                        &state,
+                        &mut ws_tx,
+                        &mut keeper,
+                        &mut guard,
+                        &mut rx,
+                        &mut rl,
+                    )
+                    .await
+                    {
                         break;
                     }
                 }
@@ -191,38 +205,61 @@ async fn handle_client(
 
     // Cap how fast a client can drive the socket (protects the keeper/process).
     if !rl.allow() {
-        let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "Rate limit exceeded — slow down." })).await;
+        let _ = send_control(
+            ws_tx,
+            json!({ "cwi": "error", "message": "Rate limit exceeded — slow down." }),
+        )
+        .await;
         return true;
     }
 
     let client_msg: ClientMsg = match serde_json::from_str(&text) {
         Ok(m) => m,
         Err(e) => {
-            let _ = send_control(ws_tx, json!({ "cwi": "error", "message": format!("bad client message: {e}") })).await;
+            let _ = send_control(
+                ws_tx,
+                json!({ "cwi": "error", "message": format!("bad client message: {e}") }),
+            )
+            .await;
             return true;
         }
     };
 
     match client_msg {
-        ClientMsg::Send { session_id, text, model, provider, new_chat, images, caps } => {
+        ClientMsg::Send {
+            session_id,
+            text,
+            model,
+            provider,
+            new_chat,
+            images,
+            caps,
+        } => {
             // Validate client-supplied identifiers before they become file paths or
             // CLI arguments (path traversal / `cmd.exe` injection).
             if let Some(id) = session_id.as_deref()
-                && !crate::ids::is_valid_session_id(id) {
-                    let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "invalid session id" })).await;
-                    return true;
-                }
+                && !crate::ids::is_valid_session_id(id)
+            {
+                let _ = send_control(
+                    ws_tx,
+                    json!({ "cwi": "error", "message": "invalid session id" }),
+                )
+                .await;
+                return true;
+            }
             let model = model.filter(|m| crate::ids::is_valid_model(m));
             let sid = session_id.clone();
             // Freeze guard: a chat that lives only in the *other* engine's store is
             // read-only until the user switches CWI_ENGINE. Viewing is a separate
             // GET; here we refuse to drive a turn on it.
             if let Some(id) = session_id.as_ref()
-                && !new_chat && chat_is_frozen(state, id) {
-                    let _ = send_control(ws_tx, json!({ "cwi": "error",
+                && !new_chat
+                && chat_is_frozen(state, id)
+            {
+                let _ = send_control(ws_tx, json!({ "cwi": "error",
                         "message": "Этот чат создан другим движком — только чтение. Переключите CWI_ENGINE, чтобы продолжить." })).await;
-                    return true;
-                }
+                return true;
+            }
             // Graceful drain: once a Drain-Stop flips the flag, we stop
             // accepting NEW turns but let in-flight ones finish. Refuse here so the
             // operator can safely `stop` once `active_turns` reaches zero.
@@ -240,7 +277,10 @@ async fn handle_client(
             if keeper.as_ref().is_none_or(|k| k.is_finished()) {
                 *keeper = None;
                 let resume = session_id.is_some() && !new_chat;
-                match state.sessions.get_or_spawn(session_id, resume, model, provider) {
+                match state
+                    .sessions
+                    .get_or_spawn(session_id, resume, model, provider)
+                {
                     Ok(k) => {
                         tracing::info!(session = %k.session_id, "user sent request");
                         attach(ws_tx, k, keeper, guard, rx).await;
@@ -262,7 +302,11 @@ async fn handle_client(
             // Same identifier guard as Send: reject anything that isn't a UUID
             // before it reaches the session store / becomes a path component.
             if !crate::ids::is_valid_session_id(&session_id) {
-                let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "invalid session id" })).await;
+                let _ = send_control(
+                    ws_tx,
+                    json!({ "cwi": "error", "message": "invalid session id" }),
+                )
+                .await;
                 return true;
             }
             if keeper.is_none() {
@@ -284,16 +328,27 @@ async fn handle_client(
             }
         }
 
-        ClientMsg::PermissionResponse { request_id, allow, answers, response, message } => {
+        ClientMsg::PermissionResponse {
+            request_id,
+            allow,
+            answers,
+            response,
+            message,
+        } => {
             if let Some(k) = keeper.as_ref() {
                 tracing::info!(session = %k.session_id, %request_id, allow, "permission response");
-                k.send_permission_response(request_id, allow, answers, response, message).await;
+                k.send_permission_response(request_id, allow, answers, response, message)
+                    .await;
             }
         }
 
         ClientMsg::Executor { action } => {
             if !state.admin {
-                let _ = send_control(ws_tx, exec_frame("error", "executor control is admin-only", None)).await;
+                let _ = send_control(
+                    ws_tx,
+                    exec_frame("error", "executor control is admin-only", None),
+                )
+                .await;
                 return true;
             }
             handle_executor(&action, state, ws_tx).await;
@@ -326,12 +381,16 @@ async fn guest_active_turns(client: &reqwest::Client, base: &str) -> Option<usiz
         .await
         .ok()?;
     let v: serde_json::Value = resp.json().await.ok()?;
-    v.get("active_turns").and_then(|x| x.as_u64()).map(|n| n as usize)
+    v.get("active_turns")
+        .and_then(|x| x.as_u64())
+        .map(|n| n as usize)
 }
 
 /// Full state snapshot: VM (exists/running/ssh/snapshot) + the guest's live turns.
 async fn send_executor_status(ws_tx: &mut WsSink) {
-    let st = tokio::task::spawn_blocking(crate::executor::status).await.ok();
+    let st = tokio::task::spawn_blocking(crate::executor::status)
+        .await
+        .ok();
     let (exists, running, ssh, snap) = match &st {
         Some(s) => (s.exists, s.running, s.ssh_ready, s.has_clean_snapshot),
         None => (false, false, false, false),
@@ -369,28 +428,54 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
         "status" => send_executor_status(ws_tx).await,
 
         "start" => {
-            let _ = send_control(ws_tx, exec_frame("booting", "восстанавливаю снапшот clean…", None)).await;
-            if !tokio::task::spawn_blocking(crate::executor::restore_clean).await.unwrap_or(false) {
-                let _ = send_control(ws_tx, exec_frame("error", "не удалось восстановить снапшот clean", None)).await;
+            let _ = send_control(
+                ws_tx,
+                exec_frame("booting", "восстанавливаю снапшот clean…", None),
+            )
+            .await;
+            if !tokio::task::spawn_blocking(crate::executor::restore_clean)
+                .await
+                .unwrap_or(false)
+            {
+                let _ = send_control(
+                    ws_tx,
+                    exec_frame("error", "не удалось восстановить снапшот clean", None),
+                )
+                .await;
                 return;
             }
-            let _ = send_control(ws_tx, exec_frame("booting", "загружаюсь (headless)…", None)).await;
+            let _ =
+                send_control(ws_tx, exec_frame("booting", "загружаюсь (headless)…", None)).await;
             let _ = tokio::task::spawn_blocking(crate::executor::start_headless).await;
             let _ = send_control(ws_tx, exec_frame("booting", "жду SSH…", None)).await;
             for _ in 0..30 {
-                if tokio::task::spawn_blocking(crate::executor::ssh_ready).await.unwrap_or(false) {
+                if tokio::task::spawn_blocking(crate::executor::ssh_ready)
+                    .await
+                    .unwrap_or(false)
+                {
                     // The restored VM has an empty token store — push the current
                     // guest codes so magic links minted on the host work.
                     if let Some(json) = state.auth.store_json() {
-                        let _ = send_control(ws_tx, exec_frame("booting", "синхронизирую гостевые ссылки…", None)).await;
-                        let _ = tokio::task::spawn_blocking(move || crate::executor::push_guest_tokens(&json)).await;
+                        let _ = send_control(
+                            ws_tx,
+                            exec_frame("booting", "синхронизирую гостевые ссылки…", None),
+                        )
+                        .await;
+                        let _ = tokio::task::spawn_blocking(move || {
+                            crate::executor::push_guest_tokens(&json)
+                        })
+                        .await;
                     }
                     send_executor_status(ws_tx).await;
                     return;
                 }
                 tokio::time::sleep(std::time::Duration::from_secs(3)).await;
             }
-            let _ = send_control(ws_tx, exec_frame("error", "SSH не поднялся за ~90с (VM ещё грузится?)", None)).await;
+            let _ = send_control(
+                ws_tx,
+                exec_frame("error", "SSH не поднялся за ~90с (VM ещё грузится?)", None),
+            )
+            .await;
         }
 
         "stop" => {
@@ -403,7 +488,11 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
         "drain" => handle_drain(ws_tx).await,
 
         _ => {
-            let _ = send_control(ws_tx, exec_frame("error", &format!("неизвестное действие: {action}"), None)).await;
+            let _ = send_control(
+                ws_tx,
+                exec_frame("error", &format!("неизвестное действие: {action}"), None),
+            )
+            .await;
         }
     }
 }
@@ -414,7 +503,15 @@ async fn handle_drain(ws_tx: &mut WsSink) {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_APP_PORT);
 
-    let _ = send_control(ws_tx, exec_frame("draining", "перевожу гостя в drain (новые ходы не принимаются)…", None)).await;
+    let _ = send_control(
+        ws_tx,
+        exec_frame(
+            "draining",
+            "перевожу гостя в drain (новые ходы не принимаются)…",
+            None,
+        ),
+    )
+    .await;
     let _ = client
         .post(format!("{base}/api/drain/begin"))
         .timeout(std::time::Duration::from_secs(5))
@@ -436,8 +533,14 @@ async fn handle_drain(ws_tx: &mut WsSink) {
         tokio::time::sleep(std::time::Duration::from_secs(5)).await;
     }
 
-    let _ = send_control(ws_tx, exec_frame("stopping", "останавливаю гостевой сервер…", None)).await;
-    let _ = tokio::task::spawn_blocking(|| crate::executor::ssh_run("sudo systemctl stop agent-web")).await;
+    let _ = send_control(
+        ws_tx,
+        exec_frame("stopping", "останавливаю гостевой сервер…", None),
+    )
+    .await;
+    let _ =
+        tokio::task::spawn_blocking(|| crate::executor::ssh_run("sudo systemctl stop agent-web"))
+            .await;
 
     let _ = send_control(ws_tx, exec_frame("stopping", "выключаю VM…", None)).await;
     let _ = tokio::task::spawn_blocking(crate::executor::stop_graceful).await;
@@ -457,14 +560,22 @@ async fn attach(
     let (snapshot, receiver) = k.subscribe();
     let replay = !snapshot.is_empty();
 
-    let _ = send_control(ws_tx, json!({
-        "cwi": "session",
-        "session_id": k.session_id,
-        "replay": replay,
-    })).await;
+    let _ = send_control(
+        ws_tx,
+        json!({
+            "cwi": "session",
+            "session_id": k.session_id,
+            "replay": replay,
+        }),
+    )
+    .await;
 
     for line in snapshot {
-        if ws_tx.send(Message::Text(Utf8Bytes::from(line))).await.is_err() {
+        if ws_tx
+            .send(Message::Text(Utf8Bytes::from(line)))
+            .await
+            .is_err()
+        {
             return;
         }
     }

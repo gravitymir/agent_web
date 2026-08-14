@@ -57,10 +57,11 @@ fn resolve_static_dir() -> String {
     }
     let mut candidates: Vec<PathBuf> = vec![PathBuf::from("static")];
     if let Ok(exe) = std::env::current_exe()
-        && let Some(dir) = exe.parent() {
-            candidates.push(dir.join("static"));
-            candidates.push(dir.join("..").join("..").join("static"));
-        }
+        && let Some(dir) = exe.parent()
+    {
+        candidates.push(dir.join("static"));
+        candidates.push(dir.join("..").join("..").join("static"));
+    }
     for c in &candidates {
         if c.join("index.html").is_file() {
             // Canonicalize so the banner shows a clean absolute path (no `..\..`);
@@ -79,7 +80,10 @@ fn canonicalize_or_warn(path: &std::path::Path) -> PathBuf {
     match std::fs::canonicalize(path) {
         Ok(p) => p,
         Err(e) => {
-            tracing::warn!("canonicalize({}) failed: {e}; using the path as-is", path.display());
+            tracing::warn!(
+                "canonicalize({}) failed: {e}; using the path as-is",
+                path.display()
+            );
             path.to_path_buf()
         }
     }
@@ -102,8 +106,7 @@ pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<
 
 impl Config {
     pub fn from_env() -> Self {
-        let bind_addr =
-            std::env::var("CWI_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
+        let bind_addr = std::env::var("CWI_BIND").unwrap_or_else(|_| "127.0.0.1:8787".to_string());
 
         // Workspace = the code the agent works on. Default (portable): a fixed
         // `workspace/` next to the exe — stable regardless of which directory the
@@ -111,9 +114,9 @@ impl Config {
         let workspace_dir = std::env::var("CWI_WORKSPACE")
             .map(PathBuf::from)
             .unwrap_or_else(|_| {
-                exe_dir()
-                    .map(|d| d.join("workspace"))
-                    .unwrap_or_else(|| std::env::current_dir().unwrap_or_else(|_| PathBuf::from(".")))
+                exe_dir().map(|d| d.join("workspace")).unwrap_or_else(|| {
+                    std::env::current_dir().unwrap_or_else(|_| PathBuf::from("."))
+                })
             });
         let _ = std::fs::create_dir_all(&workspace_dir);
         let workspace_abs = canonicalize_or_warn(&workspace_dir);
@@ -160,7 +163,8 @@ impl Config {
     /// The `~/.claude/projects/<encoded>` directory holding this workspace's
     /// session `.jsonl` files.
     pub fn session_dir(&self) -> PathBuf {
-        self.projects_root.join(encode_project_dir(&self.workspace_abs()))
+        self.projects_root
+            .join(encode_project_dir(&self.workspace_abs()))
     }
 }
 
@@ -191,7 +195,10 @@ pub fn claude_config_dir() -> PathBuf {
 /// Directory containing the running executable (its parent). `None` if it can't
 /// be determined. Used to anchor portable defaults (workspace/, chats/, static/).
 pub fn exe_dir() -> Option<PathBuf> {
-    std::env::current_exe().ok()?.parent().map(|p| p.to_path_buf())
+    std::env::current_exe()
+        .ok()?
+        .parent()
+        .map(|p| p.to_path_buf())
 }
 
 /// Claude Code encodes a project's absolute path into a directory name by
@@ -219,7 +226,10 @@ mod tests {
             encode_project_dir(Path::new(r"C:\Users\gravi\agent_web")),
             "C--Users-gravi-agent-web"
         );
-        assert_eq!(encode_project_dir(Path::new("/home/u/my proj")), "-home-u-my-proj");
+        assert_eq!(
+            encode_project_dir(Path::new("/home/u/my proj")),
+            "-home-u-my-proj"
+        );
     }
 
     #[test]

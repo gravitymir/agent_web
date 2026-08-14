@@ -78,7 +78,11 @@ pub fn spawn_claude(
         .arg("--permission-mode")
         // Sandbox sessions bypass permission prompts: the disposable guest IS the
         // safety boundary, and `--tools` below removes every host-touching tool.
-        .arg(if config.sandbox { "bypassPermissions" } else { config.permission_mode.as_str() })
+        .arg(if config.sandbox {
+            "bypassPermissions"
+        } else {
+            config.permission_mode.as_str()
+        })
         // Without this, any tool needing a decision beyond `permission_mode`'s
         // own auto-approvals (Bash, WebFetch, AskUserQuestion, ...) silently
         // auto-denies in headless `--print` mode. This routes those decisions
@@ -97,7 +101,11 @@ pub fn spawn_claude(
         // isolated on the VM and a download archives only this chat's work.
         cmd.env(
             "CWI_GUEST_WORKDIR",
-            format!("{}/{}", crate::mcp_guest::base_workdir().trim_end_matches('/'), id),
+            format!(
+                "{}/{}",
+                crate::mcp_guest::base_workdir().trim_end_matches('/'),
+                id
+            ),
         );
         // The host CLI injects host context (cwd, OS, and the subscription
         // account's email) into the model — no flag removes it. Instruct the
@@ -108,8 +116,11 @@ pub fn spawn_claude(
         if let Some(cfg) = sandbox_mcp_config() {
             cmd.arg("--mcp-config").arg(cfg).arg("--strict-mcp-config");
         }
-        cmd.arg("--tools")
-            .args(["mcp__guest__bash", "mcp__guest__read_file", "mcp__guest__write_file"]);
+        cmd.arg("--tools").args([
+            "mcp__guest__bash",
+            "mcp__guest__read_file",
+            "mcp__guest__write_file",
+        ]);
     }
 
     if resume {
@@ -119,9 +130,10 @@ pub fn spawn_claude(
     }
 
     if let Some(model) = model
-        && !model.is_empty() {
-            cmd.arg("--model").arg(model);
-        }
+        && !model.is_empty()
+    {
+        cmd.arg("--model").arg(model);
+    }
 
     cmd.stdin(Stdio::piped())
         .stdout(Stdio::piped())

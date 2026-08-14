@@ -38,13 +38,24 @@ pub fn print_startup(config: &Config) {
     let (engine, detail, engine_code, extra): (&str, String, String, Vec<(String, String)>) =
         if config.native_engine {
             let p = crate::agent::provider::Provider::from_env();
-            let flag = if p.has_key() { "" } else { "  [НЕТ КЛЮЧА]" };
+            let flag = if p.has_key() {
+                ""
+            } else {
+                "  [НЕТ КЛЮЧА]"
+            };
             (
                 "native",
                 format!("{} / {}{}", p.name, p.model, flag),
                 format!("1;{ORANGE}"),
                 vec![
-                    ("THINKING".into(), if p.thinking { "ON".into() } else { "OFF".into() }),
+                    (
+                        "THINKING".into(),
+                        if p.thinking {
+                            "ON".into()
+                        } else {
+                            "OFF".into()
+                        },
+                    ),
                     ("MAX TOK".into(), p.max_tokens.to_string()),
                 ],
             )
@@ -60,7 +71,10 @@ pub fn print_startup(config: &Config) {
             )
         };
 
-    let config_dir = config.projects_root.parent().unwrap_or(&config.projects_root);
+    let config_dir = config
+        .projects_root
+        .parent()
+        .unwrap_or(&config.projects_root);
     let ver = env!("CARGO_PKG_VERSION");
     // Local wall-clock at launch, so a long-lived terminal shows since when this
     // instance has been up (the tracing logs are UTC and easy to miss).
@@ -76,17 +90,28 @@ pub fn print_startup(config: &Config) {
                 paint(&format!("v{ver}.{}", crate::BUILD), "1;97"), // version in white
             ),
         ),
-        (String::new(), paint("──────────────────────────", &format!("2;{ORANGE}"))),
+        (
+            String::new(),
+            paint("──────────────────────────", &format!("2;{ORANGE}")),
+        ),
         ("STARTED".into(), started),
         (
             "ENGINE".into(),
-            format!("{} {}  {}", paint("▶", &engine_code), paint(engine, &engine_code), detail),
+            format!(
+                "{} {}  {}",
+                paint("▶", &engine_code),
+                paint(engine, &engine_code),
+                detail
+            ),
         ),
     ];
     rows.extend(extra); // engine-specific settings (THINKING / MAX TOK / PERMISSION)
     rows.extend([
         ("BIND".into(), format!("http://{}", config.bind_addr)),
-        ("WORKSPACE".into(), abbrev(&config.workspace_abs().display().to_string())),
+        (
+            "WORKSPACE".into(),
+            abbrev(&config.workspace_abs().display().to_string()),
+        ),
         ("STORAGE".into(), abbrev(&config_dir.display().to_string())),
         ("STATIC".into(), abbrev(&config.static_dir)),
     ]);
@@ -94,7 +119,11 @@ pub fn print_startup(config: &Config) {
     let art_lines: Vec<&str> = ART.lines().collect();
     // Auto-detect the logo width from the file, so agentron.txt can be swapped for
     // art of any size without touching this code.
-    let art_w = art_lines.iter().map(|l| l.chars().count()).max().unwrap_or(0);
+    let art_w = art_lines
+        .iter()
+        .map(|l| l.chars().count())
+        .max()
+        .unwrap_or(0);
     // Auto-detect the background glyph: the most common char overall (spaces
     // included). For solid-fill art it's `@`/`█`/`●`; for art already drawn on
     // spaces it's a space, so nothing gets erased. Either way the shape survives.
@@ -117,7 +146,11 @@ pub fn print_startup(config: &Config) {
             .collect();
         let cell = format!("{cell:<art_w$}");
         out.push_str("  ");
-        out.push_str(&if color { format!("\x1b[{ORANGE}m{cell}\x1b[0m") } else { cell });
+        out.push_str(&if color {
+            format!("\x1b[{ORANGE}m{cell}\x1b[0m")
+        } else {
+            cell
+        });
         out.push_str("  ");
         if i >= offset && i - offset < rows.len() {
             let (label, value) = &rows[i - offset];

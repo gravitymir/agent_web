@@ -22,7 +22,11 @@ pub struct ApiError {
 
 impl ApiError {
     fn network(message: String) -> Self {
-        Self { status: None, retry_after: None, message }
+        Self {
+            status: None,
+            retry_after: None,
+            message,
+        }
     }
 
     /// Worth retrying? Rate limit (429), overloaded (529), transient 5xx, request
@@ -105,7 +109,12 @@ pub async fn response_to_sse_events(
             .and_then(|v| v.to_str().ok())
             .and_then(|s| s.trim().parse::<u64>().ok());
         let text = resp.text().await.unwrap_or_default();
-        return Err(ApiError { status: Some(status.as_u16()), retry_after, message: text }.into());
+        return Err(ApiError {
+            status: Some(status.as_u16()),
+            retry_after,
+            message: text,
+        }
+        .into());
     }
 
     // Abort the underlying HTTP body when the user hits stop. `bytes_stream()`

@@ -19,11 +19,11 @@ use std::time::{Duration, Instant};
 
 use anyhow::Result;
 use serde::{Deserialize, Serialize};
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::sync::{broadcast, mpsc};
 
-use crate::claude::{spawn_claude, Spawned};
+use crate::claude::{Spawned, spawn_claude};
 use crate::config::Config;
 use crate::titles::MetaStore;
 
@@ -41,7 +41,11 @@ pub struct ImageData {
 
 /// Commands sent to a keeper's actor task.
 enum Cmd {
-    User { text: String, images: Vec<ImageData>, caps: crate::agent::tools::Caps },
+    User {
+        text: String,
+        images: Vec<ImageData>,
+        caps: crate::agent::tools::Caps,
+    },
     Interrupt,
     /// The user's decision on a pending `control_request` from the CLI — either
     /// a plain tool-approval Allow/Deny, or an `AskUserQuestion` answer (see
@@ -110,7 +114,13 @@ impl SessionKeeper {
     ) {
         let _ = self
             .cmd_tx
-            .send(Cmd::PermissionResponse { request_id, allow, answers, response, message })
+            .send(Cmd::PermissionResponse {
+                request_id,
+                allow,
+                answers,
+                response,
+                message,
+            })
             .await;
     }
 
@@ -222,9 +232,10 @@ impl SessionManager {
         // Reuse a live keeper for this id if one exists.
         if let Some(id) = session_id.as_deref()
             && let Some(k) = map.get(id)
-                && !k.is_finished() {
-                    return Ok(k.clone());
-                }
+            && !k.is_finished()
+        {
+            return Ok(k.clone());
+        }
 
         // Otherwise spawn one — still under the lock, so a concurrent request for
         // the same id waits here and then takes this keeper instead of spawning a
@@ -289,8 +300,12 @@ impl SessionManager {
         resume: bool,
         model: Option<String>,
     ) -> Result<Arc<SessionKeeper>> {
-        let Spawned { child, stdin, stdout, session_id: id } =
-            spawn_claude(&self.config, session_id, resume, model)?;
+        let Spawned {
+            child,
+            stdin,
+            stdout,
+            session_id: id,
+        } = spawn_claude(&self.config, session_id, resume, model)?;
         let (cmd_tx, cmd_rx) = mpsc::channel::<Cmd>(64);
         let (events, _) = broadcast::channel::<String>(BROADCAST_CAP);
         let scrollback = Arc::new(Mutex::new(VecDeque::new()));
@@ -365,7 +380,11 @@ impl SessionManager {
 
 /// Append a line to the scrollback and broadcast it. Sending under the
 /// scrollback lock keeps [`SessionKeeper::subscribe`] exactly-once.
-fn emit(scrollback: &Arc<Mutex<VecDeque<String>>>, events: &broadcast::Sender<String>, line: String) {
+fn emit(
+    scrollback: &Arc<Mutex<VecDeque<String>>>,
+    events: &broadcast::Sender<String>,
+    line: String,
+) {
     let mut sb = scrollback.lock().unwrap();
     sb.push_back(line.clone());
     while sb.len() > SCROLLBACK_MAX {
@@ -397,7 +416,11 @@ fn parse_control_request(line: &str) -> Option<ControlRequest> {
     }
     let tool_name = request.get("tool_name")?.as_str()?.to_string();
     let input = request.get("input").cloned().unwrap_or_else(|| json!({}));
-    Some(ControlRequest { request_id, tool_name, input })
+    Some(ControlRequest {
+        request_id,
+        tool_name,
+        input,
+    })
 }
 
 /// If `line` is a `{"type":"result", "duration_ms":...}` frame — the one
@@ -429,12 +452,15 @@ impl TurnTracker {
         if !is_assistant && !is_result {
             return;
         }
-        let Ok(v) = serde_json::from_str::<Value>(line) else { return };
+        let Ok(v) = serde_json::from_str::<Value>(line) else {
+            return;
+        };
         if is_assistant {
             if let Some(m) = v.pointer("/message/model").and_then(Value::as_str)
-                && !m.is_empty() {
-                    self.model = m.to_string();
-                }
+                && !m.is_empty()
+            {
+                self.model = m.to_string();
+            }
             return;
         }
         // result event:
@@ -445,8 +471,14 @@ impl TurnTracker {
             .filter(|s| !s.is_empty())
             .map(str::to_string)
             .unwrap_or_else(|| self.model.clone());
-        let input = v.pointer("/usage/input_tokens").and_then(Value::as_u64).unwrap_or(0);
-        let output = v.pointer("/usage/output_tokens").and_then(Value::as_u64).unwrap_or(0);
+        let input = v
+            .pointer("/usage/input_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
+        let output = v
+            .pointer("/usage/output_tokens")
+            .and_then(Value::as_u64)
+            .unwrap_or(0);
         if let Ok(mut m) = meta.lock() {
             let _ = m.record_turn(session_id, &model, input, output, ms);
         }
@@ -689,9 +721,7 @@ async fn run_native_actor(
     while let Some(cmd) = cmd_rx.recv().await {
         match cmd {
             Cmd::User { text, images, caps } => {
-                emitter.line(
-                    json!({ "cwi": "user", "text": text, "images": images }).to_string(),
-                );
+                emitter.line(json!({ "cwi": "user", "text": text, "images": images }).to_string());
                 interrupt.store(false, Ordering::SeqCst);
                 busy.store(true, Ordering::Release); // a turn is now in flight
                 tracing::info!(session = %session_id, "agent thinking");
@@ -719,7 +749,7 @@ async fn run_native_actor(
                     }
                 }
             }
-            Cmd::Interrupt => {} // nothing running
+            Cmd::Interrupt => {}                 // nothing running
             Cmd::PermissionResponse { .. } => {} // nothing running; see above
         }
     }
@@ -809,7 +839,10 @@ mod turn_duration_tests {
         let line = r#"{"type":"result","duration_ms":1500,"num_turns":3}"#;
         t.observe(line, "sess-1", &meta);
         t.observe(line, "sess-1", &meta);
-        assert_eq!(meta.lock().unwrap().get("sess-1").unwrap().duration_ms, 3000);
+        assert_eq!(
+            meta.lock().unwrap().get("sess-1").unwrap().duration_ms,
+            3000
+        );
     }
 
     #[test]
@@ -834,17 +867,28 @@ mod turn_duration_tests {
         );
         // CLI-style: the model comes from the preceding assistant event; the
         // result carries only stats. Simulates switching models mid-chat.
-        t.observe(r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#, "s", &meta);
+        t.observe(
+            r#"{"type":"assistant","message":{"model":"claude-opus-4-8"}}"#,
+            "s",
+            &meta,
+        );
         t.observe(
             r#"{"type":"result","usage":{"input_tokens":10,"output_tokens":5},"duration_ms":3000}"#,
-            "s", &meta,
+            "s",
+            &meta,
         );
         let m = meta.lock().unwrap();
         let e = m.get("s").unwrap();
         assert_eq!(e.duration_ms, 8000); // total across both models
         let g = e.models.get("gemini / gemini-pro-latest").unwrap();
-        assert_eq!((g.input_tokens, g.output_tokens, g.duration_ms), (100, 20, 5000));
+        assert_eq!(
+            (g.input_tokens, g.output_tokens, g.duration_ms),
+            (100, 20, 5000)
+        );
         let c = e.models.get("claude-opus-4-8").unwrap();
-        assert_eq!((c.input_tokens, c.output_tokens, c.duration_ms), (10, 5, 3000));
+        assert_eq!(
+            (c.input_tokens, c.output_tokens, c.duration_ms),
+            (10, 5, 3000)
+        );
     }
 }

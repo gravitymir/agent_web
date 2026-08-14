@@ -18,22 +18,22 @@ use std::sync::Arc;
 
 use axum::{
     body::{Body, Bytes},
-    http::{header, HeaderMap, StatusCode},
-    response::{IntoResponse, Response},
     extract::State,
+    http::{HeaderMap, StatusCode, header},
+    response::{IntoResponse, Response},
 };
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
+use crate::AppState;
 use crate::agent::provider::{Auth, Provider};
 use crate::auth::{now, sha256_hex, write_private};
-use crate::AppState;
 
 #[derive(Clone, Serialize, Deserialize)]
 struct BrokerToken {
-    hash: String,  // hex(sha256(token)) — never the token itself
+    hash: String, // hex(sha256(token)) — never the token itself
     label: String,
-    expires: u64,  // unix seconds
+    expires: u64, // unix seconds
     #[serde(default)]
     max_requests: u64, // 0 = unlimited
     #[serde(default)]
@@ -46,7 +46,9 @@ pub struct Broker {
 
 impl Broker {
     pub fn load() -> Self {
-        Self { store: crate::config::claude_config_dir().join("broker_tokens.json") }
+        Self {
+            store: crate::config::claude_config_dir().join("broker_tokens.json"),
+        }
     }
 
     fn load_tokens(&self) -> Vec<BrokerToken> {
@@ -84,7 +86,10 @@ impl Broker {
 
     fn active(&self) -> Vec<BrokerToken> {
         let n = now();
-        self.load_tokens().into_iter().filter(|t| t.expires > n).collect()
+        self.load_tokens()
+            .into_iter()
+            .filter(|t| t.expires > n)
+            .collect()
     }
 
     pub fn revoke(&self, label: &str) -> usize {
@@ -107,7 +112,10 @@ impl Broker {
             return Err((StatusCode::UNAUTHORIZED, "broker token expired"));
         }
         if t.max_requests != 0 && t.used >= t.max_requests {
-            return Err((StatusCode::PAYMENT_REQUIRED, "broker token budget exhausted"));
+            return Err((
+                StatusCode::PAYMENT_REQUIRED,
+                "broker token budget exhausted",
+            ));
         }
         t.used += 1;
         self.save_tokens(&toks);
@@ -140,7 +148,10 @@ pub async fn messages(
 
     let provider = Provider::from_env();
     if !provider.has_key() {
-        return (StatusCode::INTERNAL_SERVER_ERROR, "broker: no upstream provider key configured")
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "broker: no upstream provider key configured",
+        )
             .into_response();
     }
 
@@ -186,7 +197,11 @@ pub async fn messages(
                 .body(Body::from_stream(resp.bytes_stream()))
                 .unwrap_or_else(|_| StatusCode::BAD_GATEWAY.into_response())
         }
-        Err(e) => (StatusCode::BAD_GATEWAY, format!("broker upstream error: {e}")).into_response(),
+        Err(e) => (
+            StatusCode::BAD_GATEWAY,
+            format!("broker upstream error: {e}"),
+        )
+            .into_response(),
     }
 }
 
@@ -195,7 +210,10 @@ pub async fn messages(
 // ---------------------------------------------------------------------------
 
 fn arg_val(args: &[String], flag: &str) -> Option<String> {
-    args.iter().position(|a| a == flag).and_then(|i| args.get(i + 1)).cloned()
+    args.iter()
+        .position(|a| a == flag)
+        .and_then(|i| args.get(i + 1))
+        .cloned()
 }
 
 /// Parse a TTL like `30m`, `24h`, `7d` (bare number = seconds). Default on error.
@@ -234,7 +252,11 @@ pub fn run_cli(args: &[String]) {
             println!(
                 "\nLabel: {label}   valid: {}   budget: {}",
                 arg_val(args, "--ttl").unwrap_or_else(|| "24h".into()),
-                if budget == 0 { "unlimited".into() } else { format!("{budget} requests") }
+                if budget == 0 {
+                    "unlimited".into()
+                } else {
+                    format!("{budget} requests")
+                }
             );
         }
         Some("list") => {
@@ -261,6 +283,8 @@ pub fn run_cli(args: &[String]) {
             }
             None => eprintln!("usage: agent_web broker revoke <label>"),
         },
-        _ => eprintln!("usage: agent_web broker <new [--label L] [--ttl 24h] [--budget N] | list | revoke <label>>"),
+        _ => eprintln!(
+            "usage: agent_web broker <new [--label L] [--ttl 24h] [--budget N] | list | revoke <label>>"
+        ),
     }
 }

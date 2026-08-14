@@ -14,7 +14,7 @@
 
 use std::io::{BufRead, Write};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::executor;
 
@@ -79,7 +79,11 @@ fn audit(tool: &str, detail: &str, exit: i32) {
     let path = crate::config::claude_config_dir().join("mcp_guest_audit.log");
     let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
     let line = format!("{ts}\t{tool}\texit={exit}\t{detail}\n");
-    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+    if let Ok(mut f) = std::fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&path)
+    {
         let _ = f.write_all(line.as_bytes());
     }
 }
@@ -127,10 +131,15 @@ fn tool_defs() -> Value {
 fn handle_call(req: &Value) -> Value {
     let params = &req["params"];
     let name = params.get("name").and_then(Value::as_str).unwrap_or("");
-    let args = params.get("arguments").cloned().unwrap_or_else(|| json!({}));
+    let args = params
+        .get("arguments")
+        .cloned()
+        .unwrap_or_else(|| json!({}));
 
     if !executor::running() {
-        return err_result("guest VM is not running — start the executor before using sandbox tools");
+        return err_result(
+            "guest VM is not running — start the executor before using sandbox tools",
+        );
     }
 
     match name {
@@ -163,7 +172,8 @@ fn handle_call(req: &Value) -> Value {
             let Some(path) = args.get("path").and_then(Value::as_str) else {
                 return err_result("read_file: 'path' is required");
             };
-            let (code, out, err) = executor::ssh_capture(&format!("cat -- {}", sh(&resolve(path))), None);
+            let (code, out, err) =
+                executor::ssh_capture(&format!("cat -- {}", sh(&resolve(path))), None);
             audit("read_file", &resolve(path), code);
             if code != 0 {
                 return err_result(&format!("read_file failed: {}", err.trim()));
@@ -179,7 +189,11 @@ fn handle_call(req: &Value) -> Value {
             let q = sh(&p);
             let remote = format!("mkdir -p \"$(dirname -- {q})\" && cat > {q}");
             let (code, _out, err) = executor::ssh_capture(&remote, Some(content.as_bytes()));
-            audit("write_file", &format!("{p} ({} bytes)", content.len()), code);
+            audit(
+                "write_file",
+                &format!("{p} ({} bytes)", content.len()),
+                code,
+            );
             if code != 0 {
                 return err_result(&format!("write_file failed: {}", err.trim()));
             }

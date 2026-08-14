@@ -4,7 +4,11 @@ use std::path::Path;
 
 pub fn system_prompt(workspace: &Path) -> String {
     let os = std::env::consts::OS;
-    let shell = if cfg!(windows) { "PowerShell" } else { "sh (POSIX shell)" };
+    let shell = if cfg!(windows) {
+        "PowerShell"
+    } else {
+        "sh (POSIX shell)"
+    };
     format!(
         r#"You are a coding agent operating inside a user's project. You help with software
 engineering tasks by reading and editing files and running shell commands.

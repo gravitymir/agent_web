@@ -30,9 +30,9 @@
 use std::sync::atomic::AtomicBool;
 
 use anyhow::Result;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
-use crate::agent::client::{response_to_sse_events, ApiError};
+use crate::agent::client::{ApiError, response_to_sse_events};
 use crate::agent::provider::Provider;
 
 /// POST `:streamGenerateContent` and replay it as synthetic Anthropic stream
@@ -84,23 +84,41 @@ pub async fn stream(
 // Request building: our stored Anthropic-shaped messages/tools → Gemini's body
 // ---------------------------------------------------------------------------
 
-fn build_body(messages: &[Value], tools: &[Value], system: &str, max_tokens: u32, thinking: bool) -> Value {
+fn build_body(
+    messages: &[Value],
+    tools: &[Value],
+    system: &str,
+    max_tokens: u32,
+    thinking: bool,
+) -> Value {
     // tool_use.id -> name, so a later tool_result (which only carries the id)
     // can be translated into Gemini's name-keyed functionResponse.
-    let mut call_names: std::collections::HashMap<String, String> = std::collections::HashMap::new();
+    let mut call_names: std::collections::HashMap<String, String> =
+        std::collections::HashMap::new();
     for m in messages {
         if let Some(arr) = m.get("content").and_then(Value::as_array) {
             for b in arr {
                 if b.get("type").and_then(Value::as_str) == Some("tool_use") {
-                    let id = b.get("id").and_then(Value::as_str).unwrap_or_default().to_string();
-                    let name = b.get("name").and_then(Value::as_str).unwrap_or_default().to_string();
+                    let id = b
+                        .get("id")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
+                    let name = b
+                        .get("name")
+                        .and_then(Value::as_str)
+                        .unwrap_or_default()
+                        .to_string();
                     call_names.insert(id, name);
                 }
             }
         }
     }
 
-    let contents: Vec<Value> = messages.iter().map(|m| to_gemini_content(m, &call_names)).collect();
+    let contents: Vec<Value> = messages
+        .iter()
+        .map(|m| to_gemini_content(m, &call_names))
+        .collect();
 
     let mut body = json!({
         "contents": contents,
@@ -118,19 +136,31 @@ fn build_body(messages: &[Value], tools: &[Value], system: &str, max_tokens: u32
 
 /// One stored `{role, content}` message -> Gemini's `{role, parts}`.
 fn to_gemini_content(m: &Value, call_names: &std::collections::HashMap<String, String>) -> Value {
-    let role = if m.get("role").and_then(Value::as_str) == Some("assistant") { "model" } else { "user" };
+    let role = if m.get("role").and_then(Value::as_str) == Some("assistant") {
+        "model"
+    } else {
+        "user"
+    };
     let content = &m["content"];
     let parts: Vec<Value> = match content {
         Value::String(s) => vec![json!({ "text": s })],
-        Value::Array(blocks) => blocks.iter().filter_map(|b| to_gemini_part(b, call_names)).collect(),
+        Value::Array(blocks) => blocks
+            .iter()
+            .filter_map(|b| to_gemini_part(b, call_names))
+            .collect(),
         _ => vec![],
     };
     json!({ "role": role, "parts": parts })
 }
 
-fn to_gemini_part(b: &Value, call_names: &std::collections::HashMap<String, String>) -> Option<Value> {
+fn to_gemini_part(
+    b: &Value,
+    call_names: &std::collections::HashMap<String, String>,
+) -> Option<Value> {
     match b.get("type").and_then(Value::as_str) {
-        Some("text") => Some(json!({ "text": b.get("text").and_then(Value::as_str).unwrap_or("") })),
+        Some("text") => {
+            Some(json!({ "text": b.get("text").and_then(Value::as_str).unwrap_or("") }))
+        }
         Some("image") => {
             let src = b.get("source")?;
             Some(json!({
@@ -155,11 +185,21 @@ fn to_gemini_part(b: &Value, call_names: &std::collections::HashMap<String, Stri
             Some(part)
         }
         Some("tool_result") => {
-            let id = b.get("tool_use_id").and_then(Value::as_str).unwrap_or_default();
-            let name = call_names.get(id).cloned().unwrap_or_else(|| "unknown".to_string());
+            let id = b
+                .get("tool_use_id")
+                .and_then(Value::as_str)
+                .unwrap_or_default();
+            let name = call_names
+                .get(id)
+                .cloned()
+                .unwrap_or_else(|| "unknown".to_string());
             let content = b.get("content").and_then(Value::as_str).unwrap_or_default();
             let is_error = b.get("is_error").and_then(Value::as_bool).unwrap_or(false);
-            let response = if is_error { json!({ "error": content }) } else { json!({ "result": content }) };
+            let response = if is_error {
+                json!({ "error": content })
+            } else {
+                json!({ "result": content })
+            };
             Some(json!({ "functionResponse": { "name": name, "response": response } }))
         }
         _ => None,
@@ -193,23 +233,43 @@ struct Translator {
 impl Translator {
     fn on_chunk(&mut self, chunk: &Value, emit: &mut impl FnMut(Value)) {
         if let Some(u) = chunk.get("usageMetadata") {
-            let candidates = u.get("candidatesTokenCount").and_then(Value::as_u64).unwrap_or(0);
-            let thoughts = u.get("thoughtsTokenCount").and_then(Value::as_u64).unwrap_or(0);
+            let candidates = u
+                .get("candidatesTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let thoughts = u
+                .get("thoughtsTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             self.output_tokens = candidates + thoughts; // output_tokens includes thinking, like Anthropic's
             // Split the prompt into cached vs not, matching Anthropic's shape so
             // input + cache_read == the full context size (no double counting).
-            let prompt = u.get("promptTokenCount").and_then(Value::as_u64).unwrap_or(0);
-            let cached = u.get("cachedContentTokenCount").and_then(Value::as_u64).unwrap_or(0);
+            let prompt = u
+                .get("promptTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
+            let cached = u
+                .get("cachedContentTokenCount")
+                .and_then(Value::as_u64)
+                .unwrap_or(0);
             self.cache_read = cached;
             self.input_tokens = prompt.saturating_sub(cached);
         }
-        let Some(candidate) = chunk.get("candidates").and_then(Value::as_array).and_then(|a| a.first()) else {
+        let Some(candidate) = chunk
+            .get("candidates")
+            .and_then(Value::as_array)
+            .and_then(|a| a.first())
+        else {
             return;
         };
         if let Some(fr) = candidate.get("finishReason").and_then(Value::as_str) {
             self.finish_reason = Some(fr.to_string());
         }
-        let Some(parts) = candidate.get("content").and_then(|c| c.get("parts")).and_then(Value::as_array) else {
+        let Some(parts) = candidate
+            .get("content")
+            .and_then(|c| c.get("parts"))
+            .and_then(Value::as_array)
+        else {
             return;
         };
         for part in parts {
@@ -222,7 +282,11 @@ impl Translator {
         if let Some(call) = part.get("functionCall") {
             self.index += 1;
             let idx = self.index;
-            let name = call.get("name").and_then(Value::as_str).unwrap_or("").to_string();
+            let name = call
+                .get("name")
+                .and_then(Value::as_str)
+                .unwrap_or("")
+                .to_string();
             let args = call.get("args").cloned().unwrap_or_else(|| json!({}));
             // Gemini 3 attaches a `thoughtSignature` (base64 crypto-signature of the
             // reasoning) to the function-call part. It MUST be echoed back verbatim
@@ -246,15 +310,19 @@ impl Translator {
 
         // Thinking: either a dedicated `thought` string field, or a `text` part
         // flagged `"thought": true` — different sources describe each; accept both.
-        let (kind, text): (&'static str, &str) = if let Some(t) = part.get("thought").and_then(Value::as_str) {
-            ("thinking", t)
-        } else if part.get("thought").and_then(Value::as_bool) == Some(true) {
-            ("thinking", part.get("text").and_then(Value::as_str).unwrap_or(""))
-        } else if let Some(t) = part.get("text").and_then(Value::as_str) {
-            ("text", t)
-        } else {
-            return; // unrecognized part kind (e.g. an inline image in the reply) — skip
-        };
+        let (kind, text): (&'static str, &str) =
+            if let Some(t) = part.get("thought").and_then(Value::as_str) {
+                ("thinking", t)
+            } else if part.get("thought").and_then(Value::as_bool) == Some(true) {
+                (
+                    "thinking",
+                    part.get("text").and_then(Value::as_str).unwrap_or(""),
+                )
+            } else if let Some(t) = part.get("text").and_then(Value::as_str) {
+                ("text", t)
+            } else {
+                return; // unrecognized part kind (e.g. an inline image in the reply) — skip
+            };
         if text.is_empty() && self.current_kind == Some(kind) {
             return; // nothing new to append
         }
@@ -301,7 +369,11 @@ impl ApiError {
     /// constructor — a network-layer failure (DNS/TLS/timeout), same as
     /// `client::stream`'s.
     fn network_for_gemini(message: String) -> Self {
-        ApiError { status: None, retry_after: None, message }
+        ApiError {
+            status: None,
+            retry_after: None,
+            message,
+        }
     }
 }
 
@@ -327,15 +399,22 @@ mod tests {
         assert_eq!(contents[0]["parts"][0]["text"], "hi");
         assert_eq!(contents[1]["role"], "model");
         assert_eq!(contents[1]["parts"][1]["functionCall"]["name"], "Read");
-        assert_eq!(contents[1]["parts"][1]["functionCall"]["args"]["file_path"], "a.rs");
+        assert_eq!(
+            contents[1]["parts"][1]["functionCall"]["args"]["file_path"],
+            "a.rs"
+        );
         // The tool_result's name is looked up from the matching tool_use id.
         assert_eq!(contents[2]["parts"][0]["functionResponse"]["name"], "Read");
-        assert_eq!(contents[2]["parts"][0]["functionResponse"]["response"]["result"], "file contents");
+        assert_eq!(
+            contents[2]["parts"][0]["functionResponse"]["response"]["result"],
+            "file contents"
+        );
     }
 
     #[test]
     fn function_declaration_renames_input_schema_to_parameters() {
-        let tool = json!({"name":"Read","description":"reads a file","input_schema":{"type":"object"}});
+        let tool =
+            json!({"name":"Read","description":"reads a file","input_schema":{"type":"object"}});
         let decl = to_function_declaration(&tool);
         assert_eq!(decl["name"], "Read");
         assert_eq!(decl["parameters"]["type"], "object");
@@ -363,7 +442,10 @@ mod tests {
         assert_eq!(events[1]["delta"]["text"], "looking into it");
         assert_eq!(events[2]["content_block"]["type"], "tool_use");
         assert_eq!(events[2]["content_block"]["name"], "Read");
-        assert_eq!(events[3]["delta"]["partial_json"], json!({"file_path":"a.rs"}).to_string());
+        assert_eq!(
+            events[3]["delta"]["partial_json"],
+            json!({"file_path":"a.rs"}).to_string()
+        );
         let last = events.last().unwrap();
         assert_eq!(last["type"], "message_delta");
         assert_eq!(last["usage"]["output_tokens"], 15);
@@ -373,13 +455,19 @@ mod tests {
     fn translator_recognizes_both_thought_conventions() {
         let mut events = Vec::new();
         let mut xlate = Translator::default();
-        xlate.on_chunk(&json!({"candidates":[{"content":{"parts":[{"thought":"hmm, let me think"}]}}]}), &mut |v| events.push(v));
+        xlate.on_chunk(
+            &json!({"candidates":[{"content":{"parts":[{"thought":"hmm, let me think"}]}}]}),
+            &mut |v| events.push(v),
+        );
         assert_eq!(events[0]["content_block"]["type"], "thinking");
         assert_eq!(events[1]["delta"]["thinking"], "hmm, let me think");
 
         let mut events2 = Vec::new();
         let mut xlate2 = Translator::default();
-        xlate2.on_chunk(&json!({"candidates":[{"content":{"parts":[{"text":"pondering","thought":true}]}}]}), &mut |v| events2.push(v));
+        xlate2.on_chunk(
+            &json!({"candidates":[{"content":{"parts":[{"text":"pondering","thought":true}]}}]}),
+            &mut |v| events2.push(v),
+        );
         assert_eq!(events2[0]["content_block"]["type"], "thinking");
         assert_eq!(events2[1]["delta"]["thinking"], "pondering");
     }

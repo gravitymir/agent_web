@@ -40,8 +40,14 @@ fn allow(key: String, max: usize, window: Duration) -> bool {
 
     // Periodic prune: `pop_front` only trims within a live key, so a key that's
     // never hit again would linger forever. Drop keys whose newest hit is stale.
-    if CALLS.fetch_add(1, Ordering::Relaxed).is_multiple_of(SWEEP_EVERY) {
-        map.retain(|_, hits| hits.back().is_some_and(|&last| now.duration_since(last) < STALE));
+    if CALLS
+        .fetch_add(1, Ordering::Relaxed)
+        .is_multiple_of(SWEEP_EVERY)
+    {
+        map.retain(|_, hits| {
+            hits.back()
+                .is_some_and(|&last| now.duration_since(last) < STALE)
+        });
     }
 
     let hits = map.entry(key).or_default();
@@ -84,7 +90,11 @@ pub async fn limit(req: Request, next: Next) -> Response {
     };
     let key = format!("{bucket}:{}", client_id(req.headers()));
     if !allow(key, max, window) {
-        return (StatusCode::TOO_MANY_REQUESTS, "rate limit exceeded — slow down").into_response();
+        return (
+            StatusCode::TOO_MANY_REQUESTS,
+            "rate limit exceeded — slow down",
+        )
+            .into_response();
     }
     next.run(req).await
 }

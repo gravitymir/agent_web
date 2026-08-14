@@ -10,7 +10,7 @@ use std::sync::LazyLock;
 use std::time::Duration;
 
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::AsyncReadExt;
 
 /// Shared HTTP client for the web tools — reused across calls so TLS connections
@@ -41,7 +41,13 @@ pub struct Caps {
 
 impl Default for Caps {
     fn default() -> Self {
-        Self { read: true, modify: true, run: true, web_fetch: true, web_search: true }
+        Self {
+            read: true,
+            modify: true,
+            run: true,
+            web_fetch: true,
+            web_search: true,
+        }
     }
 }
 
@@ -77,10 +83,16 @@ pub struct ToolOutput {
 
 impl ToolOutput {
     fn ok(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: false }
+        Self {
+            content: content.into(),
+            is_error: false,
+        }
     }
     fn err(content: impl Into<String>) -> Self {
-        Self { content: content.into(), is_error: true }
+        Self {
+            content: content.into(),
+            is_error: true,
+        }
     }
 }
 
@@ -90,7 +102,11 @@ impl ToolOutput {
 pub fn schemas(caps: &Caps) -> Vec<Value> {
     all_schemas()
         .into_iter()
-        .filter(|t| t.get("name").and_then(Value::as_str).is_some_and(|n| caps.allows(n)))
+        .filter(|t| {
+            t.get("name")
+                .and_then(Value::as_str)
+                .is_some_and(|n| caps.allows(n))
+        })
         .collect()
 }
 
@@ -286,7 +302,7 @@ fn truncate(mut s: String) -> String {
 
 #[cfg(test)]
 mod truncate_tests {
-    use super::{truncate, MAX_OUTPUT};
+    use super::{MAX_OUTPUT, truncate};
 
     #[test]
     fn does_not_panic_on_multibyte_boundary() {
@@ -365,7 +381,10 @@ mod resolve_tests {
 
     #[test]
     fn normalize_collapses_dotdot() {
-        assert_eq!(normalize(Path::new("a/b/../c")), PathBuf::from("a").join("c"));
+        assert_eq!(
+            normalize(Path::new("a/b/../c")),
+            PathBuf::from("a").join("c")
+        );
     }
 
     #[cfg(windows)]
@@ -401,7 +420,10 @@ async fn bash(input: &Value, workspace: &Path) -> ToolOutput {
 
     let mut cmd = if cfg!(windows) {
         let mut c = tokio::process::Command::new("powershell");
-        c.arg("-NoProfile").arg("-NonInteractive").arg("-Command").arg(command);
+        c.arg("-NoProfile")
+            .arg("-NonInteractive")
+            .arg("-Command")
+            .arg(command);
         c
     } else {
         let mut c = tokio::process::Command::new("sh");
@@ -462,7 +484,10 @@ async fn bash(input: &Value, workspace: &Path) -> ToolOutput {
                 combined = format!("(no output, exit code {})", status.code().unwrap_or(-1));
             }
             let is_error = !status.success();
-            ToolOutput { content: truncate(combined), is_error }
+            ToolOutput {
+                content: truncate(combined),
+                is_error,
+            }
         }
         Ok((_, _, Err(e))) => ToolOutput::err(format!("Bash: {e}")),
         Err(_) => {
@@ -518,7 +543,11 @@ fn read(input: &Value, workspace: &Path) -> ToolOutput {
         Ok(c) => c,
         Err(e) => return ToolOutput::err(format!("Read: {e}")),
     };
-    let offset = input.get("offset").and_then(Value::as_u64).unwrap_or(1).max(1) as usize;
+    let offset = input
+        .get("offset")
+        .and_then(Value::as_u64)
+        .unwrap_or(1)
+        .max(1) as usize;
     let limit = input
         .get("limit")
         .and_then(Value::as_u64)
@@ -576,7 +605,10 @@ fn edit(input: &Value, workspace: &Path) -> ToolOutput {
         None => return ToolOutput::err("Edit: missing 'old_string'"),
     };
     let new = str_field(input, "new_string").unwrap_or("");
-    let replace_all = input.get("replace_all").and_then(Value::as_bool).unwrap_or(false);
+    let replace_all = input
+        .get("replace_all")
+        .and_then(Value::as_bool)
+        .unwrap_or(false);
     let abs = match resolve(workspace, path) {
         Ok(a) => a,
         Err(e) => return ToolOutput::err(e),
@@ -640,7 +672,10 @@ fn glob_tool(input: &Value, workspace: &Path) -> ToolOutput {
                     .unwrap_or(std::time::UNIX_EPOCH);
                 // Show workspace-relative paths (also drops the Windows \\?\ prefix).
                 let rel = entry.strip_prefix(&ws_norm).unwrap_or(&entry);
-                let disp = rel.to_string_lossy().trim_start_matches(r"\\?\").to_string();
+                let disp = rel
+                    .to_string_lossy()
+                    .trim_start_matches(r"\\?\")
+                    .to_string();
                 matches.push((mtime, disp));
             }
         }
@@ -687,7 +722,10 @@ fn grep(input: &Value, workspace: &Path) -> ToolOutput {
         // Skip noisy directories.
         let path = entry.path();
         if path.components().any(|c| {
-            matches!(c.as_os_str().to_str(), Some(".git") | Some("target") | Some("node_modules"))
+            matches!(
+                c.as_os_str().to_str(),
+                Some(".git") | Some("target") | Some("node_modules")
+            )
         }) {
             continue;
         }
@@ -731,7 +769,9 @@ fn url_encode(s: &str) -> String {
     let mut out = String::new();
     for b in s.bytes() {
         match b {
-            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => out.push(b as char),
+            b'A'..=b'Z' | b'a'..=b'z' | b'0'..=b'9' | b'-' | b'_' | b'.' | b'~' => {
+                out.push(b as char)
+            }
             b' ' => out.push('+'),
             _ => out.push_str(&format!("%{b:02X}")),
         }
@@ -865,15 +905,14 @@ async fn web_fetch(input: &Value) -> ToolOutput {
         return ToolOutput::err("WebFetch: url has no host/port");
     };
     let host_for_resolve = host.clone();
-    let pinned = match tokio::task::spawn_blocking(move || {
-        resolve_public_addr(&host_for_resolve, port)
-    })
-    .await
-    {
-        Ok(Ok(addr)) => addr,
-        Ok(Err(reason)) => return ToolOutput::err(format!("WebFetch: {reason}")),
-        Err(e) => return ToolOutput::err(format!("WebFetch: resolver task failed: {e}")),
-    };
+    let pinned =
+        match tokio::task::spawn_blocking(move || resolve_public_addr(&host_for_resolve, port))
+            .await
+        {
+            Ok(Ok(addr)) => addr,
+            Ok(Err(reason)) => return ToolOutput::err(format!("WebFetch: {reason}")),
+            Err(e) => return ToolOutput::err(format!("WebFetch: resolver task failed: {e}")),
+        };
     let client = match reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
         .timeout(Duration::from_secs(30))
@@ -920,7 +959,8 @@ async fn web_search(input: &Value) -> ToolOutput {
 
     // Parse DuckDuckGo's HTML result list (best-effort). Compiled once.
     static LINK_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
-        regex::Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#).unwrap()
+        regex::Regex::new(r#"(?s)<a[^>]*class="result__a"[^>]*href="([^"]+)"[^>]*>(.*?)</a>"#)
+            .unwrap()
     });
     static SNIP_RE: LazyLock<regex::Regex> = LazyLock::new(|| {
         regex::Regex::new(r#"(?s)class="result__snippet"[^>]*>(.*?)</a>"#).unwrap()
@@ -987,13 +1027,22 @@ fn decode_component(s: &str) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{normalize, resolve, schemas, Caps};
+    use super::{Caps, normalize, resolve, schemas};
     use std::path::{Path, PathBuf};
 
     #[test]
     fn caps_default_enables_everything() {
         let c = Caps::default();
-        for t in ["Read", "Glob", "Grep", "Write", "Edit", "Bash", "WebFetch", "WebSearch"] {
+        for t in [
+            "Read",
+            "Glob",
+            "Grep",
+            "Write",
+            "Edit",
+            "Bash",
+            "WebFetch",
+            "WebSearch",
+        ] {
             assert!(c.allows(t), "{t} should be allowed by default");
         }
         assert!(c.allows("mcp__srv__tool")); // MCP tools are never gated here
@@ -1001,7 +1050,11 @@ mod tests {
 
     #[test]
     fn caps_gate_groups() {
-        let c = Caps { modify: false, run: false, ..Default::default() };
+        let c = Caps {
+            modify: false,
+            run: false,
+            ..Default::default()
+        };
         assert!(!c.allows("Write"));
         assert!(!c.allows("Edit"));
         assert!(!c.allows("Bash"));
@@ -1017,13 +1070,23 @@ mod tests {
         // picking a clarifying question's answer can pick the wrong one, so it
         // always goes to the interactive permission card regardless of caps.
         assert!(!Caps::default().allows("AskUserQuestion"));
-        let c = Caps { read: false, modify: false, run: false, web_fetch: false, web_search: false };
+        let c = Caps {
+            read: false,
+            modify: false,
+            run: false,
+            web_fetch: false,
+            web_search: false,
+        };
         assert!(!c.allows("AskUserQuestion"));
     }
 
     #[test]
     fn schemas_filtered_by_caps() {
-        let c = Caps { run: false, web_search: false, ..Default::default() };
+        let c = Caps {
+            run: false,
+            web_search: false,
+            ..Default::default()
+        };
         let names: Vec<String> = schemas(&c)
             .iter()
             .filter_map(|t| t["name"].as_str().map(str::to_string))

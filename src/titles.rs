@@ -96,11 +96,7 @@ impl MetaStore {
         let title = title.trim().to_string();
         let icon = icon.and_then(|i| {
             let i = i.trim().to_string();
-            if i.is_empty() {
-                None
-            } else {
-                Some(i)
-            }
+            if i.is_empty() { None } else { Some(i) }
         });
         // Preserve the accumulated duration AND per-model breakdown — set() must
         // never drop stats just because the title/icon were cleared.
@@ -113,7 +109,15 @@ impl MetaStore {
         if title.is_empty() && icon.is_none() && duration_ms == 0 && models.is_empty() {
             self.map.remove(&id);
         } else {
-            self.map.insert(id, ChatMeta { title, icon, duration_ms, models });
+            self.map.insert(
+                id,
+                ChatMeta {
+                    title,
+                    icon,
+                    duration_ms,
+                    models,
+                },
+            );
         }
         self.save()
     }
@@ -187,7 +191,8 @@ mod tests {
     #[test]
     fn clearing_title_and_icon_keeps_accumulated_duration() {
         let mut m = temp_store("keeps_duration");
-        m.set("b".into(), "Some title".into(), Some("🚀".into())).unwrap();
+        m.set("b".into(), "Some title".into(), Some("🚀".into()))
+            .unwrap();
         m.record_turn("b", "", 0, 0, 5000).unwrap();
         // Clearing title/icon must not silently drop the Agentron total.
         m.set("b".into(), "".into(), None).unwrap();

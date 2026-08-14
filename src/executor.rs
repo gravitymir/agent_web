@@ -145,7 +145,11 @@ pub fn ssh_capture(remote_cmd: &str, stdin: Option<&[u8]>) -> (i32, String, Stri
     cmd.arg(SSH_PORT)
         .arg(format!("{SSH_USER}@127.0.0.1"))
         .arg(remote_cmd)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {
@@ -176,7 +180,11 @@ pub fn ssh_capture_raw(remote_cmd: &str, stdin: Option<&[u8]>) -> (i32, Vec<u8>,
     cmd.arg(SSH_PORT)
         .arg(format!("{SSH_USER}@127.0.0.1"))
         .arg(remote_cmd)
-        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdin(if stdin.is_some() {
+            Stdio::piped()
+        } else {
+            Stdio::null()
+        })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped());
     let mut child = match cmd.spawn() {

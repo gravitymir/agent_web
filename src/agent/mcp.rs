@@ -15,16 +15,16 @@
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::process::Stdio;
-use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
-use anyhow::{anyhow, Result};
+use anyhow::{Result, anyhow};
 use serde::Deserialize;
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::process::{Child, ChildStdin, ChildStdout};
-use tokio::sync::{oneshot, Mutex};
+use tokio::sync::{Mutex, oneshot};
 
 const CALL_TIMEOUT: Duration = Duration::from_secs(60);
 
@@ -73,7 +73,9 @@ impl McpClient {
         let cfg: Config = std::fs::read_to_string(config_path())
             .ok()
             .and_then(|s| serde_json::from_str(&s).ok())
-            .unwrap_or(Config { servers: HashMap::new() });
+            .unwrap_or(Config {
+                servers: HashMap::new(),
+            });
 
         let mut servers = Vec::new();
         for (name, sc) in cfg.servers {
@@ -136,7 +138,10 @@ impl McpClient {
         match tokio::time::timeout(CALL_TIMEOUT, rx).await {
             Ok(Ok(Ok(resp))) => {
                 let result = &resp["result"];
-                let is_error = result.get("isError").and_then(Value::as_bool).unwrap_or(false);
+                let is_error = result
+                    .get("isError")
+                    .and_then(Value::as_bool)
+                    .unwrap_or(false);
                 (extract_content(result), is_error)
             }
             Ok(Ok(Err(e))) => (format!("MCP call failed: {e}"), true),
@@ -188,7 +193,11 @@ async fn spawn_server(name: &str, sc: &ServerCfg) -> Result<Server> {
         }
     });
     init_request(&mut stdin, &mut reader, 1, init).await?;
-    write_line_raw(&mut stdin, &json!({"jsonrpc":"2.0","method":"notifications/initialized"})).await?;
+    write_line_raw(
+        &mut stdin,
+        &json!({"jsonrpc":"2.0","method":"notifications/initialized"}),
+    )
+    .await?;
     let list = init_request(
         &mut stdin,
         &mut reader,
@@ -196,7 +205,10 @@ async fn spawn_server(name: &str, sc: &ServerCfg) -> Result<Server> {
         json!({"jsonrpc":"2.0","id":2,"method":"tools/list"}),
     )
     .await?;
-    let tools = list["result"]["tools"].as_array().cloned().unwrap_or_default();
+    let tools = list["result"]["tools"]
+        .as_array()
+        .cloned()
+        .unwrap_or_default();
 
     // Hand the reader to a background demux task so subsequent calls pipeline.
     let pending: Pending = Arc::new(Mutex::new(HashMap::new()));
@@ -378,7 +390,11 @@ while True:
         ];
         let mut server = None;
         for (cmd, args) in candidates {
-            let sc = ServerCfg { command: cmd.into(), args, env: HashMap::new() };
+            let sc = ServerCfg {
+                command: cmd.into(),
+                args,
+                env: HashMap::new(),
+            };
             if let Ok(s) = spawn_server("mock", &sc).await {
                 server = Some(s);
                 break;
@@ -388,16 +404,21 @@ while True:
             eprintln!("skipping MCP pipelining test: no node/python available");
             return;
         };
-        let client = Arc::new(McpClient { servers: vec![server] });
+        let client = Arc::new(McpClient {
+            servers: vec![server],
+        });
 
         // Start a slow (1.5s) call in the background.
         let bg = client.clone();
-        let slow = tokio::spawn(async move { bg.call("mcp__mock__sleep", &json!({ "ms": 1500 })).await });
+        let slow =
+            tokio::spawn(async move { bg.call("mcp__mock__sleep", &json!({ "ms": 1500 })).await });
         tokio::time::sleep(Duration::from_millis(100)).await; // let it get in-flight
 
         // A fast call must return promptly rather than wait for the slow one.
         let t = Instant::now();
-        let (out, is_err) = client.call("mcp__mock__echo", &json!({ "text": "hi" })).await;
+        let (out, is_err) = client
+            .call("mcp__mock__echo", &json!({ "text": "hi" }))
+            .await;
         let elapsed = t.elapsed();
 
         assert!(!is_err, "fast call errored: {out}");

@@ -14,7 +14,7 @@ use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::{Duration, Instant};
 
-use serde_json::{json, Value};
+use serde_json::{Value, json};
 
 use crate::config::Config;
 
@@ -35,9 +35,10 @@ pub async fn usage_json(config: &Config) -> Value {
         // cache is harmless and better than taking down every /api/usage request.
         let guard = CACHE.lock().unwrap_or_else(|e| e.into_inner());
         if let Some((t, v)) = guard.as_ref()
-            && t.elapsed() < TTL {
-                return v.clone();
-            }
+            && t.elapsed() < TTL
+        {
+            return v.clone();
+        }
     }
     let v = fetch(config).await;
     *CACHE.lock().unwrap_or_else(|e| e.into_inner()) = Some((Instant::now(), v.clone()));
@@ -89,7 +90,10 @@ async fn fetch(config: &Config) -> Value {
 /// Parse a line like `Current session: 25% used · resets Aug 3, 1:19am (…)` into
 /// `(percent, Some("Aug 3, 1:19am (…)"))`.
 fn parse_line(text: &str, prefix: &str) -> Option<(u32, Option<String>)> {
-    let line = text.lines().map(str::trim).find(|l| l.starts_with(prefix))?;
+    let line = text
+        .lines()
+        .map(str::trim)
+        .find(|l| l.starts_with(prefix))?;
     let rest = line[prefix.len()..].trim();
     let percent: u32 = rest.split('%').next()?.trim().parse().ok()?;
     let resets = rest

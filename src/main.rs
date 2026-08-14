@@ -19,15 +19,15 @@ mod ws;
 use std::sync::{Arc, Mutex};
 
 use axum::{
+    Json, Router,
     extract::{Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
-    Json, Router,
 };
 use serde::Deserialize;
 use tower_http::{services::ServeDir, trace::TraceLayer};
-use tracing_subscriber::{layer::SubscriberExt, util::SubscriberInitExt, EnvFilter};
+use tracing_subscriber::{EnvFilter, layer::SubscriberExt, util::SubscriberInitExt};
 
 use crate::config::Config;
 use crate::session::SessionManager;
@@ -116,10 +116,11 @@ fn load_env_file() {
         Err(_) => {
             let mut v = vec![std::path::PathBuf::from(".env")];
             if let Ok(exe) = std::env::current_exe()
-                && let Some(dir) = exe.parent() {
-                    v.push(dir.join(".env"));
-                    v.push(dir.join("..").join("..").join(".env"));
-                }
+                && let Some(dir) = exe.parent()
+            {
+                v.push(dir.join(".env"));
+                v.push(dir.join("..").join("..").join(".env"));
+            }
             v
         }
     };
@@ -283,7 +284,10 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/providers", get(list_providers))
         .route("/api/usage", get(get_usage))
         .route("/api/links", get(auth::links_list).post(auth::links_create))
-        .route("/api/links/{label}", axum::routing::delete(auth::links_revoke))
+        .route(
+            "/api/links/{label}",
+            axum::routing::delete(auth::links_revoke),
+        )
         .route("/api/drain/begin", post(drain_begin))
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
@@ -292,7 +296,10 @@ async fn run() -> anyhow::Result<()> {
         .route("/login", get(auth::login_get).post(auth::login_post))
         .fallback_service(ServeDir::new(static_dir))
         // Access gate (no-op unless CWI_AUTH): guards every route above, incl. /ws.
-        .layer(axum::middleware::from_fn_with_state(state.clone(), auth::gate))
+        .layer(axum::middleware::from_fn_with_state(
+            state.clone(),
+            auth::gate,
+        ))
         .layer(axum::middleware::from_fn(add_security_headers))
         // Per-client HTTP rate limiting — outermost, so floods are rejected before
         // any work (incl. /login brute-force, which the gate wouldn't stop).
@@ -308,15 +315,15 @@ async fn run() -> anyhow::Result<()> {
     {
         let sessions = sessions.clone(); // the shutdown-cleanup handle (line above)
         tokio::spawn(async move {
-            let mut sig = match tokio::signal::unix::signal(
-                tokio::signal::unix::SignalKind::user_defined1(),
-            ) {
-                Ok(s) => s,
-                Err(e) => {
-                    tracing::warn!("could not install SIGUSR1 drain handler: {e}");
-                    return;
-                }
-            };
+            let mut sig =
+                match tokio::signal::unix::signal(tokio::signal::unix::SignalKind::user_defined1())
+                {
+                    Ok(s) => s,
+                    Err(e) => {
+                        tracing::warn!("could not install SIGUSR1 drain handler: {e}");
+                        return;
+                    }
+                };
             while sig.recv().await.is_some() {
                 sessions.set_draining(true);
                 tracing::info!(
@@ -344,7 +351,9 @@ async fn run() -> anyhow::Result<()> {
                 eprintln!("  Find what's using it:");
                 eprintln!("      netstat -ano | findstr :{port}");
                 eprintln!("  Stop it (PowerShell, one line):");
-                eprintln!("      Stop-Process -Id (Get-NetTCPConnection -LocalPort {port} -State Listen).OwningProcess -Force");
+                eprintln!(
+                    "      Stop-Process -Id (Get-NetTCPConnection -LocalPort {port} -State Listen).OwningProcess -Force"
+                );
             } else {
                 eprintln!("  Find what's using it:  ss -ltnp | grep :{port}");
                 eprintln!("  Stop it:               fuser -k {port}/tcp   (or: kill <PID>)");
@@ -372,8 +381,7 @@ async fn shutdown_signal() {
     };
     #[cfg(unix)]
     let terminate = async {
-        if let Ok(mut s) =
-            tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+        if let Ok(mut s) = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
         {
             s.recv().await;
         }
@@ -506,8 +514,11 @@ fn ensure_chat_exists(state: &AppState, id: &str) {
             if let Some(parent) = path.parent() {
                 let _ = std::fs::create_dir_all(parent);
             }
-            let _ = std::fs::write(&path,
-                serde_json::json!({"timestamp": chrono::Utc::now().to_rfc3339()}).to_string() + "\n");
+            let _ = std::fs::write(
+                &path,
+                serde_json::json!({"timestamp": chrono::Utc::now().to_rfc3339()}).to_string()
+                    + "\n",
+            );
         }
     }
 }
@@ -546,8 +557,7 @@ async fn load_chat(
     // Load from whichever store holds the chat, regardless of active engine —
     // frozen chats are still fully readable.
     let native_dir = agent::store::dir();
-    let messages = history::load_chat(
-        &state.config.session_dir(), Some(&native_dir), &id);
+    let messages = history::load_chat(&state.config.session_dir(), Some(&native_dir), &id);
     Json(messages).into_response()
 }
 
@@ -602,7 +612,9 @@ fn remove_if_present(path: &std::path::Path, id: &str) {
     match std::fs::remove_file(path) {
         Ok(()) => {}
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-        Err(e) => tracing::warn!(session = %id, "delete_chat: remove {} failed: {e}", path.display()),
+        Err(e) => {
+            tracing::warn!(session = %id, "delete_chat: remove {} failed: {e}", path.display())
+        }
     }
 }
 
@@ -634,19 +646,27 @@ fn origin_is_local(headers: &axum::http::HeaderMap) -> bool {
     let Some(origin) = headers.get(axum::http::header::ORIGIN) else {
         return true;
     };
-    let Ok(origin) = origin.to_str() else { return false };
+    let Ok(origin) = origin.to_str() else {
+        return false;
+    };
     // The authority ("host:port") of the Origin URL.
     let authority = match origin.split_once("://") {
         Some((_, rest)) => rest.split('/').next().unwrap_or(rest),
         None => return false,
     };
     // Same-origin: the Origin's authority equals the Host header we answered on.
-    if let Some(host) = headers.get(axum::http::header::HOST).and_then(|h| h.to_str().ok())
-        && authority.eq_ignore_ascii_case(host) {
-            return true;
-        }
+    if let Some(host) = headers
+        .get(axum::http::header::HOST)
+        .and_then(|h| h.to_str().ok())
+        && authority.eq_ignore_ascii_case(host)
+    {
+        return true;
+    }
     // Otherwise only a loopback host is allowed.
-    let host_only = authority.rsplit_once(':').map(|(h, _)| h).unwrap_or(authority);
+    let host_only = authority
+        .rsplit_once(':')
+        .map(|(h, _)| h)
+        .unwrap_or(authority);
     matches!(host_only, "localhost" | "127.0.0.1" | "::1" | "[::1]")
 }
 
@@ -706,10 +726,15 @@ async fn download_workspace(
             mcp_guest::sh(&id),
         );
         let fname = format!("workspace-{id}.tar.gz");
-        return match tokio::task::spawn_blocking(move || executor::ssh_capture_raw(&remote, None)).await {
+        return match tokio::task::spawn_blocking(move || executor::ssh_capture_raw(&remote, None))
+            .await
+        {
             Ok((0, bytes, _)) if !bytes.is_empty() => (
                 [
-                    (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+                    (
+                        axum::http::header::CONTENT_TYPE,
+                        "application/gzip".to_string(),
+                    ),
                     (
                         axum::http::header::CONTENT_DISPOSITION,
                         format!("attachment; filename=\"{fname}\""),
@@ -720,11 +745,19 @@ async fn download_workspace(
                 .into_response(),
             Ok((code, _, err)) => {
                 tracing::warn!("guest workspace tar failed (exit {code}): {}", err.trim());
-                (StatusCode::INTERNAL_SERVER_ERROR, "failed to archive guest workspace").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to archive guest workspace",
+                )
+                    .into_response()
             }
             Err(e) => {
                 tracing::warn!("guest workspace tar task panicked: {e}");
-                (StatusCode::INTERNAL_SERVER_ERROR, "failed to archive guest workspace").into_response()
+                (
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "failed to archive guest workspace",
+                )
+                    .into_response()
             }
         };
     }
@@ -744,11 +777,19 @@ async fn download_workspace(
             .into_response(),
         Ok(Err(e)) => {
             tracing::warn!("workspace zip failed: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to build workspace archive").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build workspace archive",
+            )
+                .into_response()
         }
         Err(e) => {
             tracing::warn!("workspace zip task panicked: {e}");
-            (StatusCode::INTERNAL_SERVER_ERROR, "failed to build workspace archive").into_response()
+            (
+                StatusCode::INTERNAL_SERVER_ERROR,
+                "failed to build workspace archive",
+            )
+                .into_response()
         }
     }
 }
@@ -762,7 +803,10 @@ fn build_workspace_zip(dir: &std::path::Path) -> anyhow::Result<Vec<u8>> {
         let mut zip = zip::ZipWriter::new(&mut cursor);
         let opts = zip::write::SimpleFileOptions::default()
             .compression_method(zip::CompressionMethod::Deflated);
-        for entry in walkdir::WalkDir::new(dir).into_iter().filter_map(Result::ok) {
+        for entry in walkdir::WalkDir::new(dir)
+            .into_iter()
+            .filter_map(Result::ok)
+        {
             let rel = match entry.path().strip_prefix(dir) {
                 Ok(r) if !r.as_os_str().is_empty() => r,
                 _ => continue,

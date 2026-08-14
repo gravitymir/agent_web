@@ -13,7 +13,7 @@ use std::path::PathBuf;
 use std::sync::LazyLock;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use anyhow::{anyhow, Context, Result};
+use anyhow::{Context, Result, anyhow};
 use serde::{Deserialize, Serialize};
 use serde_json::Value;
 
@@ -75,9 +75,10 @@ pub async fn models_for_api() -> (Vec<ModelInfo>, Option<String>) {
     let cache = read_cache();
 
     if let Some(c) = &cache
-        && now_secs().saturating_sub(c.fetched_at) < CACHE_TTL_SECS {
-            return (c.models.clone(), None);
-        }
+        && now_secs().saturating_sub(c.fetched_at) < CACHE_TTL_SECS
+    {
+        return (c.models.clone(), None);
+    }
 
     match fetch_models().await {
         Ok(models) => {
@@ -102,8 +103,8 @@ fn read_oauth_token() -> Result<String> {
         }
     }
     let path = crate::config::claude_config_dir().join(".credentials.json");
-    let content = std::fs::read_to_string(&path)
-        .with_context(|| format!("reading {}", path.display()))?;
+    let content =
+        std::fs::read_to_string(&path).with_context(|| format!("reading {}", path.display()))?;
     let v: Value = serde_json::from_str(&content)?;
     v["claudeAiOauth"]["accessToken"]
         .as_str()
