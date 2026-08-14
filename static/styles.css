@@ -345,9 +345,10 @@ body.booted #chat-controls { opacity: 1; transition: opacity .3s ease; }
 .seat-warn-body {
   background: var(--bg-elev); border: 1px solid var(--border);
   border-radius: 16px; box-shadow: 0 12px 40px var(--shadow);
-  padding: 22px 30px; text-align: center; min-width: 240px;
+  padding: 22px 30px; text-align: center; min-width: 240px; max-width: min(360px, 88vw);
   animation: seat-pop .22s cubic-bezier(.2, .8, .2, 1);
 }
+.seat-warn-sub { line-height: 1.4; }
 @keyframes seat-pop {
   from { opacity: 0; transform: translateY(12px) scale(.95); }
   to { opacity: 1; transform: none; }

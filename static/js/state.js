@@ -59,6 +59,7 @@ export const el = {
   seatWarn: document.getElementById("seat-warn"),
   seatWarnCount: document.getElementById("seat-warn-count"),
   seatKicked: document.getElementById("seat-kicked"),
+  drainNotice: document.getElementById("drain-notice"),
   chatControls: document.getElementById("chat-controls"),
   model: document.getElementById("model-select"),
   provider: document.getElementById("provider-select"),

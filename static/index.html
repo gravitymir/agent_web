@@ -98,6 +98,16 @@
     </div>
   </div>
 
+  <!-- Host started a Drain-Stop: the current answer finishes, no new messages.
+       Same centered treatment as the keep-alive; click to dismiss and read on. -->
+  <div id="drain-notice" class="seat-warn" hidden role="button" tabindex="0" aria-label="Закрыть уведомление">
+    <div class="seat-warn-body">
+      <div class="seat-warn-title">Сервер останавливается</div>
+      <div class="seat-warn-sub">Хост запустил остановку. Текущий ответ агента завершится, новые сообщения приниматься не будут. Можно закрыть страницу и заняться другими делами.</div>
+      <div class="seat-warn-hint">Нажмите, чтобы закрыть</div>
+    </div>
+  </div>
+
   <!-- Evicted (another device took the seat, or idle timed out). Blocks the page. -->
   <div id="seat-kicked" class="seat-kicked" hidden>
     <div class="seat-kicked-body">

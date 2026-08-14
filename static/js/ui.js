@@ -1278,6 +1278,29 @@ async function loadSessionTimer() {
   }
   // Single-seat keep-alive: idle warning + eviction handling.
   startSeat();
+  // Notify the guest when the host starts a Drain-Stop (server shutting down).
+  watchDrain();
+}
+
+// Poll health; when the host flips this instance into drain, show a one-time
+// centered notice (reusing the keep-alive card) so the guest knows the current
+// answer will finish, no new messages are taken, and they can leave.
+function watchDrain() {
+  let shown = false;
+  el.drainNotice.addEventListener("click", () => { el.drainNotice.hidden = true; });
+  const check = () => {
+    fetch("/api/health")
+      .then((r) => (r.ok ? r.json() : null))
+      .then((h) => {
+        if (h && h.draining && !shown) {
+          shown = true;
+          el.drainNotice.hidden = false;
+        }
+      })
+      .catch(() => {});
+  };
+  check();
+  setInterval(check, 15000);
 }
 
 // --- Guest single-seat keep-alive --------------------------------------------
