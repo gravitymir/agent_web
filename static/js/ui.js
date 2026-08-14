@@ -1265,14 +1265,72 @@ async function loadSessionTimer() {
   } catch (e) {
     return;
   }
-  if (!info || !info.gated || info.expires == null) return;
-  const expiresAtMs = info.expires * 1000;
-  const tick = () => {
-    el.sessionTimer.textContent = fmtRemaining(expiresAtMs - Date.now());
-    el.sessionTimer.hidden = false;
-  };
-  tick();
-  setInterval(tick, 1000);
+  if (!info || !info.gated) return; // owner → no countdown, no seat keep-alive
+  // Access-expiry countdown (second line of the title capsule).
+  if (info.expires != null) {
+    const expiresAtMs = info.expires * 1000;
+    const tick = () => {
+      el.sessionTimer.textContent = fmtRemaining(expiresAtMs - Date.now());
+      el.sessionTimer.hidden = false;
+    };
+    tick();
+    setInterval(tick, 1000);
+  }
+  // Single-seat keep-alive: idle warning + eviction handling.
+  startSeat();
+}
+
+// --- Guest single-seat keep-alive --------------------------------------------
+// Ping the server on real activity so this device keeps the link's one seat;
+// warn (a centered click-to-continue timer) in the last idle minute; block the
+// page if evicted. The server enforces the same 10-min idle window.
+const SEAT_IDLE_MS = 10 * 60 * 1000;
+const SEAT_WARN_MS = 60 * 1000;
+let seatLastActivity = Date.now();
+let seatLastPing = 0;
+let seatEvicted = false;
+
+function seatMarkActivity() {
+  if (seatEvicted) return;
+  seatLastActivity = Date.now();
+  if (!el.seatWarn.hidden) el.seatWarn.hidden = true;
+  const now = Date.now();
+  if (now - seatLastPing >= 30000) {
+    // Throttled server ping. 401 => another device took the (idle) seat.
+    seatLastPing = now;
+    fetch("/api/activity", { method: "POST" })
+      .then((r) => { if (r.status === 401) seatShowKicked(); })
+      .catch(() => {});
+  }
+}
+
+function seatShowKicked() {
+  if (seatEvicted) return;
+  seatEvicted = true;
+  el.seatWarn.hidden = true;
+  el.seatKicked.hidden = false;
+}
+
+function startSeat() {
+  seatLastActivity = Date.now();
+  for (const ev of ["mousemove", "mousedown", "keydown", "scroll", "touchstart", "copy"]) {
+    window.addEventListener(ev, seatMarkActivity, { passive: true });
+  }
+  el.seatWarn.addEventListener("click", seatMarkActivity); // clicking the timer revives
+  setInterval(seatTick, 1000);
+}
+
+function seatTick() {
+  if (seatEvicted) return;
+  if (state.streaming) { seatMarkActivity(); return; } // an agent turn counts as activity
+  const remainMs = SEAT_IDLE_MS - (Date.now() - seatLastActivity);
+  if (remainMs <= SEAT_WARN_MS) {
+    const secs = Math.max(0, Math.ceil(remainMs / 1000));
+    el.seatWarnCount.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
+    el.seatWarn.hidden = false;
+  } else if (!el.seatWarn.hidden) {
+    el.seatWarn.hidden = true;
+  }
 }
 
 function fmtRemaining(ms) {

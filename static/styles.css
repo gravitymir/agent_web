@@ -334,6 +334,48 @@ body.booted #chat-controls { opacity: 1; transition: opacity .3s ease; }
 }
 .title-timer[hidden] { display: none; }
 
+/* Guest idle keep-alive: a centered card that appears in the last idle minute.
+   A click anywhere revives the session (any real activity does, too). */
+.seat-warn {
+  position: fixed; inset: 0; z-index: 90;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.28); cursor: pointer;
+}
+.seat-warn[hidden] { display: none; }
+.seat-warn-body {
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 16px; box-shadow: 0 12px 40px var(--shadow);
+  padding: 22px 30px; text-align: center; min-width: 240px;
+  animation: seat-pop .22s cubic-bezier(.2, .8, .2, 1);
+}
+@keyframes seat-pop {
+  from { opacity: 0; transform: translateY(12px) scale(.95); }
+  to { opacity: 1; transform: none; }
+}
+.seat-warn-title { font-size: 1.1rem; font-weight: 700; color: var(--text); }
+.seat-warn-sub { margin-top: 4px; font-size: .82rem; color: var(--text-dim); }
+.seat-warn-count {
+  margin: 12px 0 6px; font-size: 2.1rem; font-weight: 700; color: var(--accent);
+  font-variant-numeric: tabular-nums; letter-spacing: .02em;
+}
+.seat-warn-hint { font-size: .82rem; color: var(--text-dim); }
+
+/* Evicted: a blocking full-screen overlay — the user must re-open their link. */
+.seat-kicked {
+  position: fixed; inset: 0; z-index: 95;
+  display: flex; align-items: center; justify-content: center;
+  background: rgba(0, 0, 0, 0.55);
+  -webkit-backdrop-filter: blur(3px); backdrop-filter: blur(3px);
+}
+.seat-kicked[hidden] { display: none; }
+.seat-kicked-body {
+  background: var(--bg-elev); border: 1px solid var(--border);
+  border-radius: 16px; box-shadow: 0 12px 40px var(--shadow);
+  padding: 26px 30px; text-align: center; width: 360px; max-width: 92vw;
+}
+.seat-kicked-title { font-size: 1.2rem; font-weight: 700; color: var(--text); }
+.seat-kicked-sub { margin-top: 8px; font-size: .9rem; color: var(--text-dim); line-height: 1.45; }
+
 /* Big "create" button — shown instead of the composer when there are no chats. */
 .big-new-chat {
   display: inline-flex; align-items: center; gap: 8px; margin: 0 auto 32px;

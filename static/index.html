@@ -87,6 +87,25 @@
     <span id="session-timer" class="title-timer" hidden></span>
   </div>
 
+  <!-- Guest keep-alive: flies to screen center in the last idle minute; a click
+       (anywhere) revives the session. -->
+  <div id="seat-warn" class="seat-warn" hidden role="button" tabindex="0" aria-label="Продолжить сессию">
+    <div class="seat-warn-body">
+      <div class="seat-warn-title">Вы ещё здесь?</div>
+      <div class="seat-warn-sub">Сессия закроется из-за бездействия</div>
+      <div id="seat-warn-count" class="seat-warn-count">1:00</div>
+      <div class="seat-warn-hint">Нажмите, чтобы продолжить</div>
+    </div>
+  </div>
+
+  <!-- Evicted (another device took the seat, or idle timed out). Blocks the page. -->
+  <div id="seat-kicked" class="seat-kicked" hidden>
+    <div class="seat-kicked-body">
+      <div class="seat-kicked-title">Вы выброшены</div>
+      <div class="seat-kicked-sub">Эту ссылку открыли на другом устройстве, либо сессия завершилась из-за бездействия. Откройте ссылку заново, чтобы продолжить.</div>
+    </div>
+  </div>
+
   <!-- Current-chat controls (export / delete), bottom-right of the chat area -->
   <div id="chat-controls" class="chat-controls" hidden>
     <button id="cc-export-md" class="cc-btn" type="button" title="Экспорт в Markdown">
