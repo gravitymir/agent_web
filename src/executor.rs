@@ -15,6 +15,12 @@ pub const SSH_USER: &str = "insider";
 /// Host port forwarded to the guest's `agent_web` (NAT rule `aw`: 8788 → 8787).
 pub const GUEST_APP_PORT: u16 = 8788;
 
+/// The host-side guest sandbox instance (`run-guest.ps1`): where guests actually
+/// connect and their turns run (the executor VM is only their tool backend over
+/// SSH). Drain-Stop drains THIS so it waits for real guest turns before powering
+/// the VM off.
+pub const GUEST_SANDBOX_PORT: u16 = 8790;
+
 /// The `VBoxManage` binary: PATH first, else the default Windows install path
 /// (so it works even when the installer didn't update PATH for this process).
 fn vbox_bin() -> String {

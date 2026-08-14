@@ -442,6 +442,7 @@ fn is_public(path: &str) -> bool {
         || path == "/api/health"
         || path == "/api/activity"
         || path == "/api/drain/begin"
+        || path == "/api/drain/end"
         || path.starts_with("/broker/")
 }
 
@@ -806,6 +807,7 @@ mod tests {
             "/api/health",
             "/api/activity",
             "/api/drain/begin",
+            "/api/drain/end",
             "/broker/v1/messages",
         ] {
             assert!(is_public(p), "{p} should be public");

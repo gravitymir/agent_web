@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "021";
+pub const BUILD: &str = "022";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -291,6 +291,7 @@ async fn run() -> anyhow::Result<()> {
             axum::routing::delete(auth::links_revoke),
         )
         .route("/api/drain/begin", post(drain_begin))
+        .route("/api/drain/end", post(drain_end))
         .route("/api/health", get(health))
         .route("/metrics", get(metrics))
         .route("/broker/v1/messages", post(broker::messages))
@@ -445,6 +446,14 @@ async fn drain_begin(State(state): State<Arc<AppState>>) -> impl IntoResponse {
         "draining": true,
         "active_turns": state.sessions.active_turns(),
     }))
+}
+
+/// `POST /api/drain/end` — clear the drain flag so the guest server accepts turns
+/// again. The host calls this from Start (Запустить) after the VM boots, undoing a
+/// prior Drain-Stop. Same host→guest control channel as `drain/begin`.
+async fn drain_end(State(state): State<Arc<AppState>>) -> impl IntoResponse {
+    state.sessions.set_draining(false);
+    Json(serde_json::json!({ "ok": true, "draining": false }))
 }
 
 /// Prometheus-style metrics.

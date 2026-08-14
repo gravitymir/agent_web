@@ -466,6 +466,16 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
                         })
                         .await;
                     }
+                    // Undo a prior Drain-Stop: let the guest sandbox accept turns
+                    // again now that its tool backend (the VM) is back up.
+                    let _ = reqwest::Client::new()
+                        .post(format!(
+                            "http://127.0.0.1:{}/api/drain/end",
+                            crate::executor::GUEST_SANDBOX_PORT
+                        ))
+                        .timeout(std::time::Duration::from_secs(3))
+                        .send()
+                        .await;
                     send_executor_status(ws_tx).await;
                     return;
                 }
@@ -501,7 +511,11 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
 /// in-flight agents to finish, stop its server, then power the VM off.
 async fn handle_drain(ws_tx: &mut WsSink) {
     let client = reqwest::Client::new();
-    let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_APP_PORT);
+    // Drain the host-side guest SANDBOX (where guests actually connect and their
+    // turns run) — not the VM's own agent_web — so we wait for real guest turns
+    // before powering the VM (their tool backend) off. It stays drained ("server
+    // stopped"); Start (Запустить) clears it.
+    let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_SANDBOX_PORT);
 
     let _ = send_control(
         ws_tx,
@@ -562,7 +576,7 @@ async fn handle_drain(ws_tx: &mut WsSink) {
 
     let _ = send_control(
         ws_tx,
-        exec_frame("stopping", "останавливаю гостевой сервер…", None),
+        exec_frame("stopping", "останавливаю приложение на VM…", None),
     )
     .await;
     let _ =
