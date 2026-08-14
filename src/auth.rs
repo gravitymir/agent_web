@@ -49,9 +49,6 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) {
 /// Session cookie name.
 const COOKIE: &str = "cwi_session";
 
-/// Accepted clock-skew / replay window for a drain token, in seconds.
-const DRAIN_WINDOW: u64 = 60;
-
 #[derive(Clone, Serialize, Deserialize)]
 struct Token {
     hash: String, // hex(sha256(code)) — never the code itself
@@ -285,36 +282,6 @@ impl Auth {
     fn valid_session(&self, cookie_header: Option<&str>) -> bool {
         self.session_expiry(cookie_header).is_some()
     }
-
-    /// A short-lived proof-of-shared-secret for the host→guest `/api/drain/begin`
-    /// call, which carries no session cookie. Format `<unix_ts>.<hmac(drain:<ts>)>`,
-    /// accepted within ±[`DRAIN_WINDOW`] seconds. The owner and guest run the same
-    /// binary off the same config dir, so they share `auth_secret` — no extra
-    /// configuration. The endpoint is idempotent, so a tight window is enough.
-    pub fn drain_token(&self) -> String {
-        let ts = now();
-        format!("{ts}.{}", self.sign_drain(ts))
-    }
-
-    fn sign_drain(&self, ts: u64) -> String {
-        let mut mac = HmacSha256::new_from_slice(&self.secret).expect("hmac accepts any key len");
-        mac.update(format!("drain:{ts}").as_bytes());
-        hex::encode(mac.finalize().into_bytes())
-    }
-
-    /// Verify a token from [`drain_token`] against the same shared secret and window.
-    pub fn verify_drain_token(&self, token: &str) -> bool {
-        let Some((ts_s, sig)) = token.split_once('.') else {
-            return false;
-        };
-        let Ok(ts) = ts_s.parse::<u64>() else {
-            return false;
-        };
-        if ts.abs_diff(now()) > DRAIN_WINDOW {
-            return false;
-        }
-        ct_eq(&self.sign_drain(ts), sig)
-    }
 }
 
 // ---------------------------------------------------------------------------
@@ -334,11 +301,10 @@ fn is_secure(h: &HeaderMap) -> bool {
 /// Paths reachable without a session cookie: the login page, a health probe, the
 /// broker endpoint (which has its own per-session bearer-token auth), and the
 /// drain trigger. `/api/drain/begin` is the host→guest control channel for
-/// Drain-Stop: the host flips the guest into "no new turns" before waiting on
-/// `/api/health`. It carries no session cookie (so it bypasses the cookie gate),
-/// but the handler still authorizes it with an HMAC drain token over the shared
-/// `auth_secret` (see [`Auth::verify_drain_token`]) — so external clients can't
-/// flip the guest into drain. Idempotent + non-destructive (only sets a flag).
+/// Drain-Stop: the host (over the NAT forward) flips the guest into "no new
+/// turns" before waiting on `/api/health`. It carries no session cookie, and is
+/// idempotent + non-destructive (only sets a flag), so it must bypass the gate —
+/// otherwise a gated guest's Drain-Stop can't refuse new turns during the drain.
 fn is_public(path: &str) -> bool {
     path == "/login"
         || path == "/api/health"
@@ -656,32 +622,7 @@ pub fn run_cli(args: &[String]) {
 
 #[cfg(test)]
 mod tests {
-    use super::*;
-
-    #[test]
-    fn drain_token_roundtrip_and_rejects() {
-        // Throwaway Auth with a fixed secret (no file IO).
-        let auth = Auth {
-            enabled: true,
-            secret: vec![7u8; 32],
-            store: PathBuf::from("x"),
-        };
-        let t = auth.drain_token();
-        assert!(auth.verify_drain_token(&t)); // fresh, correctly signed → ok
-        assert!(!auth.verify_drain_token(&format!("{t}0"))); // tampered sig
-        assert!(!auth.verify_drain_token("nope")); // no separator
-        assert!(!auth.verify_drain_token("")); // empty
-        // Signed but outside the ±window → rejected.
-        let old = now() - DRAIN_WINDOW - 10;
-        assert!(!auth.verify_drain_token(&format!("{old}.{}", auth.sign_drain(old))));
-        // A different secret can't verify a token minted here.
-        let other = Auth {
-            enabled: true,
-            secret: vec![9u8; 32],
-            store: PathBuf::from("x"),
-        };
-        assert!(!other.verify_drain_token(&t));
-    }
+    use super::is_public;
 
     #[test]
     fn public_paths_bypass_the_gate() {

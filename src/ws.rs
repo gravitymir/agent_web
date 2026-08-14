@@ -485,7 +485,7 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
             send_executor_status(ws_tx).await;
         }
 
-        "drain" => handle_drain(state, ws_tx).await,
+        "drain" => handle_drain(ws_tx).await,
 
         _ => {
             let _ = send_control(
@@ -499,7 +499,7 @@ async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink
 
 /// Graceful drain-stop: tell the guest to stop taking new turns, wait for its
 /// in-flight agents to finish, stop its server, then power the VM off.
-async fn handle_drain(state: &Arc<AppState>, ws_tx: &mut WsSink) {
+async fn handle_drain(ws_tx: &mut WsSink) {
     let client = reqwest::Client::new();
     let base = format!("http://127.0.0.1:{}", crate::executor::GUEST_APP_PORT);
 
@@ -512,11 +512,8 @@ async fn handle_drain(state: &Arc<AppState>, ws_tx: &mut WsSink) {
         ),
     )
     .await;
-    // Authorize the cookieless drain call with an HMAC token over the shared
-    // `auth_secret` — otherwise anyone reaching the guest could flip it to drain.
     let _ = client
         .post(format!("{base}/api/drain/begin"))
-        .header("X-Drain-Auth", state.auth.drain_token())
         .timeout(std::time::Duration::from_secs(5))
         .send()
         .await;

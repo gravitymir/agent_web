@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "018";
+pub const BUILD: &str = "017";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -437,30 +437,13 @@ async fn health(State(state): State<Arc<AppState>>) -> impl IntoResponse {
 /// Enter graceful-drain mode: stop accepting new turns, let running ones finish.
 /// Read progress from `/api/health` (`active_turns` → 0). Used by the host's
 /// executor "Drain-Stop" flow, which POSTs this to the guest before powering off.
-async fn drain_begin(
-    State(state): State<Arc<AppState>>,
-    headers: axum::http::HeaderMap,
-) -> axum::response::Response {
-    // On a gated (guest) instance this endpoint is cookieless-public, so require a
-    // valid HMAC drain token (signed with the shared `auth_secret`) — otherwise any
-    // external client could flip the guest into drain (a DoS). The owner (gate off)
-    // isn't exposed the same way and keeps the plain behavior.
-    if state.auth.enabled {
-        let token = headers
-            .get("x-drain-auth")
-            .and_then(|v| v.to_str().ok())
-            .unwrap_or("");
-        if !state.auth.verify_drain_token(token) {
-            return (StatusCode::UNAUTHORIZED, "invalid drain token").into_response();
-        }
-    }
+async fn drain_begin(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     state.sessions.set_draining(true);
     Json(serde_json::json!({
         "ok": true,
         "draining": true,
         "active_turns": state.sessions.active_turns(),
     }))
-    .into_response()
 }
 
 /// Prometheus-style metrics.
