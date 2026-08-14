@@ -4,13 +4,17 @@
 #     powershell -ExecutionPolicy Bypass -File deploy.ps1
 $ErrorActionPreference = "Stop"
 
+# Always operate relative to the repo (this script's folder), so it works no
+# matter which directory it's launched from (e.g. a deploy.bat in the prod dir).
+Set-Location -LiteralPath $PSScriptRoot
+
 $dst     = "C:\Users\gravi\Documents\agent_web_prod"
 $exeName = "agent_web.exe"
 
 # Stop running instances FIRST — the dev one locks target\release\agent_web.exe
 # (so the build would fail) and the prod one locks the copy target.
 $prodExe = Join-Path $dst $exeName
-$devExe  = Join-Path (Get-Location) "target\release\$exeName"
+$devExe  = Join-Path $PSScriptRoot "target\release\$exeName"
 Get-Process agent_web -ErrorAction SilentlyContinue |
     Where-Object { $_.Path -eq $prodExe -or $_.Path -eq $devExe } |
     ForEach-Object { Write-Host "Stopping agent_web (PID $($_.Id)) at $($_.Path)"; Stop-Process -Id $_.Id -Force }
