@@ -1,10 +1,12 @@
-//! Interactive startup menu: pick the engine and port with arrow keys before the
-//! server boots. Runs only on an interactive terminal — piped/service/headless
-//! launches (and `CWI_NO_MENU=1`) skip it and fall back to env/`.env`/defaults.
+//! Interactive startup menu: pick the engine (Cloud subscription vs a Native API
+//! provider) with arrow keys before the server boots. Runs only on an interactive
+//! terminal — piped/service/headless launches (and `CWI_NO_MENU=1`) skip it and
+//! fall back to env/`.env`/defaults.
 //!
 //! Choices are applied by setting the same env vars `Config::from_env` already
-//! reads (`CWI_ENGINE`, `CWI_AGENT_PROVIDER`, `CWI_BIND`), so there is a single
-//! source of truth and the spawned `claude`/provider inherit them.
+//! reads (`CWI_ENGINE`, `CWI_AGENT_PROVIDER`), so there is a single source of
+//! truth and the spawned `claude`/provider inherit them. The bind port is not
+//! prompted — `Config` already defaults `CWI_BIND` to `127.0.0.1:8787`.
 
 use dialoguer::{Select, theme::ColorfulTheme};
 use std::io::IsTerminal;
@@ -18,7 +20,6 @@ const ENGINES: &[(&str, Option<&str>)] = &[
     ("Native — Qwen (Alibaba)", Some("qwen")),
     ("Native — Gemini (Google)", Some("gemini")),
 ];
-const PORTS: &[u16] = &[8787, 8788, 8789, 8790, 8791];
 
 pub fn run() {
     // Only prompt when we can actually read arrow keys back.
@@ -62,22 +63,6 @@ pub fn run() {
             std::env::set_var("CWI_AGENT_PROVIDER", provider);
         },
     }
-
-    // --- Port -----------------------------------------------------------------
-    let cur_port = std::env::var("CWI_BIND")
-        .ok()
-        .and_then(|b| b.rsplit(':').next().and_then(|p| p.parse::<u16>().ok()));
-    let port_default = cur_port
-        .and_then(|p| PORTS.iter().position(|x| *x == p))
-        .unwrap_or(0);
-    let port_labels: Vec<String> = PORTS.iter().map(|p| p.to_string()).collect();
-    let port_idx = Select::with_theme(&theme)
-        .with_prompt("Порт")
-        .items(&port_labels)
-        .default(port_default)
-        .interact()
-        .unwrap_or(port_default);
-
-    // SAFETY: as above — synchronous startup, no other threads yet.
-    unsafe { std::env::set_var("CWI_BIND", format!("127.0.0.1:{}", PORTS[port_idx])) };
+    // No port prompt: the server binds `CWI_BIND` (Config defaults it to
+    // 127.0.0.1:8787). Set CWI_BIND in the environment/.env to override.
 }
