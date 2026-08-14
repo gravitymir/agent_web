@@ -37,6 +37,11 @@ Copy-Item "static" "$dst\static" -Recurse -Force
 if (Test-Path ".env") { Copy-Item ".env" (Join-Path $dst ".env") -Force }
 
 Write-Host ""
-Write-Host "[ok] Deployed to $dst"
-Write-Host "     Run it:  `"$dst\$exeName`""
-Write-Host "     Chats live in $dst\chats (created on first run; log in there once)."
+Write-Host "[ok] Deployed to $dst  --  launching the app..."
+Write-Host ""
+
+# Build succeeded and the copy is done -> run the freshly deployed binary from the
+# prod folder (so static/, .env and chats/ resolve next to it, and the launch
+# wizard/banner appear in this console).
+Set-Location -LiteralPath $dst
+& $prodExe
