@@ -63,7 +63,7 @@ fn write_cache(models: &[ModelInfo]) {
             return;
         }
     };
-    if let Err(e) = std::fs::write(&path, json) {
+    if let Err(e) = crate::config::write_atomic(&path, json.as_bytes()) {
         tracing::warn!("models cache: write {} failed: {e}", path.display());
     }
 }

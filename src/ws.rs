@@ -259,6 +259,12 @@ async fn handle_client(
         }
 
         ClientMsg::Attach { session_id } => {
+            // Same identifier guard as Send: reject anything that isn't a UUID
+            // before it reaches the session store / becomes a path component.
+            if !crate::ids::is_valid_session_id(&session_id) {
+                let _ = send_control(ws_tx, json!({ "cwi": "error", "message": "invalid session id" })).await;
+                return true;
+            }
             if keeper.is_none() {
                 tracing::info!(session = %session_id, "client attaching to session");
                 match state.sessions.get(&session_id) {

@@ -77,7 +77,7 @@ impl MetaStore {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
-                let _ = std::fs::write(&path, json);
+                let _ = crate::config::write_atomic(&path, json.as_bytes());
             }
         });
 

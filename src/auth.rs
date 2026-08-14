@@ -36,7 +36,7 @@ type HmacSha256 = Hmac<Sha256>;
 /// to `0o600` (matters on multi-user hosts); on other platforms this is a plain
 /// write. Best-effort — a failed chmod doesn't fail the write.
 pub(crate) fn write_private(path: &Path, contents: &[u8]) {
-    let wrote = fs::write(path, contents).is_ok();
+    let wrote = crate::config::write_atomic(path, contents).is_ok();
     #[cfg(unix)]
     if wrote {
         use std::os::unix::fs::PermissionsExt;
@@ -564,6 +564,29 @@ pub fn run_cli(args: &[String]) {
             eprintln!(
                 "usage: agent_web guest <new|list|revoke> [--ttl 24h] [--label NAME] [--url https://host]"
             );
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::is_public;
+
+    #[test]
+    fn public_paths_bypass_the_gate() {
+        // Reachable without a session: login, health, the broker (own bearer
+        // auth), and the host→guest drain trigger.
+        for p in ["/login", "/api/health", "/api/drain/begin", "/broker/v1/messages"] {
+            assert!(is_public(p), "{p} should be public");
+        }
+    }
+
+    #[test]
+    fn protected_paths_require_the_gate() {
+        // Data + admin routes must NOT be public — they go through the gate, and
+        // admin routes (e.g. /api/links) additionally 403 for guests in-handler.
+        for p in ["/api/links", "/api/chats", "/api/workspace.zip", "/ws", "/"] {
+            assert!(!is_public(p), "{p} must not be public");
         }
     }
 }

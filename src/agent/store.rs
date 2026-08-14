@@ -89,7 +89,7 @@ fn write_json(id: &str, json: String) {
         return;
     }
     let p = path(id);
-    if let Err(e) = std::fs::write(&p, json) {
+    if let Err(e) = crate::config::write_atomic(&p, json.as_bytes()) {
         tracing::warn!(session = %id, "native store: write {} failed: {e}", p.display());
     }
 }

@@ -85,6 +85,21 @@ fn canonicalize_or_warn(path: &std::path::Path) -> PathBuf {
     }
 }
 
+/// Write `contents` to `path` atomically: write a sibling temp file, then rename
+/// it over the target. A crash (or a concurrent reader) mid-write then sees either
+/// the intact old file or the complete new one — never a truncated/corrupt JSON.
+/// On Windows `rename` replaces the destination; on Unix it's atomic within a
+/// filesystem. Used for the small JSON stores (auth tokens, chat meta, caches).
+pub fn write_atomic(path: &std::path::Path, contents: &[u8]) -> std::io::Result<()> {
+    let mut tmp = path.as_os_str().to_owned();
+    tmp.push(format!(".tmp{}", std::process::id()));
+    let tmp = PathBuf::from(tmp);
+    std::fs::write(&tmp, contents)?;
+    std::fs::rename(&tmp, path).inspect_err(|_| {
+        let _ = std::fs::remove_file(&tmp); // don't leave the temp behind on failure
+    })
+}
+
 impl Config {
     pub fn from_env() -> Self {
         let bind_addr =
@@ -210,5 +225,21 @@ mod tests {
     #[test]
     fn strips_verbatim_prefix() {
         assert_eq!(encode_project_dir(Path::new(r"\\?\C:\a")), "C--a");
+    }
+
+    #[test]
+    fn write_atomic_overwrites_and_leaves_no_temp() {
+        let path = std::env::temp_dir().join(format!("cwi_atomic_{}.json", std::process::id()));
+        let _ = std::fs::remove_file(&path);
+        super::write_atomic(&path, b"first").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"first");
+        // A longer overwrite must fully replace, not append/truncate-in-place.
+        super::write_atomic(&path, b"second-and-longer").unwrap();
+        assert_eq!(std::fs::read(&path).unwrap(), b"second-and-longer");
+        // The sibling temp must be gone after a successful rename.
+        let mut tmp = path.as_os_str().to_owned();
+        tmp.push(format!(".tmp{}", std::process::id()));
+        assert!(!Path::new(&tmp).exists());
+        let _ = std::fs::remove_file(&path);
     }
 }
