@@ -50,4 +50,12 @@ Write-Host "Relaunching the guest sandbox (:8790)..."
 Write-Host ""
 Write-Host "Launching the owner app..."
 Set-Location -LiteralPath $dst
+# Launch the owner headless on a FIXED engine + port — no interactive wizard.
+# CWI_NO_MENU skips the menu; CWI_ENGINE pins Cloud/CLI (the .env default is
+# `native`, so without this the owner would come up on the native engine); CWI_BIND
+# pins 8787. The wizard still works for manual `agent_web.exe` runs (no CWI_NO_MENU),
+# e.g. to try the native engine or a different port. Note: 8790 is the guest's port.
+$env:CWI_NO_MENU = "1"
+$env:CWI_ENGINE  = "cli"
+$env:CWI_BIND    = "127.0.0.1:8787"
 & $prodExe
