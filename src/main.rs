@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "002";
+pub const BUILD: &str = "003";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -356,7 +356,7 @@ async fn run() -> anyhow::Result<()> {
         Err(e) => return Err(e.into()),
     };
     axum::serve(listener, app)
-        .with_graceful_shutdown(shutdown_signal())
+        .with_graceful_shutdown(graceful_shutdown(sessions.clone()))
         .await?;
 
     // Stop accepting → kill live keepers (their processes) before exiting.
@@ -384,6 +384,32 @@ async fn shutdown_signal() {
     tokio::select! {
         _ = ctrl_c => {},
         _ = terminate => {},
+    }
+}
+
+/// Wrap the stop signal with a drain: on the first Ctrl+C (or SIGTERM), refuse new
+/// turns and wait for in-flight agent answers to finish before the server shuts
+/// down — so stopping mid-answer doesn't cut the agent off. A second signal forces
+/// an immediate shutdown. Resolving this future is what triggers axum's graceful
+/// shutdown (then `sessions.shutdown_all()` kills the now-idle keepers).
+async fn graceful_shutdown(sessions: Arc<SessionManager>) {
+    shutdown_signal().await;
+    if sessions.active_turns() == 0 {
+        return; // nothing in flight — stop right away
+    }
+    sessions.set_draining(true);
+    tracing::warn!(
+        active_turns = sessions.active_turns(),
+        "stop requested — draining: refusing new turns, waiting for in-flight answers to finish (Ctrl+C again to force)"
+    );
+    let drain = async {
+        while sessions.active_turns() > 0 {
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+    };
+    tokio::select! {
+        _ = drain => tracing::info!("drain complete — shutting down"),
+        _ = shutdown_signal() => tracing::warn!("second stop signal — forcing shutdown (in-flight answers cut off)"),
     }
 }
 

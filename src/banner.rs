@@ -68,7 +68,14 @@ pub fn print_startup(config: &Config) {
 
     // Right column: (label, value). Empty label => a plain heading line.
     let mut rows: Vec<(String, String)> = vec![
-        (String::new(), paint(&format!("Agent Web  v{ver}.{}", crate::BUILD), &format!("1;{ORANGE}"))),
+        (
+            String::new(),
+            format!(
+                "{}{}",
+                paint("Agent Web  ", &format!("1;{ORANGE}")),
+                paint(&format!("v{ver}.{}", crate::BUILD), "1;97"), // version in white
+            ),
+        ),
         (String::new(), paint("──────────────────────────", &format!("2;{ORANGE}"))),
         ("STARTED".into(), started),
         (
