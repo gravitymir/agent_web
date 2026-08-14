@@ -81,6 +81,13 @@ pub fn spawn_claude(
     // on the host. Removing the built-in Bash/Write/Read/Edit is what enforces
     // it; the subscription token stays on the host either way.
     if config.sandbox {
+        // Per-chat guest workspace on the VM: point the mcp-guest child (which
+        // inherits this env) at <base>/<session-id>, so each chat's files are
+        // isolated on the VM and a download archives only this chat's work.
+        cmd.env(
+            "CWI_GUEST_WORKDIR",
+            format!("{}/{}", crate::mcp_guest::base_workdir().trim_end_matches('/'), id),
+        );
         if let Some(cfg) = sandbox_mcp_config() {
             cmd.arg("--mcp-config").arg(cfg).arg("--strict-mcp-config");
         }

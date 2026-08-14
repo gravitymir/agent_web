@@ -19,7 +19,7 @@ mod ws;
 use std::sync::{Arc, Mutex};
 
 use axum::{
-    extract::{Path, State, WebSocketUpgrade},
+    extract::{Path, Query, State, WebSocketUpgrade},
     http::StatusCode,
     response::IntoResponse,
     routing::{get, post, put},
@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "009";
+pub const BUILD: &str = "010";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -655,11 +655,66 @@ async fn get_usage(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     Json(usage::usage_json(&state.config).await)
 }
 
-/// Stream the agent's workspace as a zip download. This is how a guest (who has
-/// no shell, no git, and no file-download otherwise) gets their work out. Only
-/// the workspace dir is archived — no user-supplied path — and symlinks are not
-/// followed (walkdir default), so it can't escape the sandbox folder.
-async fn download_workspace(State(state): State<Arc<AppState>>) -> axum::response::Response {
+#[derive(Deserialize)]
+struct WorkspaceQuery {
+    /// Chat/session id — required on the guest instance to pick the per-chat dir.
+    chat: Option<String>,
+}
+
+/// Download the current chat's workspace. How a guest (no shell, git, or other
+/// file export) gets their work out.
+///
+/// Two sources, because the files live in different places:
+/// - **Guest (sandbox):** the model's files are on the executor VM, written by
+///   mcp-guest over SSH under `<base>/<session-id>` — NOT in the local workspace.
+///   Stream that per-chat subdir as a `tar.gz` piped over SSH.
+/// - **Owner:** the local `workspace/` dir, zipped in-memory (shared across chats;
+///   per-chat would require moving Claude's cwd/session storage).
+///
+/// The chat id is validated as a UUID, so it can't traverse out of the base dir.
+async fn download_workspace(
+    State(state): State<Arc<AppState>>,
+    Query(q): Query<WorkspaceQuery>,
+) -> axum::response::Response {
+    if state.config.sandbox {
+        let Some(id) = q.chat.filter(|s| ids::is_valid_session_id(s)) else {
+            return (StatusCode::BAD_REQUEST, "a valid chat id is required").into_response();
+        };
+        if !executor::running() {
+            return (StatusCode::SERVICE_UNAVAILABLE, "guest VM is not running").into_response();
+        }
+        let base = mcp_guest::base_workdir();
+        // `tar -C <base> <id>`: archive only this chat's subdir, with paths inside
+        // relative to it. Streamed as bytes so the gzip payload isn't corrupted.
+        let remote = format!(
+            "tar czf - -C {} {}",
+            mcp_guest::sh(base.trim_end_matches('/')),
+            mcp_guest::sh(&id),
+        );
+        let fname = format!("workspace-{id}.tar.gz");
+        return match tokio::task::spawn_blocking(move || executor::ssh_capture_raw(&remote, None)).await {
+            Ok((0, bytes, _)) if !bytes.is_empty() => (
+                [
+                    (axum::http::header::CONTENT_TYPE, "application/gzip".to_string()),
+                    (
+                        axum::http::header::CONTENT_DISPOSITION,
+                        format!("attachment; filename=\"{fname}\""),
+                    ),
+                ],
+                bytes,
+            )
+                .into_response(),
+            Ok((code, _, err)) => {
+                tracing::warn!("guest workspace tar failed (exit {code}): {}", err.trim());
+                (StatusCode::INTERNAL_SERVER_ERROR, "failed to archive guest workspace").into_response()
+            }
+            Err(e) => {
+                tracing::warn!("guest workspace tar task panicked: {e}");
+                (StatusCode::INTERNAL_SERVER_ERROR, "failed to archive guest workspace").into_response()
+            }
+        };
+    }
+
     let dir = state.config.workspace_abs();
     match tokio::task::spawn_blocking(move || build_workspace_zip(&dir)).await {
         Ok(Ok(bytes)) => (

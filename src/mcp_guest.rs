@@ -21,19 +21,28 @@ use crate::executor;
 /// MCP protocol revision we speak. `2024-11-05` is widely supported by clients.
 const PROTOCOL: &str = "2024-11-05";
 
-/// Where the sandbox tools operate inside the guest. Override with
-/// `CWI_GUEST_WORKDIR`. Relative tool paths resolve against this.
-fn workdir() -> String {
+/// Base guest workspace on the VM (`CWI_GUEST_WORKDIR`, default
+/// `/home/insider/work`). Per-chat subdirs (`<base>/<session-id>`) live under it:
+/// when spawning `claude`, the host sets the child mcp-guest's `CWI_GUEST_WORKDIR`
+/// to the per-chat path — so this reads the *base* in the parent (host) process
+/// and the per-chat dir inside the spawned mcp-guest.
+pub fn base_workdir() -> String {
     std::env::var("CWI_GUEST_WORKDIR")
         .ok()
         .filter(|s| !s.trim().is_empty())
         .unwrap_or_else(|| "/home/insider/work".to_string())
 }
 
+/// Where the sandbox tools operate inside the guest. Relative tool paths resolve
+/// against this — the per-chat dir in the spawned mcp-guest process.
+fn workdir() -> String {
+    base_workdir()
+}
+
 /// Single-quote a string for a POSIX shell (closes the quote, escapes any `'`,
 /// reopens). Injection isn't a concern — the guest is the sandbox and the whole
 /// point is running arbitrary commands there — but paths with spaces must survive.
-fn sh(s: &str) -> String {
+pub fn sh(s: &str) -> String {
     format!("'{}'", s.replace('\'', "'\\''"))
 }
 

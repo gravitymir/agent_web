@@ -422,11 +422,12 @@ document.getElementById("cc-export-json").addEventListener("click", () => {
   }).then((confirmed) => { if (confirmed) exportChatJson(c.id, c.title); });
 });
 document.getElementById("cc-download-zip").addEventListener("click", () => {
-  // Download the agent's workspace as a zip. Content-Disposition on the endpoint
-  // sets the filename; the same-origin cookie authenticates automatically.
+  // Download the current chat's workspace. The server picks the source (guest →
+  // this chat's files on the VM as tar.gz; owner → local workspace zip) and sets
+  // the filename via Content-Disposition; the same-origin cookie authenticates.
+  if (!state.sessionId) return; // nothing to download without an open chat
   const a = document.createElement("a");
-  a.href = "/api/workspace.zip";
-  a.download = "workspace.zip";
+  a.href = "/api/workspace.zip?chat=" + encodeURIComponent(state.sessionId);
   document.body.appendChild(a);
   a.click();
   a.remove();

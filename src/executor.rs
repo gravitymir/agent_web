@@ -166,6 +166,37 @@ pub fn ssh_capture(remote_cmd: &str, stdin: Option<&[u8]>) -> (i32, String, Stri
     }
 }
 
+/// Like [`ssh_capture`] but returns stdout as raw bytes — for binary payloads
+/// such as a `tar` stream (a lossy-UTF-8 `String` would corrupt them). stderr
+/// stays lossy UTF-8 (diagnostic/log only).
+pub fn ssh_capture_raw(remote_cmd: &str, stdin: Option<&[u8]>) -> (i32, Vec<u8>, String) {
+    use std::io::Write;
+    let mut cmd = Command::new("ssh");
+    cmd.args(ssh_base_args());
+    cmd.arg(SSH_PORT)
+        .arg(format!("{SSH_USER}@127.0.0.1"))
+        .arg(remote_cmd)
+        .stdin(if stdin.is_some() { Stdio::piped() } else { Stdio::null() })
+        .stdout(Stdio::piped())
+        .stderr(Stdio::piped());
+    let mut child = match cmd.spawn() {
+        Ok(c) => c,
+        Err(e) => return (-1, Vec::new(), format!("ssh spawn failed: {e}")),
+    };
+    if let (Some(data), Some(mut si)) = (stdin, child.stdin.take()) {
+        let _ = si.write_all(data);
+        // `si` drops here, closing stdin so the remote command sees EOF.
+    }
+    match child.wait_with_output() {
+        Ok(o) => (
+            o.status.code().unwrap_or(-1),
+            o.stdout,
+            String::from_utf8_lossy(&o.stderr).into_owned(),
+        ),
+        Err(e) => (-1, Vec::new(), format!("ssh wait failed: {e}")),
+    }
+}
+
 /// Run a guest command feeding `input` to its stdin (e.g. `cat > file`). Avoids
 /// shell-escaping the payload. Returns success.
 fn ssh_run_stdin(remote_cmd: &str, input: &[u8]) -> bool {
