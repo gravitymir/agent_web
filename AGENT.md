@@ -31,7 +31,7 @@ Live, per-chat, in the running app — not a one-off computation:
   token/turn fields (`ui.js::renderChatList`). `render.js::computeAgentron(durationMs, tokens)` /
   `fmtAgentron(ag)` do the actual math + formatting (tenths only; below 0.1 shows a flat `"0"`).
   Shown as a 5th line on the multi-line usage badge and as a row (with a derived `Ag ÷ turns`
-  "efficiency" figure) in the "Использование чата" detail panel.
+  "efficiency" figure) in the "Использование" detail panel.
 - Pre-existing chats (before this was added) simply have no `duration_ms` yet — Agentron starts
   accumulating from their next turn onward; nothing is backfilled.
 - Beware noise when eyeballing `~/.claude/projects/<encoded>/`: the app's own `/api/usage` polling
@@ -55,7 +55,7 @@ is a point-in-time *fill level* instead.
   `contextRing` do the math + build the ring SVG (a rotated, partially-dashed circle — the standard
   "progress ring" trick; `stroke-dashoffset` shrinks as `pct` grows).
 - Shown twice: compact (14px) as a 6th badge line, and bigger (28px) with the raw numbers in the
-  "Использование чата" panel's own "Контекст чата" section.
+  "Использование" panel's own "Контекст чата" section.
 
 Web interface (Rust + Axum), branded **"Agent Web"**, that drives the **Claude Code CLI** as a
 subprocess and mirrors the desktop experience in a browser: live streaming chat, chat list, history,
@@ -178,7 +178,7 @@ and weekly-Fable percentages plus reset times — in the envelope's `result`. It
   queries and uses the default `~/.claude` login. This creates no chats there, so chat isolation holds.
 - Frontend: `render.js::loadUsage` stores `state.usage` and re-renders. Refreshed **rarely** — at
   turn end (`finalizeTurn`), when the usage panel opens (`setUsage`), and once at startup. The token
-  badge shows four lines (session % / week % / Fable % / chat tokens); the "Использование чата" panel
+  badge shows four lines (session % / week % / Fable % / chat tokens); the "Использование" panel
   shows the limits block + per-metric token rows with icons.
 
 ## Interactive tool permissions + `AskUserQuestion` (CLI engine)
