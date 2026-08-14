@@ -564,6 +564,10 @@ export async function createChat() {
   } catch (e) {}
   state.isNew = true;
   state.current = null;
+  // Drop any previously-open chat's transcript: without this, the new chat's
+  // replay_end (a fresh keeper, !hadLiveReplay) re-renders the STALE transcript
+  // as if it were this chat's history (see ws.js).
+  state.transcript = null;
   state.streaming = false;
   setStreamingUI(false);
   setFaviconState("idle");
@@ -1119,6 +1123,7 @@ export async function deleteChat(id, title, item) {
     state.sessionId = null;
     state.isNew = true;
     state.current = null;
+    state.transcript = null; // don't let a later new chat re-render this history
     el.title.textContent = "";
     resetMessages();
     el.messages.innerHTML =

@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "012";
+pub const BUILD: &str = "013";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -576,6 +576,20 @@ async fn delete_chat(
             }
         }
         Err(e) => tracing::warn!(session = %id, "delete_chat: meta lock poisoned: {e}"),
+    }
+
+    // Sandbox (guest): the chat's files live on the executor VM under <base>/<id>
+    // (see spawn_claude's per-chat CWI_GUEST_WORKDIR). Remove that dir too so a
+    // deleted chat leaves nothing behind on the VM. Fire-and-forget best-effort:
+    // the id is a validated UUID (no traversal) and the VM may be down anyway.
+    if state.config.sandbox && executor::running() {
+        let dir = format!("{}/{}", mcp_guest::base_workdir().trim_end_matches('/'), id);
+        let sid = id.clone();
+        tokio::task::spawn_blocking(move || {
+            if !executor::ssh_run(&format!("rm -rf {}", mcp_guest::sh(&dir))) {
+                tracing::warn!(session = %sid, "delete_chat: guest workdir cleanup failed");
+            }
+        });
     }
 
     StatusCode::NO_CONTENT
