@@ -72,25 +72,13 @@ function handleExecutorEvent(evt) {
   if ($("guest-stop")) $("guest-stop").disabled = !running;
 }
 
-function initTabs() {
-  const tabs = [...document.querySelectorAll(".side-tab")];
-  tabs.forEach((tab) => {
-    tab.addEventListener("click", () => {
-      const name = tab.dataset.tab;
-      tabs.forEach((t) => t.classList.toggle("active", t === tab));
-      document.querySelectorAll("[data-tab-body]").forEach((el) => {
-        el.hidden = el.dataset.tabBody !== name;
-      });
-      if (name === "guest") sendWs({ type: "executor", action: "status" });
-    });
-  });
-}
-
 function init() {
-  initTabs();
   $("guest-start")?.addEventListener("click", () => cmd("start"));
   $("guest-drain")?.addEventListener("click", () => cmd("drain"));
   $("guest-stop")?.addEventListener("click", () => cmd("stop"));
   window.addEventListener("cwi-executor", (e) => handleExecutorEvent(e.detail));
+  // Guest + Links moved out of the sidebar tabs into their own admin drawer;
+  // refresh VM status each time that drawer opens.
+  window.addEventListener("cwi-admin-open", () => sendWs({ type: "executor", action: "status" }));
 }
 init();

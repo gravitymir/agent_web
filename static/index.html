@@ -138,6 +138,14 @@
     </button>
   </div>
 
+  <!-- Admin controls badge (left, above the chats badge) — owner instance only -->
+  <button id="admin-badge" class="side-badge admin-badge admin-only" title="Гостевой сервер и ссылки" aria-label="Админ-панель" hidden>
+    <svg class="ios-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <rect x="3" y="4" width="18" height="7" rx="2" /><rect x="3" y="13" width="18" height="7" rx="2" />
+      <line x1="7" y1="7.5" x2="7.01" y2="7.5" /><line x1="7" y1="16.5" x2="7.01" y2="16.5" />
+    </svg>
+  </button>
+
   <!-- Chat list drawer (left) — mirror of the settings drawer on the right -->
   <button id="sidebar-badge" class="side-badge" title="Чаты" aria-label="Список чатов">
     <svg class="ios-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -145,47 +153,54 @@
     </svg>
   </button>
   <div id="sidebar-overlay" class="side-overlay" hidden></div>
-  <aside id="sidebar" class="sidebar-drawer" aria-label="Боковая панель">
-    <div class="sidebar-tabs">
-      <button class="side-tab active" data-tab="chats">Чаты</button>
-      <button class="side-tab admin-only" data-tab="guest" hidden>Гостевой сервер</button>
-      <button class="side-tab admin-only" data-tab="links" hidden>Ссылки</button>
-    </div>
-    <div class="sidebar-header" data-tab-body="chats">
+  <aside id="sidebar" class="sidebar-drawer" aria-label="Список чатов">
+    <div class="sidebar-header">
       <button id="new-chat" class="btn-primary"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg> Новый чат</button>
       <input id="chat-search" class="chat-search" type="search"
              placeholder="Поиск по чатам…" autocomplete="off" aria-label="Поиск по чатам" />
     </div>
-    <div id="chat-list" class="chat-list" data-tab-body="chats"></div>
+    <div id="chat-list" class="chat-list"></div>
+  </aside>
 
-    <div id="guest-view" class="guest-view" data-tab-body="guest" hidden>
-      <div class="guest-status">
-        <span id="guest-dot" class="guest-dot" data-state="unknown"></span>
-        <span id="guest-state">…</span>
-      </div>
-      <div id="guest-meta" class="guest-meta"></div>
-      <div class="guest-actions">
-        <button id="guest-start" class="btn-primary guest-btn">Запустить</button>
-        <button id="guest-drain" class="btn-secondary guest-btn">Drain-Stop</button>
-        <button id="guest-stop" class="btn-danger guest-btn">Остановить</button>
-      </div>
-      <div id="guest-log" class="guest-log" aria-live="polite"></div>
-    </div>
+  <!-- Admin drawer (left) — Гостевой сервер + Ссылки, two stacked panels -->
+  <div id="admin-overlay" class="side-overlay" hidden></div>
+  <aside id="admin-drawer" class="sidebar-drawer admin-drawer admin-only" aria-label="Админ-панель" hidden>
+    <div class="admin-body">
+      <section class="admin-panel">
+        <h3 class="admin-h">Гостевой сервер</h3>
+        <div id="guest-view" class="guest-view">
+          <div class="guest-status">
+            <span id="guest-dot" class="guest-dot" data-state="unknown"></span>
+            <span id="guest-state">…</span>
+          </div>
+          <div id="guest-meta" class="guest-meta"></div>
+          <div class="guest-actions">
+            <button id="guest-start" class="btn-primary guest-btn">Запустить</button>
+            <button id="guest-drain" class="btn-secondary guest-btn">Drain-Stop</button>
+            <button id="guest-stop" class="btn-danger guest-btn">Остановить</button>
+          </div>
+          <div id="guest-log" class="guest-log" aria-live="polite"></div>
+        </div>
+      </section>
 
-    <div id="links-view" class="guest-view admin-only" data-tab-body="links" hidden>
-      <p class="links-hint">Создайте ссылку для гостя. Она ведёт на изолированный executor и действует ограниченное время.</p>
-      <div class="links-form">
-        <input id="link-label" class="links-input" type="text" placeholder="метка (напр. alice)" autocomplete="off" />
-        <select id="link-ttl" class="links-input">
-          <option value="24h">24 часа</option>
-          <option value="7d">7 дней</option>
-          <option value="30d">30 дней</option>
-          <option value="1h">1 час</option>
-        </select>
-        <button id="link-create" class="btn-primary guest-btn">Создать ссылку</button>
-      </div>
-      <div id="link-result" class="link-result" hidden></div>
-      <ul id="links-list" class="links-list"></ul>
+      <section class="admin-panel">
+        <h3 class="admin-h">Ссылки</h3>
+        <div id="links-view" class="guest-view">
+          <p class="links-hint">Создайте ссылку для гостя. Она ведёт на изолированный executor и действует ограниченное время.</p>
+          <div class="links-form">
+            <input id="link-label" class="links-input" type="text" placeholder="метка (напр. alice)" autocomplete="off" />
+            <select id="link-ttl" class="links-input">
+              <option value="24h">24 часа</option>
+              <option value="7d">7 дней</option>
+              <option value="30d">30 дней</option>
+              <option value="1h">1 час</option>
+            </select>
+            <button id="link-create" class="btn-primary guest-btn">Создать ссылку</button>
+          </div>
+          <div id="link-result" class="link-result" hidden></div>
+          <ul id="links-list" class="links-list"></ul>
+        </div>
+      </section>
     </div>
   </aside>
 

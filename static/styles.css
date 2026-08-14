@@ -101,6 +101,19 @@ body.booted #chat-controls { opacity: 1; transition: opacity .3s ease; }
 .side-badge.open { left: 272px; }
 .side-badge svg { width: 1.35em; height: 1.35em; display: block; }
 
+/* Admin badge sits above the chats badge; both hidden on a guest instance. The
+   badges are `display:flex`, so restore `[hidden]` (else admin-only leaks in). */
+.admin-badge { bottom: calc(20vh + 56px); }
+.side-badge[hidden] { display: none; }
+.sidebar-drawer[hidden] { display: none; }
+
+/* Admin drawer: Гостевой сервер + Ссылки as two stacked panels; the body scrolls. */
+.admin-body { flex: 1; overflow-y: auto; display: flex; flex-direction: column; }
+.admin-drawer .guest-view { flex: none; overflow: visible; }
+.admin-h { margin: 0; padding: 14px 14px 2px; font-size: .72rem; font-weight: 700;
+           text-transform: uppercase; letter-spacing: .05em; color: var(--text-dim); }
+.admin-panel + .admin-panel { border-top: 1px solid var(--border); margin-top: 6px; }
+
 .sidebar-header { padding: 12px; }
 .btn-primary {
   width: 100%;

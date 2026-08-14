@@ -67,6 +67,10 @@ export const el = {
   sidebar: document.getElementById("sidebar"),
   sidebarBadge: document.getElementById("sidebar-badge"),
   sidebarOverlay: document.getElementById("sidebar-overlay"),
+  // admin controls drawer (Гостевой сервер + Ссылки) — owner instance only
+  adminDrawer: document.getElementById("admin-drawer"),
+  adminBadge: document.getElementById("admin-badge"),
+  adminOverlay: document.getElementById("admin-overlay"),
   usageBadge: document.getElementById("usage-badge"),
   usagePanel: document.getElementById("usage-panel"),
   usageOverlay: document.getElementById("usage-overlay"),

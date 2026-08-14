@@ -891,6 +891,7 @@ el.usageOverlay.addEventListener("click", () => setUsage(false));
 
 // Chat list drawer (left) — mirrors the settings drawer.
 export function setSidebar(open) {
+  if (open) setAdminDrawer(false); // only one left drawer at a time
   el.sidebar.classList.toggle("open", open);
   el.sidebarOverlay.hidden = !open;
   if (open) { hideBadge(el.sidebarBadge); hideBadge(el.usageBadge); }
@@ -898,6 +899,21 @@ export function setSidebar(open) {
 }
 el.sidebarBadge.addEventListener("click", () => setSidebar(true));
 el.sidebarOverlay.addEventListener("click", () => setSidebar(false));
+
+// Admin controls drawer (left, above the chats badge) — Гостевой сервер + Ссылки.
+// The badge/drawer are hidden on a guest instance (see links.js admin gate), so
+// these listeners simply never fire there. Opening it refreshes both panels via
+// the `cwi-admin-open` event (guest.js requests VM status; links.js reloads).
+export function setAdminDrawer(open) {
+  if (open) setSidebar(false); // only one left drawer at a time
+  el.adminDrawer.classList.toggle("open", open);
+  el.adminOverlay.hidden = !open;
+  if (open) { hideBadge(el.adminBadge); hideBadge(el.usageBadge); }
+  else { showBadgeSoon(el.adminBadge); showBadgeSoon(el.usageBadge); }
+  if (open) window.dispatchEvent(new CustomEvent("cwi-admin-open"));
+}
+el.adminBadge.addEventListener("click", () => setAdminDrawer(true));
+el.adminOverlay.addEventListener("click", () => setAdminDrawer(false));
 
 // Composer + title show only when a chat is open. With no chat open, reveal the
 // list; if there are no chats at all, offer a big "create" button instead.

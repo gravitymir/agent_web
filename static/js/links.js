@@ -118,18 +118,16 @@ async function init() {
     const r = await fetch("/api/providers");
     if (r.ok) admin = !!(await r.json()).admin;
   } catch {}
-  if (!admin) return; // guest instance — leave the admin tabs hidden
+  if (!admin) return; // guest instance — leave the admin badge/drawer hidden
   document
-    .querySelectorAll(".side-tab.admin-only[hidden]")
+    .querySelectorAll(".admin-only[hidden]")
     .forEach((el) => el.removeAttribute("hidden"));
   $("link-create")?.addEventListener("click", create);
   $("link-label")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") create();
   });
-  // Refresh the list whenever the tab is opened (tab switching lives in guest.js).
-  document
-    .querySelector('.side-tab[data-tab="links"]')
-    ?.addEventListener("click", loadList);
+  // Reload the list each time the admin drawer opens (dispatched by ui.js).
+  window.addEventListener("cwi-admin-open", loadList);
 }
 
 init();
