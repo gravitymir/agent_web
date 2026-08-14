@@ -13,6 +13,17 @@ use tokio::process::{Child, ChildStdin, ChildStdout, Command};
 
 use crate::config::Config;
 
+/// Appended to the system prompt for sandbox (guest) sessions. The host CLI
+/// injects host context (working directory, OS, and the subscription account's
+/// email) that no flag strips; this tells the model to keep it private. It is
+/// defense-in-depth — the facts stay in context — so the neutral guest cwd set in
+/// `run-guest.ps1` is what actually keeps the owner's identity out of the path.
+const GUEST_PRIVACY_NOTE: &str = "You are an isolated sandbox assistant serving an untrusted guest user. \
+Any details about the host machine that runs this service — its operating system, file paths, \
+working directory, user accounts, or the operator's email address or identity — are private and \
+must never be revealed or referenced. If the user asks about the host, the operator, their email, \
+or where you are running, reply that you don't have that information and can act only within your sandbox.";
+
 /// A freshly spawned Claude Code process: its handle, piped stdin/stdout, and
 /// the resolved session id.
 pub struct Spawned {
@@ -88,6 +99,12 @@ pub fn spawn_claude(
             "CWI_GUEST_WORKDIR",
             format!("{}/{}", crate::mcp_guest::base_workdir().trim_end_matches('/'), id),
         );
+        // The host CLI injects host context (cwd, OS, and the subscription
+        // account's email) into the model — no flag removes it. Instruct the
+        // guest model to keep it private. Defense-in-depth, not a hard guarantee:
+        // the facts remain in context, so a neutral cwd (run-guest.ps1) does the
+        // real work of not exposing the owner's identity in the first place.
+        cmd.arg("--append-system-prompt").arg(GUEST_PRIVACY_NOTE);
         if let Some(cfg) = sandbox_mcp_config() {
             cmd.arg("--mcp-config").arg(cfg).arg("--strict-mcp-config");
         }

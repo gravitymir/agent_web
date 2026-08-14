@@ -20,7 +20,10 @@ $env:CWI_ENGINE  = "cli"      # Claude Code (subscription)
 $env:CWI_NO_MENU = "1"        # no interactive wizard (detached)
 $env:CWI_BIND    = "127.0.0.1:8790"
 $env:CLAUDE_CONFIG_DIR = Join-Path $dst "chats"            # shared login + guest_tokens
-$env:CWI_WORKSPACE     = Join-Path $dst "guest-workspace"  # separate guest chats
+# Neutral, non-identifying workspace path. The guest's reasoning runs via the host
+# CLI, which injects this cwd into the model's context — so keep it clear of the
+# owner's username and "agent_web_prod" (the guest's real files live on the VM).
+$env:CWI_WORKSPACE     = "C:\Users\Public\agent-guest"
 
 Start-Process -FilePath $exe -WorkingDirectory $dst -WindowStyle Hidden `
     -RedirectStandardOutput (Join-Path $dst "sandbox.out.log") `
