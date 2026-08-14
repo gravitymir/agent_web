@@ -35,3 +35,28 @@ export function playCompletionChime() {
     // Web Audio unavailable/blocked — silently skip, this is a nice-to-have.
   }
 }
+
+// Tiny cues for toggling voice dictation — deliberately short and distinct so
+// the two are told apart with eyes off the screen: a RISING pair when listening
+// starts, a FALLING pair when it stops.
+export function playDictationStart() {
+  try {
+    const ac = getContext();
+    const now = ac.currentTime;
+    tone(ac, 587.33, now, 0.08, 0.11); // D5
+    tone(ac, 987.77, now + 0.07, 0.11, 0.11); // B5 (rising = on)
+  } catch (e) {
+    // best-effort
+  }
+}
+
+export function playDictationStop() {
+  try {
+    const ac = getContext();
+    const now = ac.currentTime;
+    tone(ac, 987.77, now, 0.08, 0.1); // B5
+    tone(ac, 587.33, now + 0.07, 0.11, 0.1); // D5 (falling = off)
+  } catch (e) {
+    // best-effort
+  }
+}

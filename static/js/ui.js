@@ -4,6 +4,7 @@ import { connect, sendWs, markSentPending } from './ws.js';
 import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage } from './render.js';
 import { setFaviconState } from '../favicon.js';
 import { ensureNotifyPermission } from '../notify.js';
+import { playDictationStart, playDictationStop } from '../sound.js';
 // ---------------------------------------------------------------------------
 // Composer
 // ---------------------------------------------------------------------------
@@ -340,6 +341,7 @@ export function startDictation() {
   dictation.active = true;
   el.mic.classList.add("recording");
   el.mic.title = "Остановить диктовку";
+  playDictationStart(); // short rising cue: voice input is now listening
 }
 
 export function stopDictation() {
@@ -352,6 +354,7 @@ export function endDictationUI(ok) {
   dictation.interim = ""; // any tail left in the field stays as real text
   el.mic.classList.remove("recording");
   el.mic.title = "Диктовка (голосовой ввод)";
+  playDictationStop(); // short falling cue: voice input has stopped
   // Only the explicit auto-send setting sends automatically — stopping
   // dictation (via Enter, the mic button, or recognition ending on its own)
   // never sends by itself; the user reviews the text and sends separately.
