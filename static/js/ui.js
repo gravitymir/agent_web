@@ -159,105 +159,14 @@ el.stop.addEventListener("click", () => {
 });
 
 // ---------------------------------------------------------------------------
-// Tools / permissions panel (native engine): which tool groups are enabled.
-// Persisted in localStorage; sent with every message as `caps`.
+// Tool permissions. The tools/permissions panel was removed — every built-in
+// tool group is always permitted. The guest sandbox ignores caps (it runs
+// bypassPermissions with only mcp__guest__* tools); the owner CLI auto-approves.
+// `caps` is still sent so the backend has an explicit (all-allowed) value.
 // ---------------------------------------------------------------------------
-export const CAP_KEYS = ["web_fetch", "web_search", "read", "modify", "run"];
-
-export function loadCaps() {
-  let saved = {};
-  try {
-    saved = JSON.parse(localStorage.getItem("cwi_caps") || "{}");
-  } catch (e) {
-    saved = {};
-  }
-  for (const k of CAP_KEYS) {
-    const box = document.getElementById("cap-" + k);
-    if (!box) continue;
-    box.checked = saved[k] !== false;
-  }
-}
-
 export function currentCaps() {
-  const caps = {};
-  for (const k of CAP_KEYS) {
-    const box = document.getElementById("cap-" + k);
-    caps[k] = box ? box.checked : true;
-  }
-  return caps;
+  return { web_fetch: true, web_search: true, read: true, modify: true, run: true };
 }
-
-export function saveCaps() {
-  localStorage.setItem("cwi_caps", JSON.stringify(currentCaps()));
-}
-
-for (const k of CAP_KEYS) {
-  const box = document.getElementById("cap-" + k);
-  if (box) box.addEventListener("change", saveCaps);
-}
-
-let toolsModalCloseTimer = null;
-
-export function setToolsModal(open) {
-  if (open && !state.sessionId) return; // nothing to configure without a chat
-  const modal = el.toolsModal;
-  if (toolsModalCloseTimer) {
-    clearTimeout(toolsModalCloseTimer);
-    toolsModalCloseTimer = null;
-  }
-
-  if (open) {
-    // Move before unhiding so the first animation frame already uses viewport
-    // coordinates; otherwise the panel visibly jumps out of the composer.
-    if (modal.parentElement !== document.body) document.body.appendChild(modal);
-    modal.hidden = false;
-    requestAnimationFrame(() => modal.classList.add("is-open"));
-    return;
-  }
-
-  if (modal.hidden) return;
-  modal.classList.remove("is-open");
-  // Keep the element mounted until the exit transition is finished.
-  toolsModalCloseTimer = setTimeout(() => {
-    modal.hidden = true;
-    if (modal.parentElement === document.body) el.composer.appendChild(modal);
-    toolsModalCloseTimer = null;
-  }, 200);
-}
-// The tools button lives inside the fixed composer. Some browsers let clicks on
-// the SVG bubble correctly, others don't, and pointer-events fixes above should
-// cover it. As a robust fallback, also listen on the document for clicks whose
-// target is the button itself or its child SVG.
-document.addEventListener("click", (e) => {
-  const btn = e.target.closest ? e.target.closest("#tools-btn") : null;
-  if (btn) {
-    e.preventDefault();
-    e.stopPropagation();
-    setToolsModal(el.toolsModal.hidden);
-  }
-});
-el.toolsBtn.addEventListener("click", (e) => {
-  e.preventDefault();
-  e.stopPropagation();
-  setToolsModal(el.toolsModal.hidden);
-});
-el.toolsClose.addEventListener("click", () => setToolsModal(false));
-// Any click outside the panel closes it — not just within the composer: the
-// panel is reparented to <body> while open (see setToolsModal), so a click on
-// the message list, sidebar, anywhere else on the page should close it too.
-// The tools button's own click already toggles the panel (with stopPropagation,
-// so it never reaches here) — skip it explicitly for the rare fallback path
-// where a click lands on its child SVG without stopping propagation.
-document.addEventListener("click", (e) => {
-  if (el.toolsModal.hidden) return;
-  if (e.target === el.toolsModal || el.toolsModal.contains(e.target)) return;
-  if (e.target.closest && e.target.closest("#tools-btn")) return;
-  setToolsModal(false);
-});
-// Escape closes the tools panel (when no higher modal is open).
-document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && !el.toolsModal.hidden) setToolsModal(false);
-});
 
 // ---------------------------------------------------------------------------
 // Dictation (speech-to-text via the browser's Web Speech API)
@@ -1346,7 +1255,6 @@ function reveal() {
 
 export async function init() {
   applySettings();
-  loadCaps();
   connect();
   updateScrollbar();
   updateScrollToBottomButton();

@@ -52,12 +52,6 @@
         <div id="frozen-banner" class="frozen-banner" hidden></div>
         <div id="attach-preview" class="attach-preview" hidden></div>
         <div class="composer-row">
-          <button id="tools-btn" type="button" class="btn-mic" title="Инструменты и разрешения" aria-label="Инструменты и разрешения">
-            <svg class="ios-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
-              <circle cx="12" cy="12" r="3" />
-              <path d="M19.4 15a1.65 1.65 0 0 0 .33 1.82l.06.06a2 2 0 1 1-2.83 2.83l-.06-.06a1.65 1.65 0 0 0-1.82-.33 1.65 1.65 0 0 0-1 1.51V21a2 2 0 0 1-4 0v-.09A1.65 1.65 0 0 0 9 19.4a1.65 1.65 0 0 0-1.82.33l-.06.06a2 2 0 1 1-2.83-2.83l.06-.06a1.65 1.65 0 0 0 .33-1.82 1.65 1.65 0 0 0-1.51-1H3a2 2 0 0 1 0-4h.09A1.65 1.65 0 0 0 4.6 9a1.65 1.65 0 0 0-.33-1.82l-.06-.06a2 2 0 1 1 2.83-2.83l.06.06a1.65 1.65 0 0 0 1.82.33H9a1.65 1.65 0 0 0 1-1.51V3a2 2 0 0 1 4 0v.09a1.65 1.65 0 0 0 1 1.51 1.65 1.65 0 0 0 1.82-.33l.06-.06a2 2 0 1 1 2.83 2.83l-.06.06a1.65 1.65 0 0 0-.33 1.82V9a1.65 1.65 0 0 0 1.51 1H21a2 2 0 0 1 0 4h-.09a1.65 1.65 0 0 0-1.51 1z" />
-            </svg>
-          </button>
           <button id="mic" type="button" class="btn-mic" title="Диктовка (голосовой ввод)" aria-label="Диктовка" hidden>
             <svg class="ios-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
               <rect x="9" y="3" width="6" height="11" rx="3" />
@@ -80,38 +74,6 @@
           </button>
         </div>
 
-        <!-- Tools/permissions panel — covers the composer when open -->
-        <div id="tools-modal" class="tools-modal" hidden>
-          <div class="tools-modal-head">
-            <span>Инструменты и разрешения</span>
-            <button id="tools-close" type="button" class="tools-close" aria-label="Закрыть">✕</button>
-          </div>
-          <div class="tools-modal-body">
-            <div class="tools-group-title">Веб-инструменты</div>
-            <label class="toggle-row">
-              <span class="toggle-label"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="12" cy="12" r="10" /><path d="M2 12h20" /><path d="M12 2a15.3 15.3 0 0 1 4 10 15.3 15.3 0 0 1-4 10 15.3 15.3 0 0 1-4-10 15.3 15.3 0 0 1 4-10z" /></svg> WebFetch — загрузка страниц</span>
-              <span class="toggle"><input type="checkbox" id="cap-web_fetch" /><span class="toggle-track"></span></span>
-            </label>
-            <label class="toggle-row">
-              <span class="toggle-label"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><circle cx="11" cy="11" r="8" /><path d="m21 21-4.3-4.3" /></svg> WebSearch — веб-поиск</span>
-              <span class="toggle"><input type="checkbox" id="cap-web_search" /><span class="toggle-track"></span></span>
-            </label>
-
-            <div class="tools-group-title">Разрешения</div>
-            <label class="toggle-row">
-              <span class="toggle-label"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z" /><polyline points="14 2 14 8 20 8" /><line x1="16" y1="13" x2="8" y2="13" /><line x1="16" y1="17" x2="8" y2="17" /><line x1="10" y1="9" x2="8" y2="9" /></svg> Чтение файлов</span>
-              <span class="toggle"><input type="checkbox" id="cap-read" /><span class="toggle-track"></span></span>
-            </label>
-            <label class="toggle-row">
-              <span class="toggle-label"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M12 20h9" /><path d="M16.5 3.5a2.121 2.121 0 0 1 3 3L7 19l-4 1 1-4L16.5 3.5z" /></svg> Изменение файлов</span>
-              <span class="toggle"><input type="checkbox" id="cap-modify" /><span class="toggle-track"></span></span>
-            </label>
-            <label class="toggle-row">
-              <span class="toggle-label"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><polygon points="13 2 3 14 12 14 11 22 21 10 12 10 13 2" /></svg> Запуск скриптов</span>
-              <span class="toggle"><input type="checkbox" id="cap-run" /><span class="toggle-track"></span></span>
-            </label>
-          </div>
-        </div>
       </form>
 
       <!-- Shown instead of the composer when there are no chats yet. -->
