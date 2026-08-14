@@ -1042,11 +1042,13 @@ body.drag-over::after {
   display: flex; align-items: center; justify-content: center;
   font-size: 0.8rem; font-weight: 600; font-variant-numeric: tabular-nums;
   white-space: nowrap; cursor: pointer; user-select: none;
-  transition: opacity .3s ease, color .15s, border-color .15s, background .15s, transform .1s ease;
+  transition: right .28s ease, opacity .3s ease, color .15s, border-color .15s, background .15s, transform .1s ease;
 }
 .usage-badge:hover { color: var(--accent); border-color: var(--accent); transform: translateY(-1px); }
 .usage-badge:active { transform: translateY(0); }
 .usage-badge[hidden] { display: none; }
+/* Ride the settings drawer's edge (like the left badges) instead of hiding. */
+.usage-badge.open { right: 332px; }
 /* Table variant: one row per metric — label (left) … value (right), spread with
    space-between. The box grows to fit its widest row (e.g. "контекст кэш");
    `min-width` keeps it stable at small values without drifting into the

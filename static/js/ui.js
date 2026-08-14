@@ -879,25 +879,34 @@ export function showBadgeSoon(badge) {
 export function setSettings(open) {
   el.settingsPanel.classList.toggle("open", open);
   el.settingsOverlay.hidden = !open;
-  if (open) { hideBadge(el.settingsBadge); hideBadge(el.usageBadge); }
-  else { showBadgeSoon(el.settingsBadge); showBadgeSoon(el.usageBadge); }
+  // Right badges ride the drawer's left edge (via `.open`) instead of hiding.
+  el.settingsBadge.classList.toggle("open", open);
+  el.usageBadge.classList.toggle("open", open);
 }
-el.settingsBadge.addEventListener("click", () => setSettings(true));
+el.settingsBadge.addEventListener("click", () => setSettings(!el.settingsPanel.classList.contains("open")));
 el.settingsOverlay.addEventListener("click", () => setSettings(false));
 
 // Token badge → detailed per-chat usage drawer.
 el.usageBadge.addEventListener("click", () => setUsage(true));
 el.usageOverlay.addEventListener("click", () => setUsage(false));
 
+// Both left badges ride on the edge of whichever left drawer is open (they slide
+// right with it via `.side-badge.open`) instead of being hidden — so neither
+// ever sits on top of the open panel.
+function updateLeftBadges() {
+  const anyOpen = el.sidebar.classList.contains("open") || el.adminDrawer.classList.contains("open");
+  el.sidebarBadge.classList.toggle("open", anyOpen);
+  el.adminBadge.classList.toggle("open", anyOpen);
+}
+
 // Chat list drawer (left) — mirrors the settings drawer.
 export function setSidebar(open) {
   if (open) setAdminDrawer(false); // only one left drawer at a time
   el.sidebar.classList.toggle("open", open);
   el.sidebarOverlay.hidden = !open;
-  if (open) { hideBadge(el.sidebarBadge); hideBadge(el.usageBadge); }
-  else { showBadgeSoon(el.sidebarBadge); showBadgeSoon(el.usageBadge); }
+  updateLeftBadges();
 }
-el.sidebarBadge.addEventListener("click", () => setSidebar(true));
+el.sidebarBadge.addEventListener("click", () => setSidebar(!el.sidebar.classList.contains("open")));
 el.sidebarOverlay.addEventListener("click", () => setSidebar(false));
 
 // Admin controls drawer (left, above the chats badge) — Гостевой сервер + Ссылки.
@@ -908,11 +917,10 @@ export function setAdminDrawer(open) {
   if (open) setSidebar(false); // only one left drawer at a time
   el.adminDrawer.classList.toggle("open", open);
   el.adminOverlay.hidden = !open;
-  if (open) { hideBadge(el.adminBadge); hideBadge(el.usageBadge); }
-  else { showBadgeSoon(el.adminBadge); showBadgeSoon(el.usageBadge); }
+  updateLeftBadges();
   if (open) window.dispatchEvent(new CustomEvent("cwi-admin-open"));
 }
-el.adminBadge.addEventListener("click", () => setAdminDrawer(true));
+el.adminBadge.addEventListener("click", () => setAdminDrawer(!el.adminDrawer.classList.contains("open")));
 el.adminOverlay.addEventListener("click", () => setAdminDrawer(false));
 
 // Composer + title show only when a chat is open. With no chat open, reveal the
