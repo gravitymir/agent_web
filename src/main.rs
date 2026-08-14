@@ -36,7 +36,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "003";
+pub const BUILD: &str = "004";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a

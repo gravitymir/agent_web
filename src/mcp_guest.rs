@@ -53,6 +53,28 @@ fn err_result(msg: &str) -> Value {
     text_result(msg, true)
 }
 
+/// One-line preview of a value for the audit log (newlines flattened, truncated).
+fn preview(s: &str, n: usize) -> String {
+    let flat = s.replace(['\n', '\r', '\t'], " ");
+    if flat.chars().count() <= n {
+        flat
+    } else {
+        format!("{}…", flat.chars().take(n).collect::<String>())
+    }
+}
+
+/// Append an audit line for a guest tool call to a **host-side** log
+/// (`<config_dir>/mcp_guest_audit.log`). Every sandbox action is recorded where
+/// the guest can neither read nor tamper with it. Best-effort — never fails a call.
+fn audit(tool: &str, detail: &str, exit: i32) {
+    let path = crate::config::claude_config_dir().join("mcp_guest_audit.log");
+    let ts = chrono::Local::now().format("%Y-%m-%d %H:%M:%S");
+    let line = format!("{ts}\t{tool}\texit={exit}\t{detail}\n");
+    if let Ok(mut f) = std::fs::OpenOptions::new().create(true).append(true).open(&path) {
+        let _ = f.write_all(line.as_bytes());
+    }
+}
+
 /// Tool schemas advertised to the model. Descriptions stress that these act ONLY
 /// in the sandbox, so the model reaches for them naturally.
 fn tool_defs() -> Value {
@@ -109,6 +131,7 @@ fn handle_call(req: &Value) -> Value {
             };
             let remote = format!("cd {} && ( {} )", sh(&workdir()), command);
             let (code, out, err) = executor::ssh_capture(&remote, None);
+            audit("bash", &preview(command, 300), code);
             let mut body = out;
             if !err.is_empty() {
                 if !body.is_empty() && !body.ends_with('\n') {
@@ -132,6 +155,7 @@ fn handle_call(req: &Value) -> Value {
                 return err_result("read_file: 'path' is required");
             };
             let (code, out, err) = executor::ssh_capture(&format!("cat -- {}", sh(&resolve(path))), None);
+            audit("read_file", &resolve(path), code);
             if code != 0 {
                 return err_result(&format!("read_file failed: {}", err.trim()));
             }
@@ -146,6 +170,7 @@ fn handle_call(req: &Value) -> Value {
             let q = sh(&p);
             let remote = format!("mkdir -p \"$(dirname -- {q})\" && cat > {q}");
             let (code, _out, err) = executor::ssh_capture(&remote, Some(content.as_bytes()));
+            audit("write_file", &format!("{p} ({} bytes)", content.len()), code);
             if code != 0 {
                 return err_result(&format!("write_file failed: {}", err.trim()));
             }
