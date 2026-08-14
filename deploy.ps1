@@ -7,15 +7,18 @@ $ErrorActionPreference = "Stop"
 $dst     = "C:\Users\gravi\Documents\agent_web_prod"
 $exeName = "agent_web.exe"
 
+# Stop running instances FIRST — the dev one locks target\release\agent_web.exe
+# (so the build would fail) and the prod one locks the copy target.
+$prodExe = Join-Path $dst $exeName
+$devExe  = Join-Path (Get-Location) "target\release\$exeName"
+Get-Process agent_web -ErrorAction SilentlyContinue |
+    Where-Object { $_.Path -eq $prodExe -or $_.Path -eq $devExe } |
+    ForEach-Object { Write-Host "Stopping agent_web (PID $($_.Id)) at $($_.Path)"; Stop-Process -Id $_.Id -Force }
+Start-Sleep -Milliseconds 500
+
 Write-Host "Building release..."
 cargo build --release
 if ($LASTEXITCODE -ne 0) { Write-Host "[X] build failed"; exit 1 }
-
-# Stop a running prod instance so its exe isn't locked during copy.
-Get-Process agent_web -ErrorAction SilentlyContinue |
-    Where-Object { $_.Path -eq (Join-Path $dst $exeName) } |
-    ForEach-Object { Write-Host "Stopping running prod instance (PID $($_.Id))"; Stop-Process -Id $_.Id -Force }
-Start-Sleep -Milliseconds 500
 
 New-Item -ItemType Directory -Force -Path $dst | Out-Null
 
