@@ -11,6 +11,8 @@ export const state = {
   current: null,     // active assistant render context
   pendingImages: [], // pasted images awaiting send: {media_type, data, url}
   pendingFiles: [],  // attached text files awaiting send: {name, text, truncated}
+  queue: [],         // messages queued while a turn streams: {text, imgs, label}
+  draining: false,   // server is in graceful Drain-Stop → refuse new turns/queueing
   chatUsage: {},     // session_id -> {tokens,input_tokens,cache_read,cache_creation,turns,duration_ms,contextTokens}
   providers: [],     // native engine: [{id,name,has_key,models}]
   activeProvider: "", // native engine: the server's configured provider (wizard/env)
@@ -53,14 +55,19 @@ export const el = {
   newChat: document.getElementById("new-chat"),
   bigNewChat: document.getElementById("big-new-chat"),
   attachPreview: document.getElementById("attach-preview"),
+  queueStrip: document.getElementById("queue-strip"),
   title: document.getElementById("chat-title"),
   titleName: document.getElementById("chat-title-name"),
+  reloadBtn: document.getElementById("reload-btn"),
   sessionTimer: document.getElementById("session-timer"),
   seatWarn: document.getElementById("seat-warn"),
   seatWarnCount: document.getElementById("seat-warn-count"),
   seatKicked: document.getElementById("seat-kicked"),
   drainNotice: document.getElementById("drain-notice"),
-  chatControls: document.getElementById("chat-controls"),
+  // current-chat actions drawer (export / archive / delete), right side
+  chatActionsBadge: document.getElementById("chat-actions-badge"),
+  chatActionsPanel: document.getElementById("chat-actions-panel"),
+  chatActionsOverlay: document.getElementById("chat-actions-overlay"),
   model: document.getElementById("model-select"),
   provider: document.getElementById("provider-select"),
   providerSection: document.getElementById("provider-section"),
@@ -74,6 +81,19 @@ export const el = {
   adminDrawer: document.getElementById("admin-drawer"),
   adminBadge: document.getElementById("admin-badge"),
   adminOverlay: document.getElementById("admin-overlay"),
+  // files drawer (read-only workspace explorer) — owner instance only
+  filesDrawer: document.getElementById("files-drawer"),
+  filesBadge: document.getElementById("files-badge"),
+  filesOverlay: document.getElementById("files-overlay"),
+  filesList: document.getElementById("files-list"),
+  filesPath: document.getElementById("files-path"),
+  filesUp: document.getElementById("files-up"),
+  filesRefresh: document.getElementById("files-refresh"),
+  filesView: document.getElementById("files-view"),
+  filesViewName: document.getElementById("files-view-name"),
+  filesViewMeta: document.getElementById("files-view-meta"),
+  filesViewBody: document.getElementById("files-view-body"),
+  filesBack: document.getElementById("files-back"),
   usageBadge: document.getElementById("usage-badge"),
   usagePanel: document.getElementById("usage-panel"),
   usageOverlay: document.getElementById("usage-overlay"),

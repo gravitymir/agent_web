@@ -5,6 +5,7 @@ mod broker;
 mod claude;
 mod config;
 mod executor;
+mod files;
 mod history;
 mod ids;
 mod mcp_guest;
@@ -36,7 +37,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "022";
+pub const BUILD: &str = "023";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -59,6 +60,8 @@ async fn add_security_headers(
     req: axum::extract::Request,
     next: axum::middleware::Next,
 ) -> axum::response::Response {
+    // Needed after the response comes back, so read it before `req` is consumed.
+    let vendored = req.uri().path().starts_with("/vendor/");
     let mut resp = next.run(req).await;
     let h = resp.headers_mut();
     h.insert(
@@ -69,12 +72,22 @@ async fn add_security_headers(
         axum::http::header::X_CONTENT_TYPE_OPTIONS,
         axum::http::HeaderValue::from_static("nosniff"),
     );
-    // Static assets (HTML/CSS/JS) change on every deploy; `no-cache` makes the
-    // browser revalidate (cheap 304s) and stops Cloudflare from serving a stale
-    // edge copy — otherwise a UI fix isn't visible until caches expire.
+    // Our own static assets (HTML/CSS/JS) change on every deploy; `no-cache`
+    // makes the browser revalidate (cheap 304s) and stops Cloudflare from
+    // serving a stale edge copy — otherwise a UI fix isn't visible until caches
+    // expire. `/vendor/` is the exception: a pinned third-party drop (KaTeX +
+    // ~2 MB of fonts) that only changes when the vendored version is replaced,
+    // so revalidating ~70 files on every load is pure waste. 30 days, and
+    // deliberately NOT `immutable` — the filenames carry no content hash, so a
+    // future KaTeX upgrade reuses these paths and needs caches to expire on
+    // their own rather than being pinned for a year.
     h.insert(
         axum::http::header::CACHE_CONTROL,
-        axum::http::HeaderValue::from_static("no-cache"),
+        axum::http::HeaderValue::from_static(if vendored {
+            "public, max-age=2592000"
+        } else {
+            "no-cache"
+        }),
     );
     resp
 }
@@ -280,6 +293,9 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/chats/{id}", get(load_chat).delete(delete_chat))
         .route("/api/chats/{id}/meta", put(set_meta))
         .route("/api/workspace.zip", get(download_workspace))
+        // File explorer (left drawer): read-only, workspace-rooted, admin-only.
+        .route("/api/fs/list", get(files::list))
+        .route("/api/fs/read", get(files::read))
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
         .route("/api/session", get(auth::session_info))

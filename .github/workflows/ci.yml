@@ -4,6 +4,9 @@ on:
   push:
     branches: [master]
   pull_request:
+  # Weekly, so a freshly published advisory shows up even with no commits.
+  schedule:
+    - cron: "0 6 * * 1"
 
 env:
   CARGO_TERM_COLOR: always
@@ -31,3 +34,40 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+  frontend:
+    name: frontend syntax
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # `node --check` only parses ES-module syntax on Node >= 22.7 (module
+      # detection is on by default there); the runner's default Node is older.
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      # The frontend has no build step, so nothing else would ever catch a typo
+      # in static/js before it reaches the browser. Parse every module we ship;
+      # static/vendor is third-party (KaTeX), not ours to lint.
+      - name: Parse frontend modules
+        run: |
+          set -euo pipefail
+          find static -name '*.js' -not -path 'static/vendor/*' -print0 \
+            | xargs -0 -r -n1 -t node --check
+
+  audit:
+    name: cargo audit
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: taiki-e/install-action@cargo-audit
+
+      # This binary proxies API keys and runs shell commands — a known-vulnerable
+      # dependency matters more here than in an average CLI. Warnings (yanked
+      # crates, unmaintained advisories) fail too, so drift stays visible.
+      - name: Audit dependencies
+        run: cargo audit --deny warnings

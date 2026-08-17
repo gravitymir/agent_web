@@ -230,7 +230,7 @@ pub async fn execute(name: &str, input: &Value, workspace: &Path) -> ToolOutput 
 
 /// Lexically normalize a path (resolve `.`/`..`) without touching the filesystem
 /// so it also works for files that don't exist yet.
-fn normalize(p: &Path) -> PathBuf {
+pub(crate) fn normalize(p: &Path) -> PathBuf {
     let mut out = PathBuf::new();
     for comp in p.components() {
         match comp {
@@ -247,7 +247,11 @@ fn normalize(p: &Path) -> PathBuf {
 /// Resolve a (possibly relative) path against the workspace and reject anything
 /// that escapes it — lexically, and (for existing paths) after resolving
 /// symlinks so a symlink inside the workspace can't point outside it.
-fn resolve(workspace: &Path, p: &str) -> Result<PathBuf, String> {
+///
+/// Shared with `src/files.rs` (the file-explorer API): both need exactly this
+/// sandbox rule, and a second implementation of it is a second place to get it
+/// wrong.
+pub(crate) fn resolve(workspace: &Path, p: &str) -> Result<PathBuf, String> {
     let raw = Path::new(p);
     let joined = if raw.is_absolute() {
         raw.to_path_buf()
@@ -851,6 +855,12 @@ fn is_blocked_host(url: &str) -> bool {
     if host == "localhost" || host.ends_with(".local") || host.ends_with(".internal") {
         return true;
     }
+    // An IPv6 literal keeps its brackets in `host_str` ("[::1]"), which doesn't
+    // parse as an IpAddr — strip them or every v6 literal slips through.
+    let host = host
+        .strip_prefix('[')
+        .and_then(|h| h.strip_suffix(']'))
+        .unwrap_or(&host);
     if let Ok(ip) = host.parse::<std::net::IpAddr>() {
         return is_private_ip(ip);
     }
@@ -877,16 +887,31 @@ fn resolve_public_addr(host: &str, port: u16) -> Result<std::net::SocketAddr, St
     chosen.ok_or_else(|| "host did not resolve to any address".to_string())
 }
 
-async fn web_fetch(input: &Value) -> ToolOutput {
-    let url = match str_field(input, "url") {
-        Some(u) => u,
-        None => return ToolOutput::err("WebFetch: missing 'url'"),
-    };
+/// How many redirect hops WebFetch follows. reqwest's own redirect handling is
+/// switched OFF (`Policy::none()` in `fetch_hop`): it would chase a `Location`
+/// with the default resolver, and the address pin only covers the host the
+/// client was built for. A 302 to a *different* name would therefore resolve
+/// freely — straight to `169.254.169.254` or `127.0.0.1` if that is where it
+/// points, bypassing both `is_blocked_host` and `resolve_public_addr`. Instead
+/// each hop goes back through `fetch_hop` and is validated like a fresh URL.
+const MAX_REDIRECTS: usize = 5;
+
+/// Resolve a `Location` header against the URL it came from (it may be relative)
+/// and keep it only if the result is still http(s). A redirect to `file://`,
+/// `data:` or anything unparseable is a dead end, not something to chase.
+fn join_redirect(base: &str, location: &str) -> Option<String> {
+    let joined = reqwest::Url::parse(base).ok()?.join(location).ok()?;
+    matches!(joined.scheme(), "http" | "https").then(|| joined.to_string())
+}
+
+/// One hop: validate the URL, resolve and pin it to a verified-public address,
+/// then send the request without following redirects.
+async fn fetch_hop(url: &str) -> Result<reqwest::Response, String> {
     if !(url.starts_with("http://") || url.starts_with("https://")) {
-        return ToolOutput::err("WebFetch: url must start with http:// or https://");
+        return Err("url must start with http:// or https://".to_string());
     }
     if is_blocked_host(url) {
-        return ToolOutput::err("WebFetch: blocked host (loopback/private/internal)");
+        return Err("blocked host (loopback/private/internal)".to_string());
     }
     // DNS-rebinding defense: resolve the host ourselves, reject if it maps to any
     // private IP, then PIN reqwest to the verified address so it can't re-resolve
@@ -894,55 +919,86 @@ async fn web_fetch(input: &Value) -> ToolOutput {
     // blocking, so it runs on the blocking pool. A pinned client can't be the
     // shared WEB_CLIENT, so WebFetch builds a per-call client (WebSearch keeps the
     // shared one — it only ever hits a fixed public host).
-    let parsed = match reqwest::Url::parse(url) {
-        Ok(u) => u,
-        Err(e) => return ToolOutput::err(format!("WebFetch: bad url: {e}")),
-    };
+    let parsed = reqwest::Url::parse(url).map_err(|e| format!("bad url: {e}"))?;
     let (Some(host), Some(port)) = (
         parsed.host_str().map(str::to_string),
         parsed.port_or_known_default(),
     ) else {
-        return ToolOutput::err("WebFetch: url has no host/port");
+        return Err("url has no host/port".to_string());
     };
     let host_for_resolve = host.clone();
-    let pinned =
-        match tokio::task::spawn_blocking(move || resolve_public_addr(&host_for_resolve, port))
-            .await
-        {
-            Ok(Ok(addr)) => addr,
-            Ok(Err(reason)) => return ToolOutput::err(format!("WebFetch: {reason}")),
-            Err(e) => return ToolOutput::err(format!("WebFetch: resolver task failed: {e}")),
-        };
-    let client = match reqwest::Client::builder()
+    let pinned = tokio::task::spawn_blocking(move || resolve_public_addr(&host_for_resolve, port))
+        .await
+        .map_err(|e| format!("resolver task failed: {e}"))??;
+    let client = reqwest::Client::builder()
         .user_agent("Mozilla/5.0 (compatible; cwi-agent/0.1)")
         .timeout(Duration::from_secs(30))
+        .redirect(reqwest::redirect::Policy::none())
         .resolve(&host, pinned)
         .build()
-    {
-        Ok(c) => c,
-        Err(e) => return ToolOutput::err(format!("WebFetch: {e}")),
+        .map_err(|e| e.to_string())?;
+    client.get(url).send().await.map_err(|e| e.to_string())
+}
+
+async fn web_fetch(input: &Value) -> ToolOutput {
+    let url = match str_field(input, "url") {
+        Some(u) => u,
+        None => return ToolOutput::err("WebFetch: missing 'url'"),
     };
-    match client.get(url).send().await {
-        Ok(resp) => {
-            let status = resp.status();
-            let ctype = resp
-                .headers()
-                .get("content-type")
-                .and_then(|v| v.to_str().ok())
-                .unwrap_or("")
-                .to_string();
-            let body = resp.text().await.unwrap_or_default();
-            let text = if ctype.contains("html") {
-                html_to_text(&body)
-            } else {
-                body
-            };
-            ToolOutput {
-                content: truncate(format!("HTTP {} · {}\n\n{}", status.as_u16(), url, text)),
-                is_error: !status.is_success(),
-            }
+    // Follow redirects by hand so every hop is re-validated and re-pinned.
+    // `current` ends up holding the URL the body actually came from.
+    let mut current = url.to_string();
+    let mut hops = 0usize;
+    let resp = loop {
+        let resp = match fetch_hop(&current).await {
+            Ok(r) => r,
+            Err(e) => return ToolOutput::err(format!("WebFetch: {e}")),
+        };
+        if !resp.status().is_redirection() {
+            break resp;
         }
-        Err(e) => ToolOutput::err(format!("WebFetch: {e}")),
+        // Owned, so the response isn't still borrowed when we drop or return it.
+        let location = resp
+            .headers()
+            .get(reqwest::header::LOCATION)
+            .and_then(|v| v.to_str().ok())
+            .map(str::to_string);
+        // A 3xx without a usable Location goes nowhere — report it as-is.
+        let Some(location) = location else {
+            break resp;
+        };
+        if hops == MAX_REDIRECTS {
+            return ToolOutput::err(format!("WebFetch: too many redirects (>{MAX_REDIRECTS})"));
+        }
+        let Some(next) = join_redirect(&current, &location) else {
+            return ToolOutput::err(format!(
+                "WebFetch: refusing redirect to a non-http(s) target ({location})"
+            ));
+        };
+        hops += 1;
+        current = next;
+    };
+    let status = resp.status();
+    let ctype = resp
+        .headers()
+        .get("content-type")
+        .and_then(|v| v.to_str().ok())
+        .unwrap_or("")
+        .to_string();
+    let body = resp.text().await.unwrap_or_default();
+    let text = if ctype.contains("html") {
+        html_to_text(&body)
+    } else {
+        body
+    };
+    ToolOutput {
+        content: truncate(format!(
+            "HTTP {} · {}\n\n{}",
+            status.as_u16(),
+            current,
+            text
+        )),
+        is_error: !status.is_success(),
     }
 }
 
@@ -1115,5 +1171,102 @@ mod tests {
         let ws = Path::new("work");
         assert!(resolve(ws, "../secret").is_err());
         assert!(resolve(ws, "a/../../etc").is_err());
+    }
+
+    // --- WebFetch SSRF guards -------------------------------------------------
+
+    #[test]
+    fn blocked_hosts_cover_the_usual_ssrf_targets() {
+        use super::is_blocked_host;
+        for url in [
+            "http://localhost:8787/",
+            "http://127.0.0.1/",
+            "http://[::1]/",
+            "http://169.254.169.254/latest/meta-data/",
+            "http://10.0.0.5/",
+            "http://192.168.1.1/",
+            "http://172.16.0.1/",
+            "http://100.64.0.1/",
+            "http://box.local/",
+            "http://svc.internal/",
+            "not a url",
+        ] {
+            assert!(is_blocked_host(url), "{url} should be blocked");
+        }
+        assert!(!is_blocked_host("https://example.com/page"));
+        assert!(!is_blocked_host("http://93.184.216.34/"));
+    }
+
+    #[test]
+    fn private_ip_classification() {
+        use super::is_private_ip;
+        for ip in [
+            "127.0.0.1",
+            "0.0.0.0",
+            "169.254.169.254",
+            "10.1.2.3",
+            "192.168.0.1",
+            "172.31.255.255",
+            "100.100.0.1",
+            "::1",
+            "fe80::1",
+            "fc00::1",
+            "::ffff:127.0.0.1",
+        ] {
+            assert!(
+                is_private_ip(ip.parse().unwrap()),
+                "{ip} should count as private"
+            );
+        }
+        for ip in ["8.8.8.8", "93.184.216.34", "2606:4700::1111"] {
+            assert!(!is_private_ip(ip.parse().unwrap()), "{ip} should be public");
+        }
+    }
+
+    /// A redirect hop is only followed if it stays on http(s); the joined URL is
+    /// then re-validated by `fetch_hop`, so a hop to a private host still dies.
+    #[test]
+    fn redirect_targets_are_joined_and_scheme_checked() {
+        use super::join_redirect;
+        assert_eq!(
+            join_redirect("https://example.com/a/b", "/c").as_deref(),
+            Some("https://example.com/c")
+        );
+        assert_eq!(
+            join_redirect("https://example.com/a/b", "c").as_deref(),
+            Some("https://example.com/a/c")
+        );
+        assert_eq!(
+            join_redirect("https://example.com/a", "http://other.example/x").as_deref(),
+            Some("http://other.example/x")
+        );
+        // Protocol-relative keeps the base scheme.
+        assert_eq!(
+            join_redirect("https://example.com/a", "//other.example/x").as_deref(),
+            Some("https://other.example/x")
+        );
+        // Non-http(s) targets are refused outright.
+        assert_eq!(
+            join_redirect("https://example.com/a", "file:///etc/passwd"),
+            None
+        );
+        assert_eq!(
+            join_redirect("https://example.com/a", "data:text/html,x"),
+            None
+        );
+    }
+
+    /// The hop that matters: a public URL redirecting to link-local metadata.
+    /// `join_redirect` produces the URL, `is_blocked_host` (called again at the
+    /// top of `fetch_hop`) is what stops it.
+    #[test]
+    fn redirect_to_metadata_service_is_blocked_on_the_next_hop() {
+        use super::{is_blocked_host, join_redirect};
+        let next = join_redirect(
+            "https://attacker.example/start",
+            "http://169.254.169.254/latest/meta-data/",
+        )
+        .expect("http target is joinable");
+        assert!(is_blocked_host(&next));
     }
 }

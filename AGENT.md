@@ -3,19 +3,25 @@
 ## Agentron (Ag) — effort unit, not a speed metric
 
 Deliberately **not** tokens/hour — that's throughput, not volume of work done. Modeled on kWh:
-`1 Ag = 1 hour of active agent session × 1 million tokens (input + output)`.
+`1 Ag = 1 hour of active agent session × 1 million tokens`. **Two variants** are shown side by side,
+differing only in whether cache re-sends count:
 
 ```
-Ag = H × (Tᵢ + Tₒ) / 1_000_000
+Agentron       = H × (Tᵢ + Tₒ) / 1_000_000                        # real new work only
+Agentron·cache = H × (Tᵢ + Tₒ + T_cache_read + T_cache_creation) / 1_000_000   # full processed load
 ```
+
+The re-sends usually dominate (~95 %+ — the whole context is re-fed each step), so `Agentron·cache`
+reads far larger than the plain one on long agentic chats (a small conversation can still show a big
+`·cache` figure).
 
 Live, per-chat, in the running app — not a one-off computation:
 
 - `Tᵢ`/`Tₒ` need no new storage: they're already summed straight from the on-disk `.jsonl`
   (`history.rs::ChatSummary.input_tokens`/`.tokens`, from each `assistant` line's **top-level**
   `usage` object — not the nested `iterations[]` breakdown some lines carry, which would
-  double-count a multi-step turn). Cache tokens are tracked separately and deliberately excluded
-  from `T`.
+  double-count a multi-step turn). Cache tokens (`cache_read`/`cache_creation`) are tracked
+  separately — excluded from the plain **Agentron**, added for **Agentron·cache**.
 - `H` comes from **`duration_ms`, summed turn by turn** — not wall-clock time since chat creation
   (that would count idle gaps between sessions as "work"). The CLI's `result` event carries
   `duration_ms` for that one turn, but Claude Code never persists `result` lines to its own
@@ -30,8 +36,10 @@ Live, per-chat, in the running app — not a one-off computation:
   title/icon; the frontend picks it up into `state.chatUsage[id].duration_ms` alongside the existing
   token/turn fields (`ui.js::renderChatList`). `render.js::computeAgentron(durationMs, tokens)` /
   `fmtAgentron(ag)` do the actual math + formatting (tenths only; below 0.1 shows a flat `"0"`).
-  Shown as a 5th line on the multi-line usage badge and as a row (with a derived `Ag ÷ turns`
-  "efficiency" figure) in the "Использование" detail panel.
+  Shown on the multi-line usage badge as split token rows (**tokens** = new input+output, plus a
+  dimmed **tokens·cache**), a `time` row (the `H`), a `steps` row (model steps = tool-call
+  round-trips, from `turns`), and the two Agentron rows (**Agentron** + dimmed **Agentron·cache**);
+  the "Использование" detail panel breaks the tokens down further.
 - Pre-existing chats (before this was added) simply have no `duration_ms` yet — Agentron starts
   accumulating from their next turn onward; nothing is backfilled.
 - Beware noise when eyeballing `~/.claude/projects/<encoded>/`: the app's own `/api/usage` polling
@@ -99,7 +107,9 @@ launched via `cmd /C` (see `base_command` in `src/claude.rs`).
   custom title/icon (`MetaStore::remove`). The id is validated against path traversal.
 - Chat-management + rendering features live entirely in the frontend: sidebar **search** (client-side
   title filter), per-chat **export to Markdown** (built in `ui.js::transcriptToMarkdown`) and
-  **delete**, **syntax highlighting** (`state.js::highlightCode` — a single-regex, language-agnostic
+  **delete** (both live in the right **chat-actions drawer**: `ui.js::setChatActions`, badge
+  `#chat-actions-badge` one slot below the gear — it replaced the floating `#chat-controls` chip that
+  overlapped the transcript), **syntax highlighting** (`state.js::highlightCode` — a single-regex, language-agnostic
   tokenizer over already-escaped code), a sandboxed-iframe **HTML preview** button on HTML code
   blocks (`state.js::previewCode`), and **file attachments** (📎 / drag-drop; text files are inlined
   into the prompt via `ui.js::filesToPrompt`, images route to `pendingImages`, binaries rejected).
@@ -107,10 +117,13 @@ launched via `cmd /C` (see `base_command` in `src/claude.rs`).
   `<script type="module" src="/js/main.js">`: `state.js` (state, DOM refs, helpers, self-contained
   Markdown renderer — the leaf, no imports), `render.js` (all message/thinking/tool/scrollbar view
   code), `ws.js` (WebSocket + event dispatch), `ui.js` (composer, dictation, modal, settings, chat
-  list + `init()`), `ios-icons.js` (monochrome SVG icon set + `iIcon()` helper), `main.js` (entry:
-  loads modules then calls `init()`). Names are unique across modules; circular imports are fine
-  (function bindings are hoisted, calls happen at runtime). `static/app.js.bak` is the pre-split
-  monolith kept for rollback.
+  list + `init()`), `ios-icons.js` (monochrome SVG icon set + `iIcon()` helper), `files.js` (the
+  "Файлы" drawer), `main.js` (entry: loads modules then calls `init()`). Names are unique across
+  modules; circular imports are fine
+  (function bindings are hoisted, calls happen at runtime). The pre-split monolith
+  (`static/app.js.bak`) was deleted in `66e4011` — git history is the rollback path. There is no
+  build step, so CI's only frontend gate is a `node --check` parse of every module (`ci.yml`, job
+  `frontend`).
 - **Boot:** a full-screen `#boot` overlay (a rotating, colour-shifting rounded-square orb) hides the
   UI while `init()` resolves the chat list, active engine, and last-open chat behind the scenes; then
   it fades out and the UI reveals in one staggered pass (`body.booted`), so the empty state never
@@ -160,6 +173,60 @@ is shown **read-only ("frozen")**:
   and, when opened, the whole composer input row is hidden (`composer.readonly`) with a banner
   explaining it's read-only until you switch `CWI_ENGINE`. `render.js::redecorateChatList` re-marks
   the list once the active engine resolves.
+
+## Drawer layout (three left, three right)
+
+Every panel is a fixed-position `aside` + its own overlay, opened by a badge that rides the panel's
+edge instead of hiding under it. **Left** (bottom-up: chats, admin, files) are mutually exclusive via
+`setSidebar`/`setAdminDrawer`/`setFilesDrawer`; **right** (settings at `20vh`, chat actions one slot
+below at `20vh - 56px`, usage above the gear) via `setSettings`/`setChatActions`/`setUsage`. Each
+setter closes the other two on its side — that is the whole coordination mechanism, so a new panel
+means adding one line to each sibling.
+
+Two gotchas worth keeping: the chat-actions badge sits *below* the gear rather than above because the
+usage badge grows upward in its `.multi` form and would collide; and the badges are `display:flex`,
+so any badge that can be hidden needs its own `[hidden] { display: none }` rule.
+
+**Dictation (`ui.js`) — never iterate from `e.resultIndex`.** Per spec `results` accumulates the
+whole session and `resultIndex` marks the first changed entry, so iterating from it should yield only
+new words. Chrome on Android with `continuous: true` re-delivers already-final results with the index
+back near 0, and iterating from it re-inserted the entire phrase on every event (the observed
+"смотри / смотри ещё / смотри ещё какие-то …" pile-up). `takeFinalDelta` instead diffs against
+`dictation.finalText` — the concatenation of everything already committed — and falls back to "all of
+it is new" if the incoming text isn't a continuation, so an engine that restarts its result list
+after a pause doesn't lose words either.
+
+The title capsule (`.title-capsule`) is a **row**: a round reload button, then a column holding the
+chat name and the guest countdown. The button is there for mobile — the transcript scrolls inside
+`#messages`, never the page, so the browser's pull-to-refresh is unreachable without scrolling the
+whole chat back to the top. Reloading mid-turn is safe (the keeper owns the session; the answer
+replays on reconnect).
+
+## File explorer drawer (`src/files.rs`, `static/js/files.js`)
+
+Third left badge (topmost of chats / admin / files), opening a **read-only** explorer over the
+workspace. Deliberately small in scope for a first pass — it browses and previews, nothing else.
+
+- **Backend:** `GET /api/fs/list?path=` and `GET /api/fs/read?path=`. `path` is always
+  workspace-relative (`""` = root) and goes through `agent::tools::resolve` — the *same* sandbox the
+  agent's file tools use (`..` normalization + symlink guard), which is why that function is
+  `pub(crate)` rather than duplicated. Listing: dirs before files, case-insensitive, capped at
+  `MAX_ENTRIES` with a `truncated` flag. Read: capped at `MAX_PREVIEW_BYTES` (512 KB) via a
+  `take()`-bounded read, binary sniffed by a NUL byte in the first 8 KB (reported as
+  `binary: true`, no content). Both run their filesystem work on `spawn_blocking`.
+- **`parent` comes from the server**, not from JS string-splitting: at the root it is `null`, which
+  is what disables the UI's "up" button. The sandbox edge is expressed once, in the data.
+- **Admin-only** (`state.admin`): on the disposable executor a guest would otherwise be able to walk
+  that VM's filesystem. The badge/drawer carry `.admin-only[hidden]`, un-hidden by `links.js`'s
+  existing `/api/providers` check — one admin probe for all three left drawers.
+- **Frontend:** `files.js` owns the listing/preview; `ui.js::setFilesDrawer` owns only open/close
+  (mirroring `setSidebar`/`setAdminDrawer`, all three mutually exclusive) and fires `cwi-files-open`
+  on first open. The preview *replaces* the listing in the same column rather than splitting it, and
+  file contents are written with `textContent` — never `innerHTML`.
+- **Not implemented on purpose:** running files (the user asked to defer it), any mutation
+  (create/rename/delete/upload), and browsing the guest VM's files in sandbox mode — there the
+  model's files live on the executor over SSH, not in the local workspace (see `download_workspace`
+  for how that case is handled today).
 
 ## Subscription usage / limits (`/api/usage`)
 
@@ -255,9 +322,14 @@ Anthropic-compatible; see **Gemini adapter** below). Enabled with `CWI_ENGINE=na
   overloaded** / 5xx / network; `retry_delay` honors a server `Retry-After` (capped at
   `MAX_BACKOFF_SECS`), else exponential backoff.
 - `agent/tools.rs` — Bash (PowerShell on Windows) / Read / Write / Edit / Glob / Grep, plus
-  `WebFetch` (HTTP(S) → HTML-stripped text, with an SSRF host block) and `WebSearch` (DuckDuckGo
-  HTML). File tools are sandboxed to the workspace (paths that escape are rejected), with a Bash
-  timeout and output caps.
+  `WebFetch` (HTTP(S) → HTML-stripped text) and `WebSearch` (DuckDuckGo HTML). File tools are
+  sandboxed to the workspace (paths that escape are rejected), with a Bash timeout and output caps.
+  **WebFetch SSRF contour** (`fetch_hop`): host blocklist → own DNS resolve that rejects the host if
+  *any* address is private → `ClientBuilder::resolve` pins the connection to the verified address
+  (no TOCTOU). reqwest's redirect following is OFF: the pin only covers the host its client was
+  built for, so an auto-followed `302` to another name would resolve freely — each hop instead
+  re-enters `fetch_hop` (`MAX_REDIRECTS` = 5, non-http(s) targets refused). Status of every
+  hardening item: `docs/HARDENING.md`.
 - `agent/store.rs` — own session format under `<config-dir>/cwi_native/<id>.json` (raw `messages`
   array + title/model/tokens; `<config-dir>` is `claude_config_dir()`). Separate from Claude Code's
   `.jsonl`.

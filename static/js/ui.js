@@ -51,18 +51,62 @@ export function submit() {
   const typed = el.input.value.trim();
   const images = state.pendingImages;
   const files = state.pendingFiles;
-  if ((!typed && !images.length && !files.length) || state.streaming) return;
+  if (!typed && !images.length && !files.length) return;
   if (chatFrozen(state.sessionId)) {
     showSystem("Чат только для чтения — создан другим движком. Переключите CWI_ENGINE, чтобы продолжить.");
+    return;
+  }
+  // Server is draining (graceful Drain-Stop): no new turns AND no queueing.
+  // Let the in-flight answer finish; refuse everything else so the shutdown
+  // actually converges. The backend also rejects new sends (ws.rs) — this is
+  // the client-side half so nothing even lands in the queue.
+  if (state.draining) {
+    showSystem("Сервер останавливается — новые сообщения не принимаются. Дождитесь завершения текущего ответа.");
     return;
   }
 
   // Inline attached text files as fenced blocks ahead of the typed message, so
   // the model sees their contents (works for CLI and native engines alike).
   const text = filesToPrompt(files) + typed;
+  const imgs = images.map((i) => ({ media_type: i.media_type, data: i.data }));
 
-  // The user bubble is rendered from the keeper's echo ({cwi:"user"}), so it
-  // shows consistently across every attached viewer and on replay.
+  // A turn is already streaming → queue this message instead of blocking. The
+  // user keeps typing; the queue drains one message per turn (`flushQueue` on
+  // turn end). Clear the composer now — the queued copy lives in the strip.
+  if (state.streaming) {
+    state.queue.push({ text, imgs, label: typed || `📎 ${images.length + files.length}` });
+    renderQueue();
+    el.input.value = "";
+    state.pendingImages = [];
+    state.pendingFiles = [];
+    renderAttachPreview();
+    autoGrow();
+    updateSendButton();
+    return;
+  }
+
+  if (!sendMessage(text, imgs)) {
+    // Nothing was touched — input and attachments are exactly as the user
+    // left them. No auto-retry: they decide when to try again themselves.
+    showSystem("Соединение потеряно — сообщение не отправлено. Отправьте ещё раз, когда связь восстановится.");
+    return;
+  }
+
+  // `readyState` can still read OPEN for a moment after the server process
+  // actually died — so this "success" isn't guaranteed yet. Hold the text AND
+  // attachments (don't clear them) and lock the composer until the keeper's own
+  // echo confirms the send arrived (`confirmSentMessage`) — or, if the
+  // connection drops first, just unlock it again (`restoreUnsentMessage`).
+  markSentPending();
+  lockComposerForConfirmation(true);
+  scrollToBottom();
+}
+
+// Build the send payload and push it over the socket, starting a turn. Returns
+// whether it actually went out. Deliberately does NOT touch the composer, so it
+// serves both a fresh typed send (submit holds the composer for confirmation)
+// and a queued-message flush (composer is free for the user's next message).
+function sendMessage(text, imgs) {
   const payload = {
     type: "send",
     session_id: state.sessionId,
@@ -70,42 +114,77 @@ export function submit() {
     model: el.model.value || null,
     provider: settings.provider || null,
     new_chat: state.isNew,
-    images: images.map((i) => ({ media_type: i.media_type, data: i.data })),
+    images: imgs,
     caps: currentCaps(),
   };
-  const sent = sendWs(payload);
-  if (!sent) {
-    // Nothing was touched — input and attachments are exactly as the user
-    // left them. No auto-retry: they decide when to try again themselves.
-    showSystem("Соединение потеряно — сообщение не отправлено. Отправьте ещё раз, когда связь восстановится.");
-    return;
-  }
-
-  // After the first message of a brand-new chat the backend has created the
-  // real session file. Refresh the sidebar so the chat stays visible after a
-  // page reload.
-  if (state.isNew) {
-    loadChatList();
-  }
-  state.isNew = false; // subsequent turns reuse the live process
-
-  // `readyState` can still read OPEN for a moment after the server process
-  // actually died — the browser doesn't always notice a dead socket right
-  // away — so this "success" isn't guaranteed yet. Hold the text AND
-  // attachments (don't clear them) and lock the composer until the keeper's
-  // own echo confirms the send actually arrived (`confirmSentMessage`) — or,
-  // if the connection drops first, just unlock it again (`restoreUnsentMessage`,
-  // called from ws.js) since nothing was ever thrown away to restore.
-  markSentPending();
-  lockComposerForConfirmation(true);
+  if (!sendWs(payload)) return false;
+  // First message of a brand-new chat → the backend created the session file;
+  // refresh the sidebar so it survives a reload.
+  if (state.isNew) loadChatList();
+  state.isNew = false;
   state.streaming = true;
   setStreamingUI(true);
-  updateSendButton(); // toggle send → stop immediately
-
-  // Scroll to the bottom so the outgoing message is visible while we wait for
-  // the keeper's echo and the assistant response.
-  scrollToBottom();
+  updateSendButton(); // toggle send → stop
+  return true;
 }
+
+// Drain the queue by one when the current turn ends (called from render.js's
+// turn-end path). Re-queues and pauses on a failed send.
+export async function flushQueue() {
+  // Never start a new turn while draining — the current answer just finished,
+  // and the whole point of Drain-Stop is to stop here. Queued chips stay put
+  // (frozen) so the user sees what didn't go out.
+  if (state.streaming || state.draining || !state.queue.length) return;
+  // Authoritative drain check at the exact moment we'd fire the next turn — the
+  // 15s health poll may not have caught a drain that began mid-answer, and this
+  // is the one point where it actually matters. If the server is draining now,
+  // freeze the queue here (surface the notice; the backend would reject it too).
+  if (await isDraining()) {
+    state.draining = true;
+    el.drainNotice.hidden = false;
+    updateSendButton();
+    return;
+  }
+  const next = state.queue.shift();
+  renderQueue();
+  if (sendMessage(next.text, next.imgs)) {
+    scrollToBottom();
+  } else {
+    state.queue.unshift(next);
+    renderQueue();
+    showSystem("Соединение потеряно — очередь на паузе.");
+  }
+}
+
+// Fresh, blocking read of the server's drain state. Falls back to the last
+// known flag if health can't be reached, so a transient blip doesn't flush.
+async function isDraining() {
+  try {
+    const r = await fetch("/api/health");
+    if (r.ok) return !!(await r.json()).draining;
+  } catch { /* fall through */ }
+  return state.draining;
+}
+
+// Render the pending-message strip. Each chip is the queued text + a ✕ to drop
+// it before it's sent.
+export function renderQueue() {
+  el.queueStrip.hidden = state.queue.length === 0;
+  el.queueStrip.innerHTML = state.queue
+    .map(
+      (m, i) =>
+        `<span class="queue-chip"><span class="queue-chip-txt">${escapeHtml(m.label.slice(0, 140))}</span>` +
+        `<button type="button" class="queue-chip-x" data-i="${i}" aria-label="Убрать из очереди">✕</button></span>`
+    )
+    .join("");
+}
+el.queueStrip.addEventListener("click", (e) => {
+  const btn = e.target.closest && e.target.closest(".queue-chip-x");
+  if (btn) {
+    state.queue.splice(Number(btn.dataset.i), 1);
+    renderQueue();
+  }
+});
 
 // Locks/unlocks just the "is this pending send confirmed yet" window — a
 // narrower, shorter scope than `state.streaming` (which covers the whole
@@ -174,7 +253,44 @@ export function currentCaps() {
 // and drop the recognized text into the input; the user reviews and sends.
 // ---------------------------------------------------------------------------
 export const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-export const dictation = { rec: null, active: false, interim: "" };
+// `finalText` is every finalized word of the current dictation, concatenated —
+// see takeFinalDelta for why we track it instead of trusting `resultIndex`.
+export const dictation = { rec: null, active: false, interim: "", finalText: "" };
+
+// Return only the newly finalized text in this event, and remember the total.
+//
+// Why not `e.resultIndex`: per spec `results` accumulates every result of the
+// session and `resultIndex` marks the first changed one, so iterating from it
+// should yield only new words. Chrome on Android with `continuous: true` breaks
+// that — it re-delivers already-final results with the index back near 0, so
+// iterating from `resultIndex` re-inserted the whole phrase on every event.
+// That is the "смотри / смотри ещё / смотри ещё какие-то …" pile-up: each event
+// appended everything said so far, again.
+//
+// So: compare against what we actually committed. The accumulated list is a
+// growing prefix, so the delta is the tail. If the new text is NOT a
+// continuation (an engine that restarts its result list after a pause), treat
+// all of it as new instead of silently dropping it.
+export function takeFinalDelta(results) {
+  let all = "";
+  for (const r of results) {
+    if (r.isFinal) all += r[0].transcript;
+  }
+  const delta = all.startsWith(dictation.finalText)
+    ? all.slice(dictation.finalText.length)
+    : all;
+  dictation.finalText = all;
+  return delta;
+}
+
+/** The current non-final tail (what the engine is still refining). */
+export function interimText(results) {
+  let interim = "";
+  for (const r of results) {
+    if (!r.isFinal) interim += r[0].transcript;
+  }
+  return interim;
+}
 
 // Insert text at the current caret (replacing any selection), gluing on a space
 // if it would butt against a word. Returns exactly what was inserted.
@@ -221,6 +337,7 @@ export function startDictation() {
   rec.continuous = true;
 
   dictation.interim = "";
+  dictation.finalText = "";
   el.input.focus(); // make the caret live so inserts land where it sits
 
   rec.onresult = (e) => {
@@ -228,12 +345,8 @@ export function startDictation() {
     // at the *current* caret: final words commit permanently, interim is the
     // replaceable tail we'll remove next time.
     removeInterim();
-    let finalChunk = "", interim = "";
-    for (let i = e.resultIndex; i < e.results.length; i++) {
-      const t = e.results[i][0].transcript;
-      if (e.results[i].isFinal) finalChunk += t;
-      else interim += t;
-    }
+    const finalChunk = takeFinalDelta(e.results);
+    const interim = interimText(e.results);
     if (finalChunk) dictInsert(finalChunk);
     if (interim) dictation.interim = dictInsert(interim);
     autoGrow();
@@ -261,6 +374,7 @@ export function endDictationUI(ok) {
   dictation.active = false;
   dictation.rec = null;
   dictation.interim = ""; // any tail left in the field stays as real text
+  dictation.finalText = ""; // next dictation starts its own accumulation
   el.mic.classList.remove("recording");
   el.mic.title = "Диктовка (голосовой ввод)";
   playDictationStop(); // short falling cue: voice input has stopped
@@ -307,7 +421,9 @@ export function insertPrompt(text) {
 }
 
 // ---------------------------------------------------------------------------
-// Current-chat controls (export MD / JSON, delete) — bottom-right of the chat.
+// Current-chat actions (export MD / JSON, archive, delete). They used to sit in
+// a floating chip over the bottom-right of the chat; now they live in a right
+// drawer opened by the download badge, so nothing overlaps the transcript.
 // ---------------------------------------------------------------------------
 function currentChat() {
   const active = document.querySelector(".chat-item.active");
@@ -317,36 +433,43 @@ function currentChat() {
   // Brand-new chat not yet in the list: fall back to the open session/title.
   return { id: state.sessionId, title: (el.titleName.textContent || "").trim(), icon: null };
 }
-document.getElementById("cc-export-md").addEventListener("click", () => {
+document.getElementById("ca-export-md").addEventListener("click", () => {
   const c = currentChat();
-  if (c.id) confirmChatAction({
+  if (!c.id) return;
+  setChatActions(false); // the confirmation dialog is the next step; free the panel
+  confirmChatAction({
     title: "Экспорт в Markdown",
     message: `Скачать историю чата «${c.title}» в формате Markdown?`,
     confirmLabel: "Скачать",
   }).then((confirmed) => { if (confirmed) exportChat(c.id, c.title, c.icon); });
 });
-document.getElementById("cc-export-json").addEventListener("click", () => {
+document.getElementById("ca-export-json").addEventListener("click", () => {
   const c = currentChat();
-  if (c.id) confirmChatAction({
+  if (!c.id) return;
+  setChatActions(false);
+  confirmChatAction({
     title: "Экспорт в JSON",
     message: `Скачать историю чата «${c.title}» в формате JSON?`,
     confirmLabel: "Скачать",
   }).then((confirmed) => { if (confirmed) exportChatJson(c.id, c.title); });
 });
-document.getElementById("cc-download-zip").addEventListener("click", () => {
+document.getElementById("ca-download-zip").addEventListener("click", () => {
   // Download the current chat's workspace. The server picks the source (guest →
   // this chat's files on the VM as tar.gz; owner → local workspace zip) and sets
   // the filename via Content-Disposition; the same-origin cookie authenticates.
   if (!state.sessionId) return; // nothing to download without an open chat
+  setChatActions(false);
   const a = document.createElement("a");
   a.href = "/api/workspace.zip?chat=" + encodeURIComponent(state.sessionId);
   document.body.appendChild(a);
   a.click();
   a.remove();
 });
-document.getElementById("cc-delete").addEventListener("click", () => {
+document.getElementById("ca-delete").addEventListener("click", () => {
   const c = currentChat();
-  if (c.id) deleteChat(c.id, c.title, null);
+  if (!c.id) return;
+  setChatActions(false);
+  deleteChat(c.id, c.title, null);
 });
 
 let pendingChatAction = null;
@@ -477,6 +600,8 @@ export async function createChat() {
   // replay_end (a fresh keeper, !hadLiveReplay) re-renders the STALE transcript
   // as if it were this chat's history (see ws.js).
   state.transcript = null;
+  state.queue = []; // queued messages belong to the chat you left
+  renderQueue();
   state.streaming = false;
   setStreamingUI(false);
   setFaviconState("idle");
@@ -792,34 +917,76 @@ export function showBadgeSoon(badge) {
   }, 500);
 }
 
+// Reload button in the title capsule. Reloading mid-turn is safe: the keeper
+// process owns the session server-side and survives the socket dropping, so the
+// answer keeps streaming and replays on reconnect.
+el.reloadBtn.addEventListener("click", (e) => {
+  e.stopPropagation(); // don't trigger the capsule's own hover/expand behaviour
+  location.reload();
+});
+
 // Settings drawer (right) — open via the gear, close by clicking outside.
 export function setSettings(open) {
-  if (open) setUsage(false); // only one right drawer at a time
+  if (open) {
+    setUsage(false); // only one right drawer at a time
+    setChatActions(false);
+  }
   el.settingsPanel.classList.toggle("open", open);
   el.settingsOverlay.hidden = !open;
   // Right badges ride the drawer's left edge (via `.open`) instead of hiding.
   el.settingsBadge.classList.toggle("open", open);
   el.usageBadge.classList.toggle("open", open);
+  el.chatActionsBadge.classList.toggle("open", open);
 }
 el.settingsBadge.addEventListener("click", () => setSettings(!el.settingsPanel.classList.contains("open")));
 el.settingsOverlay.addEventListener("click", () => setSettings(false));
+
+// Current-chat actions drawer (right, badge under the gear). Same width and
+// slide as the settings drawer, so all three right panels behave identically.
+export function setChatActions(open) {
+  if (open && !state.sessionId) return; // nothing to act on without an open chat
+  if (open) {
+    setSettings(false); // only one right drawer at a time
+    setUsage(false);
+  }
+  el.chatActionsPanel.classList.toggle("open", open);
+  el.chatActionsOverlay.hidden = !open;
+  el.chatActionsBadge.classList.toggle("open", open);
+  el.settingsBadge.classList.toggle("open", open);
+  el.usageBadge.classList.toggle("open", open);
+}
+el.chatActionsBadge.addEventListener("click", () =>
+  setChatActions(!el.chatActionsPanel.classList.contains("open")),
+);
+el.chatActionsOverlay.addEventListener("click", () => setChatActions(false));
 
 // Token badge → detailed per-chat usage drawer.
 el.usageBadge.addEventListener("click", () => setUsage(true));
 el.usageOverlay.addEventListener("click", () => setUsage(false));
 
-// Both left badges ride on the edge of whichever left drawer is open (they slide
-// right with it via `.side-badge.open`) instead of being hidden — so neither
-// ever sits on top of the open panel.
+// All three left badges ride on the edge of whichever left drawer is open (they
+// slide right with it via `.side-badge.open`) instead of being hidden — so none
+// ever sits on top of the open panel. The files drawer is wider than the other
+// two, hence its own offset class.
 function updateLeftBadges() {
-  const anyOpen = el.sidebar.classList.contains("open") || el.adminDrawer.classList.contains("open");
-  el.sidebarBadge.classList.toggle("open", anyOpen);
-  el.adminBadge.classList.toggle("open", anyOpen);
+  const filesOpen = el.filesDrawer.classList.contains("open");
+  const anyOpen =
+    filesOpen ||
+    el.sidebar.classList.contains("open") ||
+    el.adminDrawer.classList.contains("open");
+  for (const badge of [el.sidebarBadge, el.adminBadge, el.filesBadge]) {
+    badge.classList.toggle("open", anyOpen);
+    badge.classList.toggle("open-wide", filesOpen);
+  }
 }
 
 // Chat list drawer (left) — mirrors the settings drawer.
 export function setSidebar(open) {
-  if (open) setAdminDrawer(false); // only one left drawer at a time
+  if (open) {
+    // only one left drawer at a time
+    setAdminDrawer(false);
+    setFilesDrawer(false);
+  }
   el.sidebar.classList.toggle("open", open);
   el.sidebarOverlay.hidden = !open;
   updateLeftBadges();
@@ -832,7 +999,10 @@ el.sidebarOverlay.addEventListener("click", () => setSidebar(false));
 // these listeners simply never fire there. Opening it refreshes both panels via
 // the `cwi-admin-open` event (guest.js requests VM status; links.js reloads).
 export function setAdminDrawer(open) {
-  if (open) setSidebar(false); // only one left drawer at a time
+  if (open) {
+    setSidebar(false); // only one left drawer at a time
+    setFilesDrawer(false);
+  }
   el.adminDrawer.classList.toggle("open", open);
   el.adminOverlay.hidden = !open;
   updateLeftBadges();
@@ -841,6 +1011,22 @@ export function setAdminDrawer(open) {
 el.adminBadge.addEventListener("click", () => setAdminDrawer(!el.adminDrawer.classList.contains("open")));
 el.adminOverlay.addEventListener("click", () => setAdminDrawer(false));
 
+// Files drawer (left, topmost badge) — read-only workspace explorer. The listing
+// itself lives in files.js, which listens for `cwi-files-open`; this only owns
+// the drawer's open/close state, like the two above it.
+export function setFilesDrawer(open) {
+  if (open) {
+    setSidebar(false); // only one left drawer at a time
+    setAdminDrawer(false);
+  }
+  el.filesDrawer.classList.toggle("open", open);
+  el.filesOverlay.hidden = !open;
+  updateLeftBadges();
+  if (open) window.dispatchEvent(new CustomEvent("cwi-files-open"));
+}
+el.filesBadge.addEventListener("click", () => setFilesDrawer(!el.filesDrawer.classList.contains("open")));
+el.filesOverlay.addEventListener("click", () => setFilesDrawer(false));
+
 // Composer + title show only when a chat is open. With no chat open, reveal the
 // list; if there are no chats at all, offer a big "create" button instead.
 export function refreshComposerState() {
@@ -848,7 +1034,10 @@ export function refreshComposerState() {
   const chatsExist = el.chatList.children.length > 0;
   el.composer.style.display = open ? "" : "none";
   el.title.style.display = open ? "" : "none";
-  el.chatControls.hidden = !open; // current-chat controls only while a chat is open
+  // Chat actions only exist while a chat is open; closing one must also close
+  // the drawer, or it would linger over an empty chat area.
+  el.chatActionsBadge.hidden = !open;
+  if (!open) setChatActions(false);
   el.bigNewChat.hidden = open || chatsExist;
 
   // Frozen chat (created by the other engine): read-only until CWI_ENGINE flips.
@@ -1033,6 +1222,8 @@ export async function deleteChat(id, title, item) {
     state.isNew = true;
     state.current = null;
     state.transcript = null; // don't let a later new chat re-render this history
+    state.queue = [];
+    renderQueue();
     el.titleName.textContent = "";
     resetMessages();
     el.messages.innerHTML =
@@ -1144,6 +1335,8 @@ export async function openChat(id, title, icon, item) {
 
   el.messages.innerHTML = "";
   state.transcript = null;
+  state.queue = []; // queued messages belong to the chat you left
+  renderQueue();
   try {
     const res = await fetch(`/api/chats/${encodeURIComponent(id)}`);
     const msgs = await res.json();
@@ -1286,16 +1479,19 @@ async function loadSessionTimer() {
 // centered notice (reusing the keep-alive card) so the guest knows the current
 // answer will finish, no new messages are taken, and they can leave.
 function watchDrain() {
-  let shown = false;
   el.drainNotice.addEventListener("click", () => { el.drainNotice.hidden = true; });
   const check = () => {
     fetch("/api/health")
       .then((r) => (r.ok ? r.json() : null))
       .then((h) => {
-        if (h && h.draining && !shown) {
-          shown = true;
-          el.drainNotice.hidden = false;
-        }
+        if (!h) return;
+        const draining = !!h.draining;
+        // Show the notice once, on the transition into drain.
+        if (draining && !state.draining) el.drainNotice.hidden = false;
+        // Keep the flag live so submit()/flushQueue()/the send button all know
+        // the server is winding down and stop feeding the queue.
+        state.draining = draining;
+        updateSendButton();
       })
       .catch(() => {});
   };

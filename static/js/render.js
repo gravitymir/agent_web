@@ -1,6 +1,6 @@
 import { state, el, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings, refreshComposerState } from './ui.js';
+import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings, setChatActions, refreshComposerState, flushQueue } from './ui.js';
 import { setFaviconState } from '../favicon.js';
 import { playCompletionChime } from '../sound.js';
 import { notifyTurnComplete } from '../notify.js';
@@ -739,6 +739,7 @@ export function finalizeTurn({ notify = true, error = false } = {}) {
   }
   loadChatList().then(updateUsageBadge); // authoritative token total from the .jsonl
   loadUsage(); // refresh subscription %s at turn end (cached ~20s server-side)
+  if (!state.replayMode) flushQueue(); // a message was queued mid-turn → send it now
 }
 
 // Long answers get a chevron (bottom-right) to collapse to their last ~2 lines.
@@ -1048,16 +1049,20 @@ export function setStreamingUI(on) {
   el.input.disabled = false;
   updateSendButton();
   // Export/delete would otherwise act on a chat mid-turn — the exported file
-  // would be missing the reply still being streamed. Hide the controls for
-  // the duration; refreshComposerState() governs their visibility otherwise.
-  el.chatControls.hidden = on || !state.sessionId;
+  // would be missing the reply still being streamed. Hide the badge (and close
+  // the drawer if it's open) for the duration; refreshComposerState() governs
+  // its visibility otherwise.
+  el.chatActionsBadge.hidden = on || !state.sessionId;
+  if (on) setChatActions(false);
 }
 
 // Agentron (Ag): a *volume of work* unit, not a speed metric (tokens/hour would
 // be throughput) — modeled on kWh. 1 Ag = 1 hour of active agent session ×
-// 1 million tokens (input + output; cache tokens don't count — see AGENT.md).
-// `durationMs` is the chat's cumulative `result.duration_ms` (see
-// `history.rs`/`titles.rs`); `tokens` is input+output summed.
+// 1 million *processed* tokens. `durationMs` is the chat's cumulative
+// `result.duration_ms` (see `history.rs`/`titles.rs`); `tokens` is the same
+// processed total the badge shows — input + output + cache (see `processedTokens`
+// / README). Cache re-sends dominate, so this scales with agentic step count, not
+// just the visible conversation size.
 export function computeAgentron(durationMs, tokens) {
   const hours = (durationMs || 0) / 3_600_000;
   const mTokens = (tokens || 0) / 1_000_000;
@@ -1091,6 +1096,17 @@ export function fmtAgentron(ag) {
   if (ag < 1) return ag.toFixed(2);
   if (ag < 100) return ag.toFixed(1);
   return Math.round(ag).toString();
+}
+
+// Compact active turn-time — the `H` axis of Agentron (cumulative result
+// duration): "45с", "12м", "1ч 5м". This is turn time (start of a request to end
+// of its answer), summed per turn — not wall-clock since the chat was created.
+export function fmtDuration(ms) {
+  const s = Math.round((ms || 0) / 1000);
+  if (s < 60) return `${s}с`;
+  const m = Math.floor(s / 60);
+  if (m < 60) return `${m}м`;
+  return `${Math.floor(m / 60)}ч ${m % 60}м`;
 }
 
 // The Agentron unit mark — the outline stopwatch rendered inline at text height,
@@ -1192,9 +1208,14 @@ export function updateUsageBadge() {
   const u = state.chatUsage[state.sessionId];
   const live = state.current ? state.current.tokens || 0 : 0;
   const totalTokens = processedTokens(u, live); // input+output+cache (1:1 with logs)
-  const tokens = fmtTokens(totalTokens);
+  const newTokens = (u ? (u.tokens || 0) + (u.input_tokens || 0) : 0) + live; // no cache
+  const cleanTokens = fmtTokens(newTokens); // input + output, no cache
   const cacheTokens = fmtTokens((u && (u.cache_read || 0) + (u.cache_creation || 0)) || 0);
-  const ag = fmtAgentron(computeAgentron(u && u.duration_ms, totalTokens));
+  const dur = u && u.duration_ms;
+  // Two Agentrons: plain = real new work (input+output); ·cache = full processed
+  // total incl. context re-sends (dominates in long agentic chats).
+  const agPlain = fmtAgentron(computeAgentron(dur, newTokens));
+  const agCache = fmtAgentron(computeAgentron(dur, totalTokens));
   const ctxLimit = (u && u.contextLimit) || CONTEXT_WINDOW;
   const ctxPct = contextPercent(u && u.contextTokens, ctxLimit);
   const lvl = ctxLevel(ctxPct);
@@ -1214,16 +1235,39 @@ export function updateUsageBadge() {
     html += ubRow("week", pct(g.week), "", "Week — all models");
     html += ubRow("Fable", pct(g.fable), "ub-dim", "Week — Fable");
   }
-  html += ubRow("tokens", tokens, "", "Processed by the model (input + output + cache)");
+  html += ubRow("tokens", cleanTokens, "", "New tokens — input + output (no cache)");
+  html += ubRow(
+    "tokens·cache",
+    cacheTokens,
+    "ub-dim",
+    "Cached context re-sent each step (cache read + create) — the bulk of the total"
+  );
+  html += ubRow(
+    "time",
+    fmtDuration(dur),
+    "",
+    "Active turn time (request → end of answer), summed — the H axis of Agentron"
+  );
+  html += ubRow(
+    "steps",
+    String((u && u.turns) || 0),
+    "ub-dim",
+    "Model steps — tool-call round-trips summed across all requests (one answer per request)"
+  );
   html += ubRow(
     "Agentron",
-    `${ag} ${agMark()}`,
+    `${agPlain} ${agMark()}`,
     "",
-    "Agentron — agentic work volume (hours × million tokens)"
+    "Agentron — real new work (input + output) × active hours"
+  );
+  html += ubRow(
+    "Agentron·cache",
+    `${agCache} ${agMark()}`,
+    "ub-dim",
+    "Agentron incl. context re-sends (the full processed total, cache dominates) × active hours"
   );
   html += ubRow("Max context", fmtTokens(ctxLimit), "ub-dim", "Model/engine max context window");
   html += ubRow("context", `${Math.round(ctxPct)}%`, `ub-ctx ${lvl}`, ctxTitle);
-  html += ubRow("context cache", cacheTokens, "ub-dim", "Cached context tokens (cache read + create)");
   el.usageBadge.classList.add("multi");
   el.usageBadge.innerHTML = html;
   // Native/Gemini: clicking the context row opens the context settings
@@ -1397,7 +1441,8 @@ export function renderUsageDetail() {
   const effDuration = hasRealModels
     ? u.duration_ms || 0
     : Math.max(u.duration_ms || 0, (u.turns || 0) * 25_000);
-  const agentron = computeAgentron(effDuration, total);
+  const agentron = computeAgentron(effDuration, total); // incl. cache re-sends
+  const agentronPlain = computeAgentron(effDuration, output + input); // new work only
 
   // Subscription limits section (moved here from settings) — shown when known.
   const g = state.usage;
@@ -1521,7 +1566,8 @@ export function renderUsageDetail() {
     row("bolt", "Из кэша", fmtFull(u.cache_read || 0), "дешевле обычного входа") +
     row("archive", "Создание кэша", fmtFull(u.cache_creation || 0)) +
     row("bubble", "Ходов модели", fmtFull(u.turns || 0)) +
-    row("stopwatch", "Agentron", `${fmtAgentron(agentron)} ${agMark()}`, `время в чате: ${fmtDur(effDuration)}`) +
+    row("stopwatch", "Agentron", `${fmtAgentron(agentronPlain)} ${agMark()}`, `реальная работа (вход+выход) · время: ${fmtDur(effDuration)}`) +
+    row("stopwatch", "Agentron·cache", `${fmtAgentron(agentron)} ${agMark()}`, "с учётом кэш-переотправок контекста") +
     `</div>`;
 
   // Toggle the breakdown open/closed (persisted in `modelsExpanded`).
@@ -1541,13 +1587,17 @@ export function renderUsageDetail() {
 
 export function setUsage(open) {
   if (open && !state.sessionId) return; // nothing to show without an open chat
-  if (open) setSettings(false); // only one right drawer at a time
+  if (open) {
+    setSettings(false); // only one right drawer at a time
+    setChatActions(false);
+  }
   el.usagePanel.classList.toggle("open", open);
   el.usageOverlay.hidden = !open;
   // Right badges ride the (wider) usage drawer's edge instead of hiding — matches
   // the settings/left drawers. `.usage-open` shifts them to right:492px.
   el.usageBadge.classList.toggle("usage-open", open);
   el.settingsBadge.classList.toggle("usage-open", open);
+  el.chatActionsBadge.classList.toggle("usage-open", open);
   if (open) { renderUsageDetail(); loadUsage(); }
 }
 
@@ -1559,7 +1609,10 @@ export function updateSendButton() {
     state.pendingImages.length === 0 &&
     state.pendingFiles.length === 0;
   el.send.hidden = false;
-  el.send.disabled = state.streaming || empty || chatFrozen(state.sessionId);
+  // Enabled even while streaming (unless empty/frozen): a send during a turn
+  // queues the message instead of blocking (see submit/flushQueue). Stop shows
+  // alongside so the user can still interrupt.
+  el.send.disabled = empty || chatFrozen(state.sessionId) || state.draining;
   el.stop.hidden = !state.streaming;
 }
 
