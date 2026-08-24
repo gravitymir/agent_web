@@ -78,6 +78,46 @@ function showResult(text, copyable) {
       }
     });
     box.appendChild(c);
+
+    // QR expander: a chevron + "QR" toggle that reveals a scannable code of the
+    // link, so a guest can point a phone camera at the owner's screen instead of
+    // typing or forwarding. The image is fetched lazily on first open.
+    const qrToggle = document.createElement("button");
+    qrToggle.type = "button";
+    qrToggle.className = "btn-secondary guest-btn link-qr-toggle";
+    const chev = document.createElementNS("http://www.w3.org/2000/svg", "svg");
+    chev.setAttribute("viewBox", "0 0 24 24");
+    chev.setAttribute("fill", "none");
+    chev.setAttribute("stroke", "currentColor");
+    chev.setAttribute("stroke-width", "2.2");
+    chev.setAttribute("stroke-linecap", "round");
+    chev.setAttribute("stroke-linejoin", "round");
+    chev.classList.add("qr-chevron");
+    const chevPath = document.createElementNS("http://www.w3.org/2000/svg", "path");
+    chevPath.setAttribute("d", "M6 9l6 6 6-6");
+    chev.appendChild(chevPath);
+    const qrLabel = document.createElement("span");
+    qrLabel.textContent = "QR";
+    qrToggle.append(chev, qrLabel);
+
+    const qrBox = document.createElement("div");
+    qrBox.className = "link-qr";
+    qrBox.hidden = true;
+
+    qrToggle.addEventListener("click", () => {
+      const show = qrBox.hidden;
+      qrBox.hidden = !show;
+      qrToggle.classList.toggle("open", show);
+      if (show && !qrBox.dataset.loaded) {
+        const img = document.createElement("img");
+        img.className = "link-qr-img";
+        img.alt = "QR-код ссылки";
+        img.src = `/api/links/qr?data=${encodeURIComponent(copyable)}`;
+        qrBox.appendChild(img);
+        qrBox.dataset.loaded = "1";
+      }
+    });
+    box.append(qrToggle, qrBox);
   }
 }
 

@@ -13,8 +13,6 @@ import { setFilesDrawer } from "./ui.js";
 
 // Current directory, workspace-relative. "" = workspace root.
 let cwd = "";
-// Set once the first listing lands, so reopening the drawer doesn't re-fetch.
-let loaded = false;
 
 function fmtSize(bytes) {
   if (bytes === null || bytes === undefined) return "";
@@ -118,7 +116,6 @@ export async function load(path) {
   }
 
   cwd = data.path;
-  loaded = true;
   showListing();
   renderPath(data.root_name, data.path);
   // The server reports whether a parent exists; at the root there is none.
@@ -208,8 +205,10 @@ document.addEventListener("keydown", (e) => {
   else setFilesDrawer(false);
 });
 
-// Opening the drawer loads the root once; after that the last directory stays
-// put, so closing and reopening returns you where you were.
+// Opening the drawer re-reads the current directory every time — so closing and
+// reopening the explorer is itself the "refresh" gesture. The last directory is
+// kept (not reset to root), just re-fetched. While it stays open nothing polls;
+// the ⟳ button at the top is the only other way to refresh.
 window.addEventListener("cwi-files-open", () => {
-  if (!loaded) load("");
+  load(cwd);
 });

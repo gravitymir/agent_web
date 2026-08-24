@@ -132,7 +132,7 @@
 
   <!-- Current-chat actions: a badge under the gear (right edge) opening a drawer.
        Replaces the old floating chip that sat over the chat area. -->
-  <button id="chat-actions-badge" class="settings-badge chat-actions-badge" title="Действия с чатом" aria-label="Действия с чатом" hidden>
+  <button id="chat-actions-badge" class="settings-badge chat-actions-badge" title="Экспорт" aria-label="Экспорт" hidden>
     <!-- Deliberately heavier strokes than the other badges: this is the "download" mark. -->
     <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round">
       <line x1="12" y1="3" x2="12" y2="15" />
@@ -141,8 +141,11 @@
     </svg>
   </button>
   <div id="chat-actions-overlay" class="settings-overlay" hidden></div>
-  <aside id="chat-actions-panel" class="settings-panel" aria-label="Действия с чатом">
-    <div class="settings-header"><h2>Чат</h2></div>
+  <aside id="chat-actions-panel" class="settings-panel" aria-label="Экспорт">
+    <div class="settings-header">
+      <button type="button" class="drawer-close" data-close="chat-actions" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <h2>Экспорт</h2>
+    </div>
     <div class="settings-body">
       <div class="chat-actions-list">
         <button id="ca-export-md" class="chat-action" type="button">
@@ -177,6 +180,39 @@
     </div>
   </aside>
 
+  <!-- Party badge (right, below chat-actions): opens the room drawer — the human
+       side-chat and the "release the wheel" control. Shell for now; the
+       cross-participant relay and control seat are wired next. -->
+  <button id="party-badge" class="settings-badge party-badge" title="Чат" aria-label="Чат">
+    <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
+      <path d="M17 21v-2a4 4 0 0 0-4-4H5a4 4 0 0 0-4 4v2" />
+      <circle cx="9" cy="7" r="4" />
+      <path d="M23 21v-2a4 4 0 0 0-3-3.87" />
+      <path d="M16 3.13a4 4 0 0 1 0 7.75" />
+    </svg>
+  </button>
+  <div id="party-overlay" class="settings-overlay" hidden></div>
+  <aside id="party-panel" class="settings-panel party-panel" aria-label="Чат">
+    <div class="settings-header">
+      <button type="button" class="drawer-close" data-close="party" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <h2>Чат</h2>
+      <!-- Who currently drives the agent (flag + name); shown only in a session. -->
+      <span class="party-driver" id="party-driver" hidden></span>
+    </div>
+    <div class="settings-body party-body">
+      <!-- Human side-chat: participants talk to each other here (never sent to the
+           agent). Scrollback grows upward; composer pinned at the bottom. -->
+      <div class="party-log" id="party-log"></div>
+      <div class="party-note" id="party-note">Общий чат — виден всем, кто сейчас на этой странице.</div>
+      <form class="party-composer" id="party-composer">
+        <textarea id="party-input" class="party-input" rows="1" placeholder="Написать в комнату…" autocomplete="off"></textarea>
+        <button type="submit" class="party-send" id="party-send" aria-label="Отправить">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><line x1="22" y1="2" x2="11" y2="13" /><polygon points="22 2 15 22 11 13 2 9 22 2" /></svg>
+        </button>
+      </form>
+    </div>
+  </aside>
+
   <!-- Files badge (left, topmost of the three) — owner instance only -->
   <button id="files-badge" class="side-badge files-badge admin-only" title="Файлы рабочей папки" aria-label="Файлы" hidden>
     <svg class="ios-icon" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round">
@@ -200,6 +236,7 @@
   </button>
   <div id="sidebar-overlay" class="side-overlay" hidden></div>
   <aside id="sidebar" class="sidebar-drawer" aria-label="Список чатов">
+    <button type="button" class="drawer-close left" data-close="sidebar" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
     <div class="sidebar-header">
       <button id="new-chat" class="btn-primary"><svg class="ios-icon inline" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><line x1="12" y1="5" x2="12" y2="19" /><line x1="5" y1="12" x2="19" y2="12" /></svg> Новый чат</button>
       <input id="chat-search" class="chat-search" type="search"
@@ -211,6 +248,7 @@
   <!-- Admin drawer (left) — Гостевой сервер + Ссылки, two stacked panels -->
   <div id="admin-overlay" class="side-overlay" hidden></div>
   <aside id="admin-drawer" class="sidebar-drawer admin-drawer admin-only" aria-label="Админ-панель" hidden>
+    <button type="button" class="drawer-close left" data-close="admin" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
     <div class="admin-body">
       <section class="admin-panel">
         <h3 class="admin-h">Гостевой сервер</h3>
@@ -255,6 +293,7 @@
        it (with a back link) so the narrow column isn't split in half. -->
   <div id="files-overlay" class="side-overlay" hidden></div>
   <aside id="files-drawer" class="sidebar-drawer files-drawer admin-only" aria-label="Файлы" hidden>
+    <button type="button" class="drawer-close left" data-close="files" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M15 6l-6 6 6 6"/></svg></button>
     <div class="files-header">
       <div class="files-bar">
         <button id="files-up" class="files-up" type="button" title="На уровень выше" aria-label="На уровень выше" disabled>
@@ -311,7 +350,10 @@
   </button>
   <div id="settings-overlay" class="settings-overlay" hidden></div>
   <aside id="settings-panel" class="settings-panel" aria-label="Настройки">
-    <div class="settings-header"><h2>Настройки</h2></div>
+    <div class="settings-header">
+      <button type="button" class="drawer-close" data-close="settings" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <h2>Настройки</h2>
+    </div>
     <div class="settings-body">
       <section class="setting-group" id="provider-section" hidden>
         <div class="setting-label">Провайдер</div>
@@ -384,7 +426,10 @@
   <!-- Usage detail drawer (opened by clicking the token badge) -->
   <div id="usage-overlay" class="usage-overlay" hidden></div>
   <aside id="usage-panel" class="usage-panel" aria-label="Использование">
-    <div class="settings-header"><h2>Использование</h2></div>
+    <div class="settings-header">
+      <button type="button" class="drawer-close" data-close="usage" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
+      <h2>Использование</h2>
+    </div>
     <div class="settings-body">
       <div id="usage-detail"></div>
     </div>
@@ -416,6 +461,22 @@
       <div class="modal-actions">
         <button id="action-modal-cancel" class="btn-ghost" type="button">Отмена</button>
         <button id="action-modal-confirm" class="btn-primary" type="button"></button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Party join: a guest picks a display name before entering the room. Shown
+       only on a gated (guest) instance; empty name → server auto-names "Гость N". -->
+  <div id="party-join-overlay" class="modal-overlay" hidden>
+    <div class="modal party-join-modal" role="dialog" aria-modal="true" aria-labelledby="party-join-title">
+      <h2 id="party-join-title" class="modal-title">Как тебя звать?</h2>
+      <label class="field-label" for="party-join-name">Имя в комнате</label>
+      <input id="party-join-name" class="modal-input" type="text" inputmode="text"
+             maxlength="10" placeholder="напр. Барсук" autocomplete="off"
+             aria-describedby="party-join-hint" />
+      <p class="party-join-hint" id="party-join-hint">Придумай имя, 5–10 символов — буквы, цифры.</p>
+      <div class="modal-actions">
+        <button id="party-join-go" class="btn-primary" type="button">Войти</button>
       </div>
     </div>
   </div>

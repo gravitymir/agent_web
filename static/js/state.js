@@ -13,6 +13,13 @@ export const state = {
   pendingFiles: [],  // attached text files awaiting send: {name, text, truncated}
   queue: [],         // messages queued while a turn streams: {text, imgs, label}
   draining: false,   // server is in graceful Drain-Stop → refuse new turns/queueing
+  usageCollapsed: (() => { try { return localStorage.getItem("cwi_usage_collapsed") === "1"; } catch { return false; } })(),
+  cliFlavor: "claude", // which CLI binary the cli engine runs: "claude" | "qwen"
+  gated: false,      // guest instance (behind a magic link) — party/roles apply
+  partyRole: "driver", // this connection's room role: "driver" | "observer"
+  partyName: "",     // this connection's server-assigned display name
+  partyCid: null,    // this connection's id — to recognise our own chat messages
+  partyDriver: "",   // display name of whoever currently drives the agent
   chatUsage: {},     // session_id -> {tokens,input_tokens,cache_read,cache_creation,turns,duration_ms,contextTokens}
   providers: [],     // native engine: [{id,name,has_key,models}]
   activeProvider: "", // native engine: the server's configured provider (wizard/env)
@@ -68,6 +75,18 @@ export const el = {
   chatActionsBadge: document.getElementById("chat-actions-badge"),
   chatActionsPanel: document.getElementById("chat-actions-panel"),
   chatActionsOverlay: document.getElementById("chat-actions-overlay"),
+  partyBadge: document.getElementById("party-badge"),
+  partyPanel: document.getElementById("party-panel"),
+  partyOverlay: document.getElementById("party-overlay"),
+  partyDriver: document.getElementById("party-driver"),
+  partyJoinOverlay: document.getElementById("party-join-overlay"),
+  partyJoinName: document.getElementById("party-join-name"),
+  partyJoinHint: document.getElementById("party-join-hint"),
+  partyJoinGo: document.getElementById("party-join-go"),
+  partyLog: document.getElementById("party-log"),
+  partyComposer: document.getElementById("party-composer"),
+  partyInput: document.getElementById("party-input"),
+  partySend: document.getElementById("party-send"),
   model: document.getElementById("model-select"),
   provider: document.getElementById("provider-select"),
   providerSection: document.getElementById("provider-section"),
@@ -250,6 +269,21 @@ export function renderMarkdown(src) {
   // Bold / italic
   html = html.replace(/\*\*([^*]+)\*\*/g, "<strong>$1</strong>");
   html = html.replace(/(^|[^*])\*([^*\n]+)\*/g, "$1<em>$2</em>");
+
+  // Images ![alt](src) — MUST run before the link rule below, which would
+  // otherwise consume the `[alt](src)` part and leave a stray "!" behind.
+  // Allowed sources: same-origin paths (/foo.png), http(s), and data:image
+  // base64. Anything else (javascript:, file:, …) is left as plain text; the CSP
+  // (`img-src 'self' data: blob:`) is the second gate, not the only one.
+  // Deliberately NO `loading="lazy"`: with it, an image was visible while the
+  // answer streamed (inserted straight into the viewport) but blank after a
+  // reload — replaying history inserts it into a long document that is then
+  // scrolled programmatically, and mobile browsers routinely miss that moment
+  // and never start the fetch. Answers carry few images; eager loading is cheap.
+  html = html.replace(
+    /!\[([^\]]*)\]\((\/[^\s)]*|https?:\/\/[^\s)]+|data:image\/[a-zA-Z0-9.+-]+;base64,[A-Za-z0-9+/=]+)\)/g,
+    (m, alt, url) => `<img class="msg-md-image" src="${url}" alt="${alt}" />`,
+  );
 
   // Links [text](url) — only http/https are linkified (so `javascript:` etc.
   // never become anchors). `escapeHtml(src)` above already neutralized <>&"' in

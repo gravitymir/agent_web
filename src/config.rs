@@ -166,6 +166,34 @@ impl Config {
         self.projects_root
             .join(encode_project_dir(&self.workspace_abs()))
     }
+
+    /// True when the CLI engine is running Qwen Code instead of Claude Code
+    /// (CWI_CLAUDE_BIN names a qwen binary). Qwen speaks the same stream-json
+    /// protocol but stores its transcripts in its own home (see
+    /// [`Config::qwen_session_dir`]) in a Gemini-style line format.
+    pub fn cli_qwen(&self) -> bool {
+        self.claude_bin
+            .rsplit(['/', '\\'])
+            .next()
+            .unwrap_or("")
+            .to_ascii_lowercase()
+            .contains("qwen")
+    }
+
+    /// Where Qwen Code keeps this workspace's transcripts:
+    /// `~/.qwen/projects/<encoded-cwd, lowercased>/chats/<id>.jsonl` — the same
+    /// path encoding as Claude Code's projects dir, but lowercased and with an
+    /// extra `chats/` level.
+    pub fn qwen_session_dir(&self) -> PathBuf {
+        let home = std::env::var_os("USERPROFILE")
+            .or_else(|| std::env::var_os("HOME"))
+            .map(PathBuf::from)
+            .unwrap_or_default();
+        home.join(".qwen")
+            .join("projects")
+            .join(encode_project_dir(&self.workspace_abs()).to_ascii_lowercase())
+            .join("chats")
+    }
 }
 
 /// The Claude Code config/state directory, holding sessions, credentials, and

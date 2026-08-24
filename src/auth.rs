@@ -11,10 +11,9 @@
 //!   HMAC-signed, expiring session cookie. Middleware then guards every route,
 //!   including `/ws` — otherwise the gate would be bypassable over the socket.
 
-use std::collections::HashMap;
 use std::fs;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex};
+use std::sync::Arc;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::{
@@ -50,36 +49,13 @@ pub(crate) fn write_private(path: &Path, contents: &[u8]) {
 /// Session cookie name.
 const COOKIE: &str = "cwi_session";
 
-/// One active session per magic link. After this long without *real* activity
-/// (a user action or an agent turn — not background polling) a seat is "asleep"
-/// and a newcomer on the same link may take it over. An active seat (touched more
-/// recently) rejects newcomers.
-const SEAT_IDLE_SECS: u64 = 600; // 10 min
-
-/// Who currently holds a magic link's single seat, and when it last saw activity.
-struct Seat {
-    /// Random per-login id; the cookie must carry a matching one to keep the seat.
-    holder: String,
-    /// Unix seconds of the last real activity.
-    last_seen: u64,
-}
-
-/// Outcome of trying to claim a link's seat at login.
+/// Outcome of a login attempt on a magic link. A link admits many people (the
+/// room/party model); the only failure is a bad code — no single-seat exclusion.
 pub enum Claim {
     /// Granted — the `Set-Cookie` value to send.
     Granted(String),
-    /// The link is held by an active session on another device.
-    Busy,
     /// The code is invalid/expired.
     Invalid,
-}
-
-/// Outcome of an activity ping.
-pub enum Touch {
-    /// Still the holder — last-seen refreshed.
-    Ok,
-    /// Evicted (another device took the seat) or the seat is gone.
-    Kicked,
 }
 
 #[derive(Clone, Serialize, Deserialize)]
@@ -132,35 +108,10 @@ pub async fn session_info(
     })
 }
 
-/// `POST /api/activity` — a real user action (or an in-flight agent turn) keeping
-/// the session's seat warm so it stays the active holder. Public (bypasses the
-/// cookie gate) so an evicted device gets a clean `{kicked:true}` instead of a
-/// bare 401. Returns `idle_secs` so the client knows the window.
-pub async fn activity(State(state): State<Arc<AppState>>, headers: HeaderMap) -> Response {
-    if !state.auth.enabled {
-        return Json(serde_json::json!({ "ok": true })).into_response();
-    }
-    let cookie = headers.get(header::COOKIE).and_then(|v| v.to_str().ok());
-    match state.auth.touch_seat(cookie) {
-        Touch::Ok => {
-            Json(serde_json::json!({ "ok": true, "idle_secs": SEAT_IDLE_SECS })).into_response()
-        }
-        Touch::Kicked => (
-            StatusCode::UNAUTHORIZED,
-            Json(serde_json::json!({ "kicked": true })),
-        )
-            .into_response(),
-    }
-}
-
 pub struct Auth {
     pub enabled: bool,
     secret: Vec<u8>, // HMAC key for session cookies
     store: PathBuf,  // guest_tokens.json
-    /// One seat per magic link (keyed by the code's SHA-256 hash) — enforces
-    /// "one active session per link" (see [`Auth::claim_seat`]/[`touch_seat`]).
-    /// In-memory: on this disposable executor, a restart resets all seats.
-    seats: Mutex<HashMap<String, Seat>>,
 }
 
 pub(crate) fn now() -> u64 {
@@ -226,7 +177,6 @@ impl Auth {
             enabled,
             secret: load_or_create_secret(&dir),
             store: dir.join("guest_tokens.json"),
-            seats: Mutex::new(HashMap::new()),
         }
     }
 
@@ -350,69 +300,24 @@ impl Auth {
         self.parse_cookie(cookie_header).map(|(_, _, exp)| exp)
     }
 
-    /// Gate check: the cookie is valid AND still the current holder of its seat
-    /// (i.e. this device wasn't evicted by a newcomer, and the server hasn't
-    /// forgotten the seat via a restart).
+    /// Gate check: a validly-signed, unexpired session cookie. No single-seat
+    /// exclusivity any more — a magic link admits many people (the room model);
+    /// the cookie's own expiry (bounded by the code's TTL at login) ends access.
     fn session_active(&self, cookie_header: Option<&str>) -> bool {
-        let Some((code_hash, holder, _)) = self.parse_cookie(cookie_header) else {
-            return false;
-        };
-        self.seats
-            .lock()
-            .map(|s| {
-                s.get(&code_hash)
-                    .is_some_and(|seat| ct_eq(&seat.holder, &holder))
-            })
-            .unwrap_or(false)
+        self.parse_cookie(cookie_header).is_some()
     }
 
-    /// Claim a link's single seat at login. Grants when the seat is free or its
-    /// holder is asleep (idle ≥ [`SEAT_IDLE_SECS`]) — evicting the sleeper; rejects
-    /// when an active session already holds it. Returns the `Set-Cookie` on grant.
+    /// Log in on a magic link: verify the code and issue a signed session cookie.
+    /// Always granted for a valid code — many people share one link (driver +
+    /// observers), so there is no "busy" rejection. `holder` is a per-login id
+    /// kept in the cookie for uniqueness, no longer tied to an exclusive seat.
     pub fn claim_seat(&self, code: &str, secure: bool) -> Claim {
         let Some(ttl) = self.verify_code(code) else {
             return Claim::Invalid;
         };
         let code_hash = sha256_hex(code.trim());
         let holder = random_code();
-        let n = now();
-        {
-            let mut seats = match self.seats.lock() {
-                Ok(s) => s,
-                Err(_) => return Claim::Invalid,
-            };
-            if let Some(seat) = seats.get(&code_hash)
-                && n.saturating_sub(seat.last_seen) < SEAT_IDLE_SECS
-            {
-                return Claim::Busy;
-            }
-            seats.insert(
-                code_hash.clone(),
-                Seat {
-                    holder: holder.clone(),
-                    last_seen: n,
-                },
-            );
-        }
         Claim::Granted(self.seat_cookie(&code_hash, &holder, ttl, secure))
-    }
-
-    /// Refresh a seat's last-activity from a real action. `Kicked` when the caller
-    /// no longer holds the seat (evicted, or the seat was forgotten on restart).
-    pub fn touch_seat(&self, cookie_header: Option<&str>) -> Touch {
-        let Some((code_hash, holder, _)) = self.parse_cookie(cookie_header) else {
-            return Touch::Kicked;
-        };
-        let Ok(mut seats) = self.seats.lock() else {
-            return Touch::Kicked;
-        };
-        match seats.get_mut(&code_hash) {
-            Some(seat) if ct_eq(&seat.holder, &holder) => {
-                seat.last_seen = now();
-                Touch::Ok
-            }
-            _ => Touch::Kicked,
-        }
     }
 }
 
@@ -440,7 +345,6 @@ fn is_secure(h: &HeaderMap) -> bool {
 fn is_public(path: &str) -> bool {
     path == "/login"
         || path == "/api/health"
-        || path == "/api/activity"
         || path == "/api/drain/begin"
         || path == "/api/drain/end"
         || path.starts_with("/broker/")
@@ -491,17 +395,13 @@ pub async fn login_get(
 ) -> Response {
     let auth = &state.auth;
     if let Some(code) = q.code.as_deref() {
-        return claim_response(auth.claim_seat(code, is_secure(&headers)));
+        return claim_response(auth.claim_seat(&extract_code(code), is_secure(&headers)));
     }
     Html(login_html(None)).into_response()
 }
 
-/// Message shown when the link is already in active use elsewhere.
-const BUSY_MSG: &str = "Эта ссылка сейчас открыта на другом устройстве. Попробуйте позже — место \
-освободится после 10 минут бездействия.";
-
 /// Turn a [`Claim`] into an HTTP response: grant sets the cookie and redirects to
-/// the app; busy/invalid re-render the login page with a message.
+/// the app; an invalid code re-renders the login page with a message.
 fn claim_response(claim: Claim) -> Response {
     match claim {
         Claim::Granted(cookie) => {
@@ -511,7 +411,6 @@ fn claim_response(claim: Claim) -> Response {
             }
             resp
         }
-        Claim::Busy => Html(login_html(Some(BUSY_MSG))).into_response(),
         Claim::Invalid => Html(login_html(Some("Неверный или истёкший код."))).into_response(),
     }
 }
@@ -521,13 +420,33 @@ pub async fn login_post(
     headers: HeaderMap,
     Form(f): Form<LoginForm>,
 ) -> Response {
-    let claim = state.auth.claim_seat(&f.code, is_secure(&headers));
+    let claim = state
+        .auth
+        .claim_seat(&extract_code(&f.code), is_secure(&headers));
     // Small delay on a bad code to blunt automated guessing (128-bit, so this is
     // belt-and-suspenders).
     if matches!(claim, Claim::Invalid) {
         tokio::time::sleep(std::time::Duration::from_millis(300)).await;
     }
     claim_response(claim)
+}
+
+/// Accept either a bare access code or a full magic-link URL pasted into the
+/// login form: if the input carries a `code=` parameter (i.e. someone pasted the
+/// whole invite link), pull that value out. Guests are only ever handed a link,
+/// so the manual form must understand a pasted link, not just a raw code.
+fn extract_code(input: &str) -> String {
+    let s = input.trim();
+    if let Some(pos) = s.find("code=") {
+        let code: String = s[pos + 5..]
+            .chars()
+            .take_while(|c| c.is_ascii_alphanumeric())
+            .collect();
+        if !code.is_empty() {
+            return code;
+        }
+    }
+    s.to_string()
 }
 
 // ---------------------------------------------------------------------------
@@ -610,6 +529,43 @@ pub async fn links_list(State(state): State<Arc<AppState>>) -> Response {
     Json(state.auth.list_public()).into_response()
 }
 
+#[derive(Deserialize)]
+pub struct QrQuery {
+    data: String,
+}
+
+/// `GET /api/links/qr?data=<url>` — an SVG QR code for the given text (a magic
+/// link, in practice), so a guest can scan it with a phone instead of typing.
+/// Admin-only like the other link routes; input is length-capped. Rendered
+/// black-on-white with a quiet zone so it scans on any page theme.
+pub async fn links_qr(State(state): State<Arc<AppState>>, Query(q): Query<QrQuery>) -> Response {
+    if !state.admin {
+        return StatusCode::FORBIDDEN.into_response();
+    }
+    let data = q.data.trim();
+    if data.is_empty() || data.len() > 512 {
+        return StatusCode::BAD_REQUEST.into_response();
+    }
+    let Ok(code) = qrcode::QrCode::new(data.as_bytes()) else {
+        return StatusCode::BAD_REQUEST.into_response();
+    };
+    let svg = code
+        .render::<qrcode::render::svg::Color>()
+        .min_dimensions(220, 220)
+        .dark_color(qrcode::render::svg::Color("#000000"))
+        .light_color(qrcode::render::svg::Color("#ffffff"))
+        .quiet_zone(true)
+        .build();
+    (
+        [(
+            header::CONTENT_TYPE,
+            header::HeaderValue::from_static("image/svg+xml"),
+        )],
+        svg,
+    )
+        .into_response()
+}
+
 /// `DELETE /api/links/{label}` — revoke every code with this label.
 pub async fn links_revoke(
     State(state): State<Arc<AppState>>,
@@ -654,11 +610,12 @@ fn login_html(notice: Option<&str>) -> String {
 <body>
   <div class="card">
     <h1>Agent Web</h1>
-    <p class="sub">Введите код доступа</p>
+    <p class="sub">Откройте ссылку-приглашение, которую вам дали — она войдёт сама.
+       Или вставьте её сюда.</p>
     {err}
     <form method="post" action="/login" autocomplete="off">
-      <label for="code">Код доступа</label>
-      <input id="code" name="code" type="text" autofocus placeholder="напр. 3f9a…">
+      <label for="code">Ссылка-приглашение или код</label>
+      <input id="code" name="code" type="text" autofocus placeholder="https://…/login?code=… или код">
       <button type="submit">Войти</button>
     </form>
   </div>
@@ -765,53 +722,64 @@ mod tests {
     use super::*;
 
     #[test]
-    fn seat_rejects_active_but_takes_over_idle() {
+    fn a_link_admits_many_and_a_bad_code_is_rejected() {
         let store = std::env::temp_dir().join(format!("cwi_seat_{}.json", std::process::id()));
         let _ = std::fs::remove_file(&store);
         let auth = Auth {
             enabled: true,
             secret: vec![7u8; 32],
             store: store.clone(),
-            seats: Mutex::new(HashMap::new()),
         };
         let code = auth.mint(3600, "t"); // writes the token store this Auth reads
-        // First device claims the seat and gets a cookie.
-        let Claim::Granted(set_cookie) = auth.claim_seat(&code, false) else {
+        // Many people share one link — every valid claim is granted, with a
+        // distinct cookie, and all remain valid at the gate simultaneously.
+        let Claim::Granted(a) = auth.claim_seat(&code, false) else {
             panic!("first claim should be granted");
         };
-        let cookie = set_cookie.split(';').next().unwrap().to_string(); // "cwi_session=…"
-        assert!(auth.session_active(Some(&cookie)));
-        assert!(matches!(auth.touch_seat(Some(&cookie)), Touch::Ok));
-        // A second device on the still-active link is rejected.
-        assert!(matches!(auth.claim_seat(&code, false), Claim::Busy));
-        // Make the seat look idle, then a newcomer takes it over.
-        for seat in auth.seats.lock().unwrap().values_mut() {
-            seat.last_seen = now() - SEAT_IDLE_SECS - 1;
-        }
-        let Claim::Granted(cookie2) = auth.claim_seat(&code, false) else {
-            panic!("an idle seat should be grantable to a newcomer");
+        let Claim::Granted(b) = auth.claim_seat(&code, false) else {
+            panic!("a second person on the same link is also admitted");
         };
-        assert_ne!(set_cookie, cookie2, "the takeover mints a new holder");
-        // The evicted first device is no longer active and gets kicked.
-        assert!(!auth.session_active(Some(&cookie)));
-        assert!(matches!(auth.touch_seat(Some(&cookie)), Touch::Kicked));
+        let ca = a.split(';').next().unwrap().to_string();
+        let cb = b.split(';').next().unwrap().to_string();
+        assert_ne!(ca, cb, "each login gets its own cookie");
+        assert!(auth.session_active(Some(&ca)));
+        assert!(auth.session_active(Some(&cb)));
+        // A bad code is refused; a bogus/expired cookie fails the gate.
+        assert!(matches!(auth.claim_seat("deadbeef", false), Claim::Invalid));
+        assert!(!auth.session_active(Some("cwi_session=not.a.real.cookie")));
+        assert!(!auth.session_active(None));
         let _ = std::fs::remove_file(&store);
+    }
+
+    #[test]
+    fn extract_code_understands_a_pasted_link_or_a_bare_code() {
+        assert_eq!(extract_code("3f9ab0"), "3f9ab0"); // bare code, unchanged
+        assert_eq!(extract_code("  3f9ab0  "), "3f9ab0"); // trimmed
+        // Whole magic link pasted → pull the code out, stop at the next delimiter.
+        assert_eq!(
+            extract_code("https://guest.example/login?code=abc123"),
+            "abc123"
+        );
+        assert_eq!(
+            extract_code("https://x/login?code=abc123&foo=bar"),
+            "abc123"
+        );
     }
 
     #[test]
     fn public_paths_bypass_the_gate() {
         // Reachable without a session: login, health, the broker (own bearer
-        // auth), and the host→guest drain trigger.
+        // auth), and the host→guest drain triggers.
         for p in [
             "/login",
             "/api/health",
-            "/api/activity",
             "/api/drain/begin",
             "/api/drain/end",
             "/broker/v1/messages",
         ] {
             assert!(is_public(p), "{p} should be public");
         }
+        assert!(!is_public("/api/activity"), "activity endpoint is gone");
     }
 
     #[test]

@@ -98,10 +98,9 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
 .side-badge:active,
 .settings-badge:active { transform: translateY(0); }
 .side-badge.open { left: 492px; }
-/* The files drawer (340px) is narrower than the chat/admin drawers (480px), so its
-   badge rides closer in when it is the open one. Set alongside `.open`, hence the
-   two classes (the name is historical — files used to be the wider drawer). */
-.side-badge.open.open-wide { left: 352px; }
+/* Historical `open-wide` hook — the files drawer is now the same 480px as the
+   others, so its badge rides the same edge. Kept so the JS toggle is harmless. */
+.side-badge.open.open-wide { left: 492px; }
 .side-badge svg { width: 1.35em; height: 1.35em; display: block; }
 
 /* Left badge stack, bottom-up: chats, admin, files. Everything above the chats
@@ -120,10 +119,8 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
 .admin-panel + .admin-panel { border-top: 1px solid var(--border); margin-top: 6px; }
 
 /* ---------- Files drawer (left): read-only workspace explorer ---------- */
-/* Wider than the chat/admin drawers — a file preview in a 260px column is
-   unreadable. Keep in sync with `.side-badge.open.open-wide` above. */
-.files-drawer { width: 340px; max-width: 92vw; }
-.files-header { padding: 10px 10px 8px; border-bottom: 1px solid var(--border); }
+/* Same 480px width as the chat/admin drawers (inherited from .sidebar-drawer). */
+.files-header { padding: 10px 10px 8px; padding-right: 52px; border-bottom: 1px solid var(--border); }
 .files-bar { display: flex; gap: 6px; margin-bottom: 8px; }
 .files-up {
   width: 30px; height: 30px; flex: none;
@@ -179,7 +176,7 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
 }
 .files-view-body.files-view-note { white-space: normal; color: var(--text-dim); font-style: italic; }
 
-.sidebar-header { padding: 12px; }
+.sidebar-header { padding: 12px; padding-right: 52px; }
 .btn-primary {
   width: 100%;
   padding: 10px 12px;
@@ -251,6 +248,16 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
   color: var(--text); word-break: break-all; user-select: all;
 }
 .link-copy { width: auto; align-self: flex-start; padding: 6px 12px; font-size: 0.82rem; }
+.link-qr-toggle {
+  width: auto; align-self: flex-start; padding: 6px 12px; font-size: 0.82rem;
+  display: inline-flex; align-items: center; gap: 6px;
+}
+.qr-chevron { width: 15px; height: 15px; transition: transform .2s ease; }
+.link-qr-toggle.open .qr-chevron { transform: rotate(180deg); }
+/* Always a white card with a quiet margin so the code scans on any theme. */
+.link-qr { align-self: flex-start; background: #fff; padding: 10px; border-radius: 8px; }
+.link-qr[hidden] { display: none; }
+.link-qr-img { display: block; width: 200px; height: 200px; }
 .links-list { list-style: none; margin: 0; padding: 0; display: flex; flex-direction: column; gap: 6px; }
 .links-empty { font-size: 0.82rem; color: var(--text-dim); padding: 4px 2px; }
 .links-row {
@@ -998,8 +1005,23 @@ body.drag-over::after {
 .msg-images { display: flex; flex-wrap: wrap; gap: 8px; margin-bottom: 8px; }
 .msg-image { max-width: 260px; max-height: 260px; border-radius: 10px; border: 1px solid var(--border); }
 
+/* Markdown images in an answer (`![alt](src)`). Unlike the 260px thumbnails
+   above, these are content the model chose to show, so they get the full column
+   width — capped, and never taller than the viewport. */
+.msg-md-image {
+  display: block; max-width: 100%; height: auto; max-height: 70vh;
+  margin: 10px 0; border-radius: 10px; border: 1px solid var(--border);
+}
+/* Shown in place of an image that failed to load (see the delegated `error`
+   listener in render.js) — a silent gap is unreportable. */
+.msg-md-image-error {
+  margin: 10px 0; padding: 10px 12px; border-radius: 10px;
+  border: 1px dashed var(--border); background: var(--bg);
+  color: var(--text-dim); font-size: 0.8rem; word-break: break-all;
+}
+
 /* Click a thumbnail/image to zoom it; click anywhere to close. */
-.attach-thumb img, .msg-image { cursor: zoom-in; }
+.attach-thumb img, .msg-image, .msg-md-image { cursor: zoom-in; }
 .lightbox {
   position: fixed; inset: 0; z-index: 200;
   display: flex; align-items: center; justify-content: center;
@@ -1104,6 +1126,12 @@ body.drag-over::after {
 .chat-actions-badge[hidden] { display: none; }
 .chat-actions-badge svg { width: 1.3em; height: 1.3em; }
 
+/* Party badge: one more slot below chat-actions on the right stack. */
+.party-badge { bottom: calc(20vh - 112px); }
+.party-badge[hidden] { display: none; }
+.party-badge svg { width: 1.3em; height: 1.3em; }
+.party-badge.open, .party-badge.usage-open { right: 492px; }
+
 /* Per-chat token counter — aligned above the settings control. */
 .usage-badge {
   position: fixed; bottom: calc(20vh + 52px); right: 12px; z-index: 60;
@@ -1153,6 +1181,27 @@ body.drag-over::after {
 .usage-badge.multi .ub-row.ub-dim .ub-v { color: color-mix(in srgb, var(--text-dim) 70%, transparent); }
 .usage-badge.multi .ub-row.clickable { cursor: pointer; }
 .usage-badge.multi .ub-row.clickable:hover .ub-k { color: var(--accent); }
+/* Collapse handle: a full-width block docked on the card's top edge, chevron
+   centered — the whole strip is the "collapse" button, separated from the stats
+   by its own bottom border. */
+.usage-badge.multi .ub-collapse {
+  display: flex; align-items: center; justify-content: center;
+  margin: -7px -11px 5px; padding: 4px 0; width: auto;
+  border: 0; border-bottom: 1px solid var(--border); border-radius: 10px 10px 0 0;
+  background: none; color: var(--text-dim); cursor: pointer;
+  transition: color .15s, background .15s;
+}
+.usage-badge.multi .ub-collapse:hover {
+  color: var(--accent); background: color-mix(in srgb, var(--accent) 8%, transparent);
+}
+.usage-badge.multi .ub-chevron { width: 16px; height: 16px; }
+/* Collapsed: a button the SAME size + radius as the badges below it (gear /
+   download / party), holding just the engine dot. */
+.usage-badge.multi.collapsed {
+  min-width: 0; width: 44px; height: 44px; padding: 0; border-radius: 12px;
+  align-items: center; justify-content: center;
+}
+.usage-badge.multi.collapsed .ub-dot { width: 11px; height: 11px; }
 /* Agentron unit mark — the clock-antenna icon inline at text height, after the
    value (like "%" trails a number). */
 .ag-mark { display: inline-block; vertical-align: -0.16em; line-height: 0; color: inherit; }
@@ -1269,7 +1318,25 @@ body.drag-over::after {
   display: flex; flex-direction: column;
 }
 .settings-panel.open { transform: translateX(0); }
-.settings-header { padding: 18px 20px; border-bottom: 1px solid var(--border); }
+.settings-header {
+  padding: 18px 20px; border-bottom: 1px solid var(--border);
+  display: flex; align-items: center; gap: 12px;
+}
+
+/* In-drawer collapse button — closes the drawer without needing to tap the
+   overlay (which a full-width mobile drawer leaves no room for). Right drawers
+   carry it inline before the title (chevron →); left drawers pin it to the
+   top-right corner, mirrored (chevron ←). */
+.drawer-close {
+  flex: none; width: 32px; height: 32px; padding: 0;
+  display: flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
+  color: var(--text-dim); cursor: pointer;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.drawer-close:hover { color: var(--accent); border-color: var(--accent); }
+.drawer-close svg { width: 18px; height: 18px; display: block; }
+.sidebar-drawer > .drawer-close.left { position: absolute; top: 12px; right: 12px; z-index: 3; }
 .settings-header h2 { margin: 0; font-size: 1.067rem; }
 .settings-body { padding: 5px; overflow-y: auto; }
 
@@ -1292,6 +1359,77 @@ body.drag-over::after {
 /* Destructive action reads red only on hover, so the panel isn't alarming at rest. */
 .chat-action.danger:hover { color: #d94a3d; border-color: color-mix(in srgb, #d94a3d 40%, transparent); }
 .chat-action.danger:hover svg { color: #d94a3d; }
+
+/* ---------- Party (room) drawer ---------- */
+/* Body is a column: control block (fixed) · human chat log (grows, scrolls) ·
+   note · composer (pinned). Overrides settings-body's own overflow. */
+.party-body { flex: 1; display: flex; flex-direction: column; padding: 10px; gap: 10px; overflow: hidden; }
+/* Driver indicator in the chat header: "Чат  [flag] name", accent-tinted. */
+.party-driver {
+  font-size: 0.82rem; font-weight: 600; color: var(--accent);
+  white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
+}
+.party-driver[hidden] { display: none; }
+.party-join-hint { margin: 8px 2px 0; font-size: 0.8rem; color: var(--text-dim); }
+/* Roomier gap so consecutive messages read as separate turns. */
+/* Scrolls like the main message view: native scrollbars hidden (both axes),
+   auto-follow to the newest message handled in party.js. */
+.party-log {
+  flex: 1; overflow-y: auto; overflow-x: hidden; display: flex; flex-direction: column;
+  gap: 14px; padding: 4px 2px; scrollbar-width: none;
+}
+.party-log::-webkit-scrollbar { display: none; }
+.party-msg { display: flex; flex-direction: column; gap: 3px; max-width: 85%; }
+.party-msg.mine { align-items: flex-end; align-self: flex-end; }
+.party-msg-from { font-size: 0.72rem; color: var(--text-dim); font-weight: 600; display: flex; align-items: center; gap: 4px; }
+/* The driver's messages stand out — accent name (the 🚗 marker is added inline). */
+.party-msg-from.driver { color: var(--accent); }
+.party-msg-text {
+  align-self: flex-start; padding: 7px 11px; border-radius: 12px 12px 12px 4px;
+  background: var(--bg); border: 1px solid var(--border);
+  font-size: 0.9rem; color: var(--text); white-space: pre-wrap; overflow-wrap: anywhere;
+}
+.party-msg.mine .party-msg-text {
+  align-self: flex-end; border-radius: 12px 12px 4px 12px;
+  background: color-mix(in srgb, var(--accent) 14%, var(--bg-elev));
+  border-color: color-mix(in srgb, var(--accent) 40%, transparent);
+}
+/* Country flag: a vendored SVG (flag-icons) — identical on every platform
+   (Windows has no flag emoji; phones differ). Small, with a hairline border so
+   light flags (e.g. Japan) keep an edge on a light background. */
+.flag-img {
+  display: inline-block; width: 16px; height: 12px; border-radius: 2px;
+  vertical-align: middle; object-fit: cover;
+  box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-dim) 30%, transparent);
+}
+/* Message time (server timestamp, HH:MM) — quiet, pushed to the end of the name line. */
+.party-msg-time { margin-left: auto; padding-left: 10px; font-weight: 500; font-size: 0.68rem; color: color-mix(in srgb, var(--text-dim) 75%, transparent); }
+.party-msg.mine .party-msg-from { flex-direction: row-reverse; }
+.party-msg.mine .party-msg-time { margin-left: 0; margin-right: auto; padding-left: 0; padding-right: 10px; }
+
+/* Chat badge nudge: a message arrived while the panel is closed. Inverts the
+   badge's colours a couple of times so activity is unmissable. */
+@keyframes party-blink {
+  0%, 100% { background: var(--bg-elev); color: var(--text-dim); border-color: var(--border); }
+  50%      { background: var(--accent); color: #fff; border-color: var(--accent); }
+}
+.party-badge.party-blink { animation: party-blink 0.7s ease-in-out 2; }
+.party-note { font-size: 0.74rem; color: var(--text-dim); text-align: center; padding: 2px 6px; }
+.party-composer { display: flex; gap: 8px; align-items: flex-end; }
+.party-input {
+  flex: 1; resize: none; max-height: 120px; padding: 9px 12px;
+  border: 1px solid var(--border); border-radius: 10px; background: var(--bg);
+  color: var(--text); font: inherit; font-size: 0.9rem; line-height: 1.4;
+}
+.party-input:focus { outline: none; border-color: var(--accent); }
+.party-send {
+  flex: none; width: 40px; height: 40px; border: 1px solid var(--border); border-radius: 10px;
+  background: none; color: var(--text-dim); cursor: pointer;
+  display: flex; align-items: center; justify-content: center;
+  transition: color .15s, border-color .15s, background .15s;
+}
+.party-send:hover { color: var(--accent); border-color: var(--accent); }
+.party-send svg { width: 18px; height: 18px; }
 
 .setting-group { margin-bottom: 22px; }
 .setting-label { font-size: 0.867rem; color: var(--text-dim); margin-bottom: 8px; }

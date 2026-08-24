@@ -1,5 +1,5 @@
 import { state, el } from './state.js';
-import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText, renderPermissionRequest, markPermissionResolved, loadUsage } from './render.js';
+import { ensureAssistant, updateStatus, appendText, ensureThinking, appendThinkingText, stopThinkingClock, setThinkingTokens, renderToolCalls, renderToolResultImages, addMeta, finalizeTurn, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, updateUsageBadge, isServiceText, renderPermissionRequest, markPermissionResolved, loadUsage } from './render.js';
 import { setFaviconState } from '../favicon.js';
 import { renderTranscriptWindowed, restoreUnsentMessage, confirmSentMessage, loadProviders, loadChatList } from './ui.js';
 
@@ -50,6 +50,9 @@ export function connect() {
     reconnectAttempts = 0;
     setConn(true);
     startHeartbeat(ws);
+    // Announce our room identity (name) before any attach, so the server stamps
+    // it on join. party.js listens and sends `set_identity`.
+    window.dispatchEvent(new CustomEvent("cwi-open"));
     // Reconnect: re-attach to the live session (if any) to resume its stream.
     if (state.sessionId && !state.isNew) {
       sendWs({ type: "attach", session_id: state.sessionId });
@@ -235,6 +238,23 @@ export function handleEvent(evt) {
         // (guest.js listens; a DOM event avoids a ws.js↔guest.js import cycle).
         window.dispatchEvent(new CustomEvent("cwi-executor", { detail: evt }));
         break;
+      case "role":
+        // This connection's room role (driver/observer). Party.js gates the
+        // composer + control buttons off it. DOM event avoids a ws↔party cycle.
+        window.dispatchEvent(new CustomEvent("cwi-role", { detail: evt }));
+        break;
+      case "roster":
+        window.dispatchEvent(new CustomEvent("cwi-roster", { detail: evt }));
+        break;
+      case "party_chat":
+        window.dispatchEvent(new CustomEvent("cwi-party-chat", { detail: evt }));
+        break;
+      case "party_history":
+        window.dispatchEvent(new CustomEvent("cwi-party-history", { detail: evt }));
+        break;
+      case "me":
+        window.dispatchEvent(new CustomEvent("cwi-me", { detail: evt }));
+        break;
       case "no_session":
         break; // nothing live to attach to; keep whatever is shown
       case "error":
@@ -295,6 +315,8 @@ export function handleEvent(evt) {
           updateStatus();
           if (state.current.runningTasks === 0) setFaviconState("thinking");
         }
+        // A tool may return images (a screenshot, a read image) — show them.
+        renderToolResultImages(evt);
       }
       break;
 

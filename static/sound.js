@@ -60,3 +60,17 @@ export function playDictationStop() {
     // best-effort
   }
 }
+
+// A single light, short "blip" for an incoming room-chat message while the chat
+// panel is closed (played alongside the badge flash). Quieter and briefer than
+// the completion chime on purpose — chat can be chatty — and a different pitch
+// so it's told apart from the turn-done and dictation cues by ear.
+export function playChatBlip() {
+  try {
+    const ac = getContext();
+    const now = ac.currentTime;
+    tone(ac, 1174.66, now, 0.07, 0.07); // D6 — one soft tick
+  } catch (e) {
+    // best-effort
+  }
+}

@@ -67,6 +67,164 @@ enum Cmd {
     },
 }
 
+/// Max participants in one session's room (driver + observers). A guardrail on
+/// fan-out to the host's uplink, not a hard technical limit.
+pub const ROOM_CAP: usize = 30;
+
+/// How many room (human) chat messages to retain and replay to a joiner, so a
+/// second device sees what was said before it connected. In-memory only.
+const PARTY_LOG_MAX: usize = 200;
+
+/// After this long without real activity the driver's hold on the wheel is
+/// "asleep": any observer may take control (mirrors the login seat's idle rule).
+const WHEEL_IDLE: Duration = Duration::from_secs(600);
+
+/// The global human side-chat: one shared room for the whole instance, not tied
+/// to any agent session — so people can talk from any chat (or none), and a
+/// joining device replays the history. In-memory (cleared on restart).
+pub struct PartyHub {
+    events: broadcast::Sender<String>,
+    log: Mutex<VecDeque<String>>,
+    /// Display name currently held by each live connection — so two people who
+    /// pick the same name are told apart ("Антон", "Антон 2", …). Freed on leave.
+    names: Mutex<HashMap<u64, String>>,
+}
+
+impl Default for PartyHub {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
+impl PartyHub {
+    pub fn new() -> Self {
+        let (events, _) = broadcast::channel::<String>(BROADCAST_CAP);
+        Self {
+            events,
+            log: Mutex::new(VecDeque::new()),
+            names: Mutex::new(HashMap::new()),
+        }
+    }
+
+    /// Claim a display name for a connection, made unique among everyone currently
+    /// connected: if "Антон" is taken by someone else, this one becomes "Антон 2"
+    /// (then 3, …). Nobody is refused — they just get a numbered variant. Returns
+    /// the name actually assigned. Re-claiming your own current name is a no-op.
+    pub fn claim_name(&self, conn: u64, wanted: &str) -> String {
+        let mut names = self.names.lock().unwrap();
+        let taken =
+            |n: &str, names: &HashMap<u64, String>| names.iter().any(|(c, v)| *c != conn && v == n);
+        let mut name = wanted.to_string();
+        let mut i = 2;
+        while taken(&name, &names) {
+            name = format!("{wanted} {i}");
+            i += 1;
+        }
+        names.insert(conn, name.clone());
+        name
+    }
+
+    /// The name a connection currently holds, if it claimed one.
+    pub fn name_of(&self, conn: u64) -> Option<String> {
+        self.names.lock().unwrap().get(&conn).cloned()
+    }
+
+    /// Release a connection's name (on disconnect) so it can be reused.
+    pub fn release_name(&self, conn: u64) {
+        self.names.lock().unwrap().remove(&conn);
+    }
+
+    /// Subscribe a connection to future messages.
+    pub fn subscribe(&self) -> broadcast::Receiver<String> {
+        self.events.subscribe()
+    }
+
+    /// Store a message in the bounded log and fan it out to everyone connected.
+    pub fn post(&self, line: String) {
+        {
+            let mut log = self.log.lock().unwrap();
+            log.push_back(line.clone());
+            while log.len() > PARTY_LOG_MAX {
+                log.pop_front();
+            }
+        }
+        let _ = self.events.send(line);
+    }
+
+    /// The retained history (oldest first), replayed to a joining device.
+    pub fn history(&self) -> Vec<String> {
+        self.log.lock().unwrap().iter().cloned().collect()
+    }
+}
+
+/// A participant's role in a session room.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Role {
+    /// Controls the agent — may send turns and run the executor.
+    Driver,
+    /// Watches the live conversation and talks in the side-chat only.
+    Observer,
+}
+
+/// Whitelist a display name to letters (Latin + Cyrillic), digits, spaces, and a
+/// few safe punctuation marks — dropping everything else: emoji, combining /
+/// "zalgo" marks, bidi overrides, zero-width and control characters. This is
+/// server-side and authoritative — a client can bypass the join screen and send
+/// a raw `set_identity`, so names are never trusted, only cleaned here. Interior
+/// whitespace is collapsed and the result capped at 40 characters.
+pub(crate) fn sanitize_name(raw: &str) -> String {
+    let mut out = String::new();
+    let mut chars = 0usize;
+    let mut prev_space = false;
+    for ch in raw.trim().chars() {
+        let allowed = ch.is_ascii_alphanumeric()
+            // Cyrillic block, letters only — the `is_alphabetic` guard drops the
+            // combining marks (U+0483–0489) that stack into zalgo text.
+            || (('\u{0400}'..='\u{04FF}').contains(&ch) && ch.is_alphabetic())
+            || matches!(ch, ' ' | '-' | '_' | '.' | '#' | '!' | '?');
+        if !allowed {
+            continue;
+        }
+        if ch == ' ' {
+            if prev_space {
+                continue;
+            }
+            prev_space = true;
+        } else {
+            prev_space = false;
+        }
+        out.push(ch);
+        chars += 1;
+        if chars >= 40 {
+            break;
+        }
+    }
+    out.trim_end().to_string()
+}
+
+/// One connected participant (a live WebSocket) in a session room.
+struct Participant {
+    name: String,
+    /// ISO-3166 alpha-2 country code from Cloudflare's `CF-IPCountry` header, if
+    /// known. Rendered as a flag emoji by the presentation layer (pirate flag
+    /// when absent). Never the raw IP — that stays server-side.
+    country: Option<String>,
+    /// Last real activity — drives idle takeover of the wheel.
+    last_seen: Instant,
+}
+
+/// The people currently gathered on one session, and who drives the agent.
+/// Presence is keyed by live connection id (from ws.rs), so it clears on
+/// disconnect. The wheel (`driver`) is handed off explicitly or on idle.
+#[derive(Default)]
+struct Room {
+    members: HashMap<u64, Participant>,
+    /// Connection id holding the wheel; `None` = free for anyone to take.
+    driver: Option<u64>,
+    /// Counter for auto-assigned names ("Гость N").
+    seq: u32,
+}
+
 /// A live conversation and its process, shared behind an `Arc`.
 pub struct SessionKeeper {
     pub session_id: String,
@@ -79,6 +237,8 @@ pub struct SessionKeeper {
     busy: Arc<AtomicBool>,
     subscribers: AtomicUsize,
     idle_since: Mutex<Option<Instant>>,
+    /// Who's gathered on this session and who drives — the "party" room.
+    room: Mutex<Room>,
 }
 
 impl SessionKeeper {
@@ -140,6 +300,162 @@ impl SessionKeeper {
         AttachGuard {
             keeper: self.clone(),
         }
+    }
+
+    // --- Room (party): presence + control hand-off, all per session. --------
+
+    /// A participant joins (called when a socket attaches). Returns their role, or
+    /// `None` if the room is full. The first to join takes the wheel; the rest are
+    /// observers. An empty `name` gets an auto "Гость N"; `country` is an optional
+    /// ISO alpha-2 code for the flag.
+    pub fn room_join(&self, conn: u64, name: &str, country: Option<&str>) -> Option<Role> {
+        let mut room = self.room.lock().unwrap();
+        if !room.members.contains_key(&conn) && room.members.len() >= ROOM_CAP {
+            return None;
+        }
+        let name = {
+            let clean = sanitize_name(name);
+            if clean.is_empty() {
+                room.seq += 1;
+                format!("Гость {}", room.seq)
+            } else {
+                clean
+            }
+        };
+        room.members.insert(
+            conn,
+            Participant {
+                name,
+                country: country.map(|c| c.to_string()),
+                last_seen: Instant::now(),
+            },
+        );
+        if room.driver.is_none() {
+            room.driver = Some(conn);
+        }
+        Some(if room.driver == Some(conn) {
+            Role::Driver
+        } else {
+            Role::Observer
+        })
+    }
+
+    /// A participant leaves (socket closed). Frees the wheel if they held it.
+    pub fn room_leave(&self, conn: u64) {
+        let mut room = self.room.lock().unwrap();
+        room.members.remove(&conn);
+        if room.driver == Some(conn) {
+            room.driver = None;
+        }
+    }
+
+    /// This connection's current role, or `None` if it isn't a member.
+    pub fn room_role(&self, conn: u64) -> Option<Role> {
+        let room = self.room.lock().unwrap();
+        if !room.members.contains_key(&conn) {
+            return None;
+        }
+        Some(if room.driver == Some(conn) {
+            Role::Driver
+        } else {
+            Role::Observer
+        })
+    }
+
+    /// Refresh a member's activity (keeps the wheel warm while they drive).
+    pub fn room_touch(&self, conn: u64) {
+        if let Some(p) = self.room.lock().unwrap().members.get_mut(&conn) {
+            p.last_seen = Instant::now();
+        }
+    }
+
+    /// A member's display name (for stamping their party-chat messages).
+    pub fn room_name(&self, conn: u64) -> Option<String> {
+        self.room
+            .lock()
+            .unwrap()
+            .members
+            .get(&conn)
+            .map(|p| p.name.clone())
+    }
+
+    /// The driver voluntarily releases the wheel. Returns true if they held it.
+    pub fn room_release(&self, conn: u64) -> bool {
+        let mut room = self.room.lock().unwrap();
+        if room.driver == Some(conn) {
+            room.driver = None;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// A member takes the wheel — granted only if it's free, already theirs, or
+    /// the current driver has gone idle (`WHEEL_IDLE`). Returns true on success.
+    pub fn room_take(&self, conn: u64) -> bool {
+        let mut room = self.room.lock().unwrap();
+        if !room.members.contains_key(&conn) {
+            return false;
+        }
+        let free = match room.driver {
+            None => true,
+            Some(d) if d == conn => true,
+            Some(d) => room
+                .members
+                .get(&d)
+                .map(|p| p.last_seen.elapsed() >= WHEEL_IDLE)
+                .unwrap_or(true),
+        };
+        if free {
+            room.driver = Some(conn);
+            if let Some(p) = room.members.get_mut(&conn) {
+                p.last_seen = Instant::now();
+            }
+        }
+        free
+    }
+
+    /// The current driver's display name, if the wheel is held.
+    pub fn driver_name(&self) -> Option<String> {
+        let room = self.room.lock().unwrap();
+        room.driver
+            .and_then(|d| room.members.get(&d).map(|p| p.name.clone()))
+    }
+
+    /// Set (rename) a member's display name after join. Returns true if they're a
+    /// member. An empty name is ignored (keeps their existing/auto name).
+    pub fn room_set_name(&self, conn: u64, name: &str) -> bool {
+        let name = sanitize_name(name);
+        if name.is_empty() {
+            return self.room.lock().unwrap().members.contains_key(&conn);
+        }
+        match self.room.lock().unwrap().members.get_mut(&conn) {
+            Some(p) => {
+                p.name = name;
+                true
+            }
+            None => false,
+        }
+    }
+
+    /// Roster for presence frames: `(name, is_driver, country)` per participant,
+    /// sorted by name for a stable display order.
+    pub fn roster(&self) -> Vec<(String, bool, Option<String>)> {
+        let room = self.room.lock().unwrap();
+        let mut list: Vec<(String, bool, Option<String>)> = room
+            .members
+            .iter()
+            .map(|(id, p)| (p.name.clone(), room.driver == Some(*id), p.country.clone()))
+            .collect();
+        list.sort_by(|a, b| a.0.cmp(&b.0));
+        list
+    }
+
+    /// Broadcast a line to every connected socket WITHOUT persisting it to the
+    /// scrollback — for ephemeral room traffic (roster/presence) that a late
+    /// joiner shouldn't replay.
+    pub fn broadcast_ephemeral(&self, line: String) {
+        let _ = self.events.send(line);
     }
 }
 
@@ -290,6 +606,7 @@ impl SessionManager {
             busy,
             subscribers: AtomicUsize::new(0),
             idle_since: Mutex::new(Some(Instant::now())),
+            room: Mutex::new(Room::default()),
         })
     }
 
@@ -332,6 +649,7 @@ impl SessionManager {
             busy,
             subscribers: AtomicUsize::new(0),
             idle_since: Mutex::new(Some(Instant::now())),
+            room: Mutex::new(Room::default()),
         }))
     }
 
@@ -818,6 +1136,157 @@ mod control_request_tests {
         })
         .to_string();
         assert!(parse_control_request(&other_subtype).is_none());
+    }
+}
+
+#[cfg(test)]
+mod party_hub_tests {
+    use super::PartyHub;
+
+    #[test]
+    fn duplicate_names_get_numbered_and_are_freed_on_leave() {
+        let hub = PartyHub::new();
+        assert_eq!(hub.claim_name(1, "Антон"), "Антон");
+        assert_eq!(hub.claim_name(2, "Антон"), "Антон 2"); // taken → numbered
+        assert_eq!(hub.claim_name(3, "Антон"), "Антон 3");
+        // Re-claiming your own name is a no-op (no self-collision).
+        assert_eq!(hub.claim_name(2, "Антон 2"), "Антон 2");
+        // Leaving frees the name for the next person.
+        hub.release_name(1);
+        assert_eq!(hub.claim_name(4, "Антон"), "Антон");
+        assert_eq!(hub.name_of(4).as_deref(), Some("Антон"));
+        assert_eq!(hub.name_of(1), None);
+    }
+}
+
+#[cfg(test)]
+mod room_tests {
+    use super::*;
+    use std::collections::VecDeque;
+
+    /// A bare keeper with dummy channels — no actor task — enough to exercise the
+    /// room (presence + wheel) logic in isolation.
+    fn keeper() -> SessionKeeper {
+        let (cmd_tx, _cmd_rx) = mpsc::channel::<Cmd>(1);
+        let (events, _) = broadcast::channel::<String>(8);
+        SessionKeeper {
+            session_id: "t".into(),
+            cmd_tx,
+            events,
+            scrollback: Arc::new(Mutex::new(VecDeque::new())),
+            finished: Arc::new(AtomicBool::new(false)),
+            busy: Arc::new(AtomicBool::new(false)),
+            subscribers: AtomicUsize::new(0),
+            idle_since: Mutex::new(None),
+            room: Mutex::new(Room::default()),
+        }
+    }
+
+    #[test]
+    fn first_joiner_drives_rest_observe() {
+        let k = keeper();
+        assert_eq!(k.room_join(1, "Аня", Some("UA")), Some(Role::Driver));
+        assert_eq!(k.room_join(2, "Макс", None), Some(Role::Observer));
+        assert_eq!(k.room_role(1), Some(Role::Driver));
+        assert_eq!(k.room_role(2), Some(Role::Observer));
+        assert_eq!(k.room_role(99), None); // not a member
+    }
+
+    #[test]
+    fn empty_name_gets_an_auto_guest_label() {
+        let k = keeper();
+        k.room_join(1, "   ", None);
+        assert_eq!(k.room_name(1).as_deref(), Some("Гость 1"));
+        // A later rename sticks; an empty rename is ignored.
+        assert!(k.room_set_name(1, "Ким"));
+        assert_eq!(k.room_name(1).as_deref(), Some("Ким"));
+        assert!(k.room_set_name(1, "   "));
+        assert_eq!(k.room_name(1).as_deref(), Some("Ким"));
+    }
+
+    #[test]
+    fn room_is_capped() {
+        let k = keeper();
+        for i in 0..ROOM_CAP as u64 {
+            assert!(k.room_join(i, "", None).is_some());
+        }
+        assert_eq!(k.room_join(9999, "", None), None); // full
+    }
+
+    #[test]
+    fn release_and_take_hand_off_the_wheel() {
+        let k = keeper();
+        k.room_join(1, "d", None); // driver
+        k.room_join(2, "o", None); // observer
+        // An active driver holds the wheel — an observer can't grab it.
+        assert!(!k.room_take(2));
+        // Driver releases → the wheel is free → the observer takes it.
+        assert!(k.room_release(1));
+        assert!(k.room_take(2));
+        assert_eq!(k.room_role(2), Some(Role::Driver));
+        assert_eq!(k.room_role(1), Some(Role::Observer));
+    }
+
+    #[test]
+    fn driver_leaving_frees_the_wheel() {
+        let k = keeper();
+        k.room_join(1, "d", None);
+        k.room_join(2, "o", None);
+        k.room_leave(1);
+        assert_eq!(k.room_role(1), None);
+        assert!(k.room_take(2), "wheel should be free after the driver left");
+    }
+
+    #[test]
+    fn idle_driver_can_be_taken_over() {
+        let k = keeper();
+        k.room_join(1, "d", None);
+        k.room_join(2, "o", None);
+        assert!(!k.room_take(2), "active driver blocks takeover");
+        // Age the driver's activity past the idle threshold.
+        if let Some(past) =
+            std::time::Instant::now().checked_sub(WHEEL_IDLE + Duration::from_secs(5))
+        {
+            k.room
+                .lock()
+                .unwrap()
+                .members
+                .get_mut(&1)
+                .unwrap()
+                .last_seen = past;
+            assert!(k.room_take(2), "an idle driver can be taken over");
+        }
+    }
+
+    #[test]
+    fn sanitize_name_keeps_letters_digits_strips_the_rest() {
+        assert_eq!(sanitize_name("Аня"), "Аня");
+        assert_eq!(sanitize_name("Max_99"), "Max_99");
+        assert_eq!(sanitize_name("  Ки  ро  "), "Ки ро"); // trimmed + collapsed
+        // Emoji, zalgo (combining marks), and a bidi override are all dropped.
+        assert_eq!(sanitize_name("Аня😀🔥"), "Аня");
+        assert_eq!(sanitize_name("A\u{0301}\u{0489}B"), "AB"); // combining marks gone
+        assert_eq!(sanitize_name("\u{202e}evil"), "evil"); // RTL override stripped
+        // Nothing usable → empty (caller falls back to an auto name).
+        assert_eq!(sanitize_name("🙂🙂"), "");
+        // Capped at 40 chars.
+        assert_eq!(sanitize_name(&"a".repeat(50)).chars().count(), 40);
+    }
+
+    #[test]
+    fn roster_reports_names_driver_and_country() {
+        let k = keeper();
+        k.room_join(1, "Аня", Some("UA"));
+        k.room_join(2, "Макс", None);
+        let roster = k.roster();
+        assert_eq!(roster.len(), 2);
+        assert_eq!(k.driver_name().as_deref(), Some("Аня"));
+        let driver: Vec<_> = roster
+            .iter()
+            .filter(|(_, d, _)| *d)
+            .map(|(n, _, c)| (n.as_str(), c.as_deref()))
+            .collect();
+        assert_eq!(driver, vec![("Аня", Some("UA"))]);
     }
 }
 

@@ -38,9 +38,90 @@ use serde_json::json;
 use tokio::sync::broadcast;
 
 use crate::AppState;
-use crate::session::{AttachGuard, ImageData, SessionKeeper};
+use crate::session::{AttachGuard, ImageData, ROOM_CAP, Role, SessionKeeper};
 
 type WsSink = SplitSink<WebSocket, Message>;
+
+/// Process-wide source of per-connection ids — the key each socket uses in its
+/// session room (presence + who drives). Monotonic; wraps are a non-issue.
+static CONN_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+fn next_conn_id() -> u64 {
+    CONN_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+}
+
+/// Process-wide counter for auto-assigned "Гость N" display names.
+static GUEST_SEQ: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
+
+/// The connection's display name for the chat: the one it set (via
+/// `set_identity`, already sanitized) or an auto "Гость N" assigned once and
+/// cached, so it stays stable across this connection's messages.
+fn resolve_name(state: &AppState, conn: &mut Conn) -> String {
+    if let Some(n) = &conn.name
+        && !n.is_empty()
+    {
+        return n.clone();
+    }
+    // Auto name — claimed through the hub like a chosen one, so it's unique too.
+    let wanted = format!(
+        "Гость {}",
+        GUEST_SEQ.fetch_add(1, std::sync::atomic::Ordering::Relaxed)
+    );
+    let name = state.party.claim_name(conn.id, &wanted);
+    conn.name = Some(name.clone());
+    name
+}
+
+/// Per-connection room identity, carried for the socket's lifetime. `country`
+/// comes from Cloudflare's `CF-IPCountry` (never the raw IP); `name` is the
+/// display name the client sets via `set_identity` (empty → auto "Гость N").
+struct Conn {
+    id: u64,
+    country: Option<String>,
+    name: Option<String>,
+}
+
+/// A country's flag emoji from its ISO-3166 alpha-2 code (two regional-indicator
+/// symbols). Unknown / placeholder codes (`XX`, Tor's `T1`, absent) fall back to
+/// the pirate flag 🏴‍☠️, as requested.
+fn flag(country: Option<&str>) -> String {
+    let cc = country.unwrap_or("").to_ascii_uppercase();
+    let ok = cc.len() == 2
+        && cc.bytes().all(|b| b.is_ascii_uppercase())
+        && !matches!(cc.as_str(), "XX" | "T1" | "AP");
+    if ok {
+        cc.chars()
+            .filter_map(|c| char::from_u32(0x1F1E6 + (c as u32 - 'A' as u32)))
+            .collect()
+    } else {
+        "🏴\u{200d}☠\u{fe0f}".to_string() // 🏴‍☠️
+    }
+}
+
+/// A `{"cwi":"role",…}` frame telling one client its role and assigned name (so
+/// it can show "you are …" and mark its own party-chat messages).
+fn role_frame(role: Role, name: &str) -> serde_json::Value {
+    json!({
+        "cwi": "role",
+        "role": if role == Role::Driver { "driver" } else { "observer" },
+        "name": name,
+    })
+}
+
+/// Broadcast the room's roster + current driver to everyone on the session, each
+/// member carrying a flag emoji derived from its country.
+fn broadcast_roster(k: &SessionKeeper) {
+    let members: Vec<serde_json::Value> = k
+        .roster()
+        .iter()
+        .map(|(name, is_driver, country)| {
+            json!({ "name": name, "driver": is_driver, "flag": flag(country.as_deref()) })
+        })
+        .collect();
+    k.broadcast_ephemeral(
+        json!({ "cwi": "roster", "members": members, "driver": k.driver_name(), "cap": ROOM_CAP })
+            .to_string(),
+    );
+}
 
 /// Sliding-window rate limiter for a single connection. Generous enough never to
 /// bite normal use (the composer already locks during a turn), but caps a client
@@ -124,20 +205,60 @@ enum ClientMsg {
         /// `start` | `stop` | `drain` | `status`.
         action: String,
     },
+    /// Set this connection's display name for the room (from the join screen).
+    /// Sent before attaching; an empty name keeps the auto "Гость N".
+    SetIdentity {
+        name: String,
+    },
+    /// A human side-chat message — relayed to everyone in the session room, never
+    /// sent to the agent. Allowed for all participants (driver and observers).
+    PartyChat {
+        text: String,
+    },
+    /// Take the wheel (become the driver) — granted only if it's free or the
+    /// current driver has gone idle. Observers use this to gain agent control.
+    TakeControl,
+    /// Voluntarily give up the wheel so anyone can take it (the "release" button).
+    ReleaseControl,
     Ping,
 }
 
-pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
+pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>, country: Option<String>) {
     let (mut ws_tx, mut ws_rx) = socket.split();
 
+    let mut conn = Conn {
+        id: next_conn_id(),
+        country,
+        name: None,
+    };
     let mut keeper: Option<Arc<SessionKeeper>> = None;
     let mut guard: Option<AttachGuard> = None;
     let mut rx: Option<broadcast::Receiver<String>> = None;
     let mut rl = RateLimiter::new();
 
+    // Global human chat — one shared room for the whole instance, independent of
+    // any agent session. Subscribe from connect (so you can chat without opening
+    // a chat) and replay its history so a joining device catches up. Tell the
+    // client its connection id first, so it can recognise (and right-align) its
+    // own messages when they echo back through the hub.
+    let _ = send_control(&mut ws_tx, json!({ "cwi": "me", "cid": conn.id })).await;
+    let mut party_rx = state.party.subscribe();
+    let history = state.party.history();
+    if !history.is_empty() {
+        let messages: Vec<serde_json::Value> = history
+            .iter()
+            .filter_map(|s| serde_json::from_str(s).ok())
+            .collect();
+        let _ = send_control(
+            &mut ws_tx,
+            json!({ "cwi": "party_history", "messages": messages }),
+        )
+        .await;
+    }
+
     loop {
-        // Once attached, multiplex keeper events and client messages; before
-        // that, just wait for client messages.
+        // The session-events receiver exists only once attached; the party
+        // receiver and client stream are always live.
         if let Some(r) = rx.as_mut() {
             tokio::select! {
                 evt = r.recv() => match evt {
@@ -149,10 +270,17 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                     Err(broadcast::error::RecvError::Lagged(_)) => {} // skip; client keeps up next
                     Err(broadcast::error::RecvError::Closed) => { rx = None; }
                 },
+                pevt = party_rx.recv() => {
+                    if let Ok(line) = pevt
+                        && ws_tx.send(Message::Text(Utf8Bytes::from(line))).await.is_err()
+                    {
+                        break;
+                    }
+                }
                 msg = ws_rx.next() => {
                     match msg {
                         Some(Ok(m)) => {
-                            if !handle_client(m, &state, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
+                            if !handle_client(m, &state, &mut conn, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
                                 break;
                             }
                         }
@@ -161,36 +289,48 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>) {
                 }
             }
         } else {
-            match ws_rx.next().await {
-                Some(Ok(m)) => {
-                    if !handle_client(
-                        m,
-                        &state,
-                        &mut ws_tx,
-                        &mut keeper,
-                        &mut guard,
-                        &mut rx,
-                        &mut rl,
-                    )
-                    .await
+            tokio::select! {
+                pevt = party_rx.recv() => {
+                    if let Ok(line) = pevt
+                        && ws_tx.send(Message::Text(Utf8Bytes::from(line))).await.is_err()
                     {
                         break;
                     }
                 }
-                _ => break,
+                msg = ws_rx.next() => {
+                    match msg {
+                        Some(Ok(m)) => {
+                            if !handle_client(m, &state, &mut conn, &mut ws_tx, &mut keeper, &mut guard, &mut rx, &mut rl).await {
+                                break;
+                            }
+                        }
+                        _ => break,
+                    }
+                }
             }
         }
     }
 
     // On disconnect, only the viewer detaches — the keeper (and its process)
-    // lives on, to be reaped later if it stays idle.
+    // lives on, to be reaped later if it stays idle. Leave the room too so the
+    // roster and the wheel (if this connection held it) free up for the rest.
+    if let Some(k) = keeper.as_ref() {
+        k.room_leave(conn.id);
+        broadcast_roster(k);
+    }
+    state.party.release_name(conn.id); // free "Антон" for the next Антон
     drop(guard);
 }
 
 /// Handle one inbound client frame. Returns `false` to close the socket.
+// The per-connection state (keeper/guard/rx) is threaded through as separate
+// `&mut`s rather than bundled; adding the room `conn` tips it one over clippy's
+// arg limit, but a wrapper struct would obscure more than it clarifies here.
+#[allow(clippy::too_many_arguments)]
 async fn handle_client(
     msg: Message,
     state: &Arc<AppState>,
+    conn: &mut Conn,
     ws_tx: &mut WsSink,
     keeper: &mut Option<Arc<SessionKeeper>>,
     guard: &mut Option<AttachGuard>,
@@ -283,7 +423,7 @@ async fn handle_client(
                 {
                     Ok(k) => {
                         tracing::info!(session = %k.session_id, "user sent request");
-                        attach(ws_tx, k, keeper, guard, rx).await;
+                        attach(ws_tx, k, conn, keeper, guard, rx).await;
                     }
                     Err(e) => {
                         tracing::error!(session = ?sid, "failed to start session: {e}");
@@ -293,6 +433,15 @@ async fn handle_client(
                 }
             }
             if let Some(k) = keeper.as_ref() {
+                // On a guest instance, only the driver may drive the agent —
+                // observers watch and use the side-chat. (Owner instance leaves
+                // room roles unenforced, so multi-device keeps working as before.)
+                if state.auth.enabled && k.room_role(conn.id) != Some(Role::Driver) {
+                    let _ = send_control(ws_tx, json!({ "cwi": "error",
+                        "message": "Управление агентом сейчас у другого участника. Возьмите руль, чтобы писать агенту." })).await;
+                    return true;
+                }
+                k.room_touch(conn.id); // a real turn keeps the driver's wheel warm
                 tracing::info!(session = %k.session_id, "agent thinking");
                 k.send_user_message(text, images, caps).await;
             }
@@ -312,7 +461,7 @@ async fn handle_client(
             if keeper.is_none() {
                 tracing::info!(session = %session_id, "client attaching to session");
                 match state.sessions.get(&session_id) {
-                    Some(k) => attach(ws_tx, k, keeper, guard, rx).await,
+                    Some(k) => attach(ws_tx, k, conn, keeper, guard, rx).await,
                     None => {
                         tracing::warn!(session = %session_id, "no live session to attach to");
                         let _ = send_control(ws_tx, json!({ "cwi": "no_session" })).await;
@@ -353,6 +502,79 @@ async fn handle_client(
             }
             handle_executor(&action, state, ws_tx).await;
         }
+
+        ClientMsg::SetIdentity { name } => {
+            // Set this connection's display name (sanitized — never trust raw
+            // input). Empty clears it, so `resolve_name` falls back to "Гость N".
+            // If already in an agent-session room, rename in the roster too.
+            let clean = crate::session::sanitize_name(&name);
+            if clean.is_empty() {
+                conn.name = None; // → resolve_name picks a unique "Гость N"
+            } else {
+                // Unique among everyone connected: a second "Антон" becomes
+                // "Антон 2" — nobody is refused. Tell the client what it got, so
+                // it marks its own messages correctly (it may differ from what
+                // was typed).
+                let assigned = state.party.claim_name(conn.id, &clean);
+                conn.name = Some(assigned.clone());
+                let _ = send_control(
+                    ws_tx,
+                    json!({ "cwi": "me", "cid": conn.id, "name": assigned }),
+                )
+                .await;
+            }
+            if let Some(k) = keeper.as_ref()
+                && let Some(n) = &conn.name
+                && k.room_set_name(conn.id, n)
+            {
+                broadcast_roster(k);
+            }
+        }
+
+        ClientMsg::PartyChat { text } => {
+            let text = text.trim();
+            // Global human chat — one shared room for the whole instance, posted
+            // to the hub (stored + fanned out to everyone). Not tied to any agent
+            // session, so it works from any chat or none. Never sent to the agent.
+            if !text.is_empty() {
+                let from = resolve_name(state, conn);
+                let msg: String = text.chars().take(2000).collect();
+                state.party.post(
+                    json!({ "cwi": "party_chat", "cid": conn.id, "from": from,
+                            "flag": flag(conn.country.as_deref()), "text": msg,
+                            "ts": crate::auth::now() })
+                    .to_string(),
+                );
+            }
+        }
+
+        ClientMsg::TakeControl => {
+            if let Some(k) = keeper.as_ref() {
+                if k.room_take(conn.id) {
+                    let name = k.room_name(conn.id).unwrap_or_default();
+                    let _ = send_control(ws_tx, role_frame(Role::Driver, &name)).await;
+                    broadcast_roster(k);
+                } else {
+                    let _ = send_control(
+                        ws_tx,
+                        json!({ "cwi": "error",
+                        "message": "Управление сейчас у активного участника." }),
+                    )
+                    .await;
+                }
+            }
+        }
+
+        ClientMsg::ReleaseControl => {
+            if let Some(k) = keeper.as_ref()
+                && k.room_release(conn.id)
+            {
+                let name = k.room_name(conn.id).unwrap_or_default();
+                let _ = send_control(ws_tx, role_frame(Role::Observer, &name)).await;
+                broadcast_roster(k);
+            }
+        }
+
         ClientMsg::Ping => {
             // Keep-alive from the browser; no response needed.
         }
@@ -594,6 +816,7 @@ async fn handle_drain(ws_tx: &mut WsSink) {
 async fn attach(
     ws_tx: &mut WsSink,
     k: Arc<SessionKeeper>,
+    conn: &Conn,
     keeper: &mut Option<Arc<SessionKeeper>>,
     guard: &mut Option<AttachGuard>,
     rx: &mut Option<broadcast::Receiver<String>>,
@@ -627,6 +850,22 @@ async fn attach(
 
     *guard = Some(k.attach());
     *rx = Some(receiver);
+
+    // Join the session's room: first in takes the wheel, the rest observe. Tell
+    // this client its role and refresh the roster for everyone. (Over cap the
+    // join is refused — they still watch the stream, but as a non-member they
+    // can't drive or chat until a slot frees; enforced in Send/PartyChat.)
+    let role = k
+        .room_join(
+            conn.id,
+            conn.name.as_deref().unwrap_or(""),
+            conn.country.as_deref(),
+        )
+        .unwrap_or(Role::Observer);
+    let name = k.room_name(conn.id).unwrap_or_default();
+    let _ = send_control(ws_tx, role_frame(role, &name)).await;
+    broadcast_roster(&k);
+
     *keeper = Some(k);
 }
 

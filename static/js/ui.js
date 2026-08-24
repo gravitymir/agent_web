@@ -801,6 +801,7 @@ export async function loadProviders() {
   }
   // Now that we know the active engine, mark cross-engine chats as frozen.
   state.engineNative = !!data.native;
+  state.cliFlavor = data.cli_flavor || "claude";
   redecorateChatList();
   refreshComposerState();
   if (!data.native) {
@@ -930,6 +931,7 @@ export function setSettings(open) {
   if (open) {
     setUsage(false); // only one right drawer at a time
     setChatActions(false);
+    setPartyPanel(false);
   }
   el.settingsPanel.classList.toggle("open", open);
   el.settingsOverlay.hidden = !open;
@@ -937,6 +939,7 @@ export function setSettings(open) {
   el.settingsBadge.classList.toggle("open", open);
   el.usageBadge.classList.toggle("open", open);
   el.chatActionsBadge.classList.toggle("open", open);
+  el.partyBadge.classList.toggle("open", open);
 }
 el.settingsBadge.addEventListener("click", () => setSettings(!el.settingsPanel.classList.contains("open")));
 el.settingsOverlay.addEventListener("click", () => setSettings(false));
@@ -948,20 +951,55 @@ export function setChatActions(open) {
   if (open) {
     setSettings(false); // only one right drawer at a time
     setUsage(false);
+    setPartyPanel(false);
   }
   el.chatActionsPanel.classList.toggle("open", open);
   el.chatActionsOverlay.hidden = !open;
   el.chatActionsBadge.classList.toggle("open", open);
   el.settingsBadge.classList.toggle("open", open);
   el.usageBadge.classList.toggle("open", open);
+  el.partyBadge.classList.toggle("open", open);
 }
 el.chatActionsBadge.addEventListener("click", () =>
   setChatActions(!el.chatActionsPanel.classList.contains("open")),
 );
 el.chatActionsOverlay.addEventListener("click", () => setChatActions(false));
 
+// Party (room) drawer — right side, below the chat-actions badge. Same slide and
+// mutual-exclusion as the other three right panels. The chat/control logic lives
+// in party.js, reached via the `cwi-party-open` event; this owns open/close.
+export function setPartyPanel(open) {
+  if (open) {
+    setSettings(false); // only one right drawer at a time
+    setChatActions(false);
+    setUsage(false);
+  }
+  el.partyPanel.classList.toggle("open", open);
+  el.partyOverlay.hidden = !open;
+  el.partyBadge.classList.toggle("open", open);
+  el.settingsBadge.classList.toggle("open", open);
+  el.usageBadge.classList.toggle("open", open);
+  el.chatActionsBadge.classList.toggle("open", open);
+  if (open) window.dispatchEvent(new CustomEvent("cwi-party-open"));
+}
+el.partyBadge.addEventListener("click", () =>
+  setPartyPanel(!el.partyPanel.classList.contains("open")),
+);
+el.partyOverlay.addEventListener("click", () => setPartyPanel(false));
+
 // Token badge → detailed per-chat usage drawer.
-el.usageBadge.addEventListener("click", () => setUsage(true));
+el.usageBadge.addEventListener("click", (e) => {
+  // Chevron at the top → collapse to the dot. Dot (collapsed) → expand. Anywhere
+  // else on the expanded badge → open the detailed usage drawer (as before).
+  const setCollapsed = (v) => {
+    state.usageCollapsed = v;
+    try { localStorage.setItem("cwi_usage_collapsed", v ? "1" : "0"); } catch {}
+    updateUsageBadge();
+  };
+  if (e.target.closest && e.target.closest(".ub-collapse")) return setCollapsed(true);
+  if (el.usageBadge.classList.contains("collapsed")) return setCollapsed(false);
+  setUsage(true);
+});
 el.usageOverlay.addEventListener("click", () => setUsage(false));
 
 // All three left badges ride on the edge of whichever left drawer is open (they
@@ -1026,6 +1064,21 @@ export function setFilesDrawer(open) {
 }
 el.filesBadge.addEventListener("click", () => setFilesDrawer(!el.filesDrawer.classList.contains("open")));
 el.filesOverlay.addEventListener("click", () => setFilesDrawer(false));
+
+// In-drawer collapse buttons: each `.drawer-close` names its drawer via
+// `data-close`, so one map wires them all (mobile can't tap an outside overlay).
+const DRAWER_CLOSERS = {
+  settings: () => setSettings(false),
+  "chat-actions": () => setChatActions(false),
+  usage: () => setUsage(false),
+  party: () => setPartyPanel(false),
+  sidebar: () => setSidebar(false),
+  admin: () => setAdminDrawer(false),
+  files: () => setFilesDrawer(false),
+};
+for (const btn of document.querySelectorAll(".drawer-close")) {
+  btn.addEventListener("click", () => DRAWER_CLOSERS[btn.dataset.close]?.());
+}
 
 // Composer + title show only when a chat is open. With no chat open, reveal the
 // list; if there are no chats at all, offer a big "create" button instead.
@@ -1459,6 +1512,9 @@ async function loadSessionTimer() {
     return;
   }
   if (!info || !info.gated) return; // owner → no countdown, no seat keep-alive
+  // Guest instance: party roles apply, and we prompt for a room name.
+  state.gated = true;
+  window.dispatchEvent(new CustomEvent("cwi-gated"));
   // Access-expiry countdown (second line of the title capsule).
   if (info.expires != null) {
     const expiresAtMs = info.expires * 1000;
@@ -1469,8 +1525,6 @@ async function loadSessionTimer() {
     tick();
     setInterval(tick, 1000);
   }
-  // Single-seat keep-alive: idle warning + eviction handling.
-  startSeat();
   // Notify the guest when the host starts a Drain-Stop (server shutting down).
   watchDrain();
 }
@@ -1499,58 +1553,10 @@ function watchDrain() {
   setInterval(check, 15000);
 }
 
-// --- Guest single-seat keep-alive --------------------------------------------
-// Ping the server on real activity so this device keeps the link's one seat;
-// warn (a centered click-to-continue timer) in the last idle minute; block the
-// page if evicted. The server enforces the same 10-min idle window.
-const SEAT_IDLE_MS = 10 * 60 * 1000;
-const SEAT_WARN_MS = 60 * 1000;
-let seatLastActivity = Date.now();
-let seatLastPing = 0;
-let seatEvicted = false;
-
-function seatMarkActivity() {
-  if (seatEvicted) return;
-  seatLastActivity = Date.now();
-  if (!el.seatWarn.hidden) el.seatWarn.hidden = true;
-  const now = Date.now();
-  if (now - seatLastPing >= 30000) {
-    // Throttled server ping. 401 => another device took the (idle) seat.
-    seatLastPing = now;
-    fetch("/api/activity", { method: "POST" })
-      .then((r) => { if (r.status === 401) seatShowKicked(); })
-      .catch(() => {});
-  }
-}
-
-function seatShowKicked() {
-  if (seatEvicted) return;
-  seatEvicted = true;
-  el.seatWarn.hidden = true;
-  el.seatKicked.hidden = false;
-}
-
-function startSeat() {
-  seatLastActivity = Date.now();
-  for (const ev of ["mousemove", "mousedown", "keydown", "scroll", "touchstart", "copy"]) {
-    window.addEventListener(ev, seatMarkActivity, { passive: true });
-  }
-  el.seatWarn.addEventListener("click", seatMarkActivity); // clicking the timer revives
-  setInterval(seatTick, 1000);
-}
-
-function seatTick() {
-  if (seatEvicted) return;
-  if (state.streaming) { seatMarkActivity(); return; } // an agent turn counts as activity
-  const remainMs = SEAT_IDLE_MS - (Date.now() - seatLastActivity);
-  if (remainMs <= SEAT_WARN_MS) {
-    const secs = Math.max(0, Math.ceil(remainMs / 1000));
-    el.seatWarnCount.textContent = `${Math.floor(secs / 60)}:${String(secs % 60).padStart(2, "0")}`;
-    el.seatWarn.hidden = false;
-  } else if (!el.seatWarn.hidden) {
-    el.seatWarn.hidden = true;
-  }
-}
+// Single-seat keep-alive removed: a magic link now admits many people (the room
+// model in party.js), so there's no idle-seat warning or eviction. Access still
+// ends when the cookie/code expires (the countdown above); driver hand-off idle
+// is tracked per session on the server, not by a page-activity ping.
 
 function fmtRemaining(ms) {
   if (ms <= 0) return "доступ истёк";

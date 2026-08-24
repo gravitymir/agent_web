@@ -34,6 +34,7 @@ subtle = "2"
 # Zip the workspace for the "download workspace" button. Pure-Rust deflate
 # (miniz_oxide) so the musl/guest build stays clean — no C deps.
 zip = { version = "2", default-features = false, features = ["deflate"] }
+qrcode = { version = "0.14.1", default-features = false, features = ["svg"] }
 
 # Smaller release binary: strip symbols + thin LTO (most of the size win without
 # the long full-LTO/1-codegen-unit compile times, since we rebuild often).

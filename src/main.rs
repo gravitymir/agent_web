@@ -37,7 +37,7 @@ use crate::titles::MetaStore;
 /// Build number, appended to the crate version in the banner (`v0.1.0.NNN`).
 /// Bumped by one on every release build so the launched build is visible in the
 /// terminal at a glance.
-pub const BUILD: &str = "023";
+pub const BUILD: &str = "024";
 
 /// Upper bound on a single inbound WebSocket message. Generous enough for a
 /// prompt with several base64-inlined images / attached files, but bounded so a
@@ -102,6 +102,9 @@ pub struct AppState {
     pub meta: Arc<Mutex<MetaStore>>,
     /// Live per-session keeper processes.
     pub sessions: Arc<SessionManager>,
+    /// The global human side-chat — one shared room across the whole instance,
+    /// independent of any agent session.
+    pub party: Arc<session::PartyHub>,
     /// Optional built-in access gate (CWI_AUTH); a no-op when disabled.
     pub auth: Arc<auth::Auth>,
     /// Per-session broker tokens for the executor proxy (`/broker/v1/messages`).
@@ -279,6 +282,7 @@ async fn run() -> anyhow::Result<()> {
         config: config.clone(),
         meta: meta.clone(),
         sessions: SessionManager::new(config.clone(), mcp, meta),
+        party: Arc::new(session::PartyHub::new()),
         auth: gate,
         broker: Arc::new(broker::Broker::load()),
         http: reqwest::Client::new(),
@@ -299,9 +303,9 @@ async fn run() -> anyhow::Result<()> {
         .route("/api/models", get(list_models))
         .route("/api/providers", get(list_providers))
         .route("/api/session", get(auth::session_info))
-        .route("/api/activity", post(auth::activity))
         .route("/api/usage", get(get_usage))
         .route("/api/links", get(auth::links_list).post(auth::links_create))
+        .route("/api/links/qr", get(auth::links_qr))
         .route(
             "/api/links/{label}",
             axum::routing::delete(auth::links_revoke),
@@ -487,7 +491,12 @@ async fn list_chats(State(state): State<Arc<AppState>>) -> impl IntoResponse {
     // stable across a CWI_ENGINE switch. Chats from the inactive engine are shown
     // read-only ("frozen") in the frontend, keyed off `ChatSummary::engine`.
     let native_dir = agent::store::dir();
-    let mut chats = history::list_chats(&state.config.session_dir(), Some(&native_dir));
+    let cli_dir = if state.config.cli_qwen() {
+        state.config.qwen_session_dir()
+    } else {
+        state.config.session_dir()
+    };
+    let mut chats = history::list_chats(&cli_dir, Some(&native_dir));
     // Overlay user-assigned titles and icons.
     if let Ok(meta) = state.meta.lock() {
         for chat in &mut chats {
@@ -535,6 +544,9 @@ fn ensure_chat_exists(state: &AppState, id: &str) {
         if !path.exists() {
             agent::store::save(id, &agent::store::Stored::default());
         }
+    } else if state.config.cli_qwen() {
+        // Qwen Code owns its transcript store — never write placeholder stubs
+        // into it. The chat appears in the sidebar after its first turn.
     } else {
         let path = state.config.session_dir().join(format!("{id}.jsonl"));
         if !path.exists() {
@@ -584,7 +596,12 @@ async fn load_chat(
     // Load from whichever store holds the chat, regardless of active engine —
     // frozen chats are still fully readable.
     let native_dir = agent::store::dir();
-    let messages = history::load_chat(&state.config.session_dir(), Some(&native_dir), &id);
+    let cli_dir = if state.config.cli_qwen() {
+        state.config.qwen_session_dir()
+    } else {
+        state.config.session_dir()
+    };
+    let messages = history::load_chat(&cli_dir, Some(&native_dir), &id);
     Json(messages).into_response()
 }
 
@@ -605,6 +622,12 @@ async fn delete_chat(
 
     let jsonl = state.config.session_dir().join(format!("{id}.jsonl"));
     remove_if_present(&jsonl, &id);
+    if state.config.cli_qwen() {
+        remove_if_present(
+            &state.config.qwen_session_dir().join(format!("{id}.jsonl")),
+            &id,
+        );
+    }
     remove_if_present(&agent::store::path(&id), &id);
     match state.meta.lock() {
         Ok(mut meta) => {
@@ -658,10 +681,18 @@ async fn ws_upgrade(
         tracing::warn!("ws: rejected cross-origin upgrade");
         return StatusCode::FORBIDDEN.into_response();
     }
+    // Cloudflare stamps the visitor's country (ISO alpha-2) on every request —
+    // free geo, no GeoIP database. Used only for a flag emoji in the room roster;
+    // the raw IP is never surfaced to other participants.
+    let country = headers
+        .get("cf-ipcountry")
+        .and_then(|v| v.to_str().ok())
+        .map(|s| s.trim().to_string())
+        .filter(|s| !s.is_empty());
     // Cap inbound frame/message size so a client can't force a huge allocation.
     ws.max_message_size(MAX_WS_MESSAGE_BYTES)
         .max_frame_size(MAX_WS_MESSAGE_BYTES)
-        .on_upgrade(move |socket| ws::handle_socket(socket, state))
+        .on_upgrade(move |socket| ws::handle_socket(socket, state, country))
         .into_response()
 }
 
@@ -859,6 +890,7 @@ async fn list_providers(State(state): State<Arc<AppState>>) -> impl IntoResponse
     let active_provider = agent::provider::Provider::from_env();
     Json(serde_json::json!({
         "native": state.config.native_engine,
+        "cli_flavor": if state.config.cli_qwen() { "qwen" } else { "claude" },
         "active": active_provider.name,
         "active_model": active_provider.model,
         "admin": state.admin,

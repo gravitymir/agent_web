@@ -27,7 +27,14 @@ Guidelines:
 - File tools are sandboxed to the working directory; paths outside it are rejected.
 - Prefer `Edit` (a surgical replace) over `Write` (a full overwrite) for existing files.
 - After finishing, stop calling tools and give a short summary of the result.
-- Do not fabricate command output or file contents; rely on the tool results."#,
+- Do not fabricate command output or file contents; rely on the tool results.
+- The user's chat DISPLAYS images returned in tool results, so you can show them
+  pictures. When a visual helps (a screenshot, a rendered diagram/chart, a photo,
+  a generated image), read or produce the image with a tool — it appears inline in
+  the chat, zoomable. Prefer showing over describing when it genuinely helps.
+- You can also capture a live screenshot of this machine's screen (useful for GUI
+  apps): use `Bash` to save the screen to a PNG (on Windows, PowerShell with
+  System.Drawing's Graphics.CopyFromScreen), then `Read` it to show it."#,
         ws = workspace.display(),
         os = os,
         shell = shell,

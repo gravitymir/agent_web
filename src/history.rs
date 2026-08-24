@@ -83,6 +83,15 @@ pub struct ToolCall {
     pub input: Value,
 }
 
+/// A base64 image a tool returned (a screenshot, a read image, a generated
+/// chart), carried in history so it survives a reload — the same picture the
+/// live stream showed.
+#[derive(Debug, Serialize)]
+pub struct ChatImage {
+    pub media_type: String,
+    pub data: String,
+}
+
 /// One rendered turn in a chat transcript.
 #[derive(Debug, Serialize)]
 pub struct ChatMessage {
@@ -92,6 +101,43 @@ pub struct ChatMessage {
     /// Tool calls in this message (assistant only), so history shows the same
     /// command/parameter cards as the live stream.
     pub tools: Vec<ToolCall>,
+    /// Images tool results returned during this turn (assistant only). Skipped
+    /// when empty so image-free messages don't bloat the transcript payload.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub images: Vec<ChatImage>,
+}
+
+/// Extract base64 images from the `tool_result` blocks of a message's content.
+fn images_from_content(content: Option<&Value>) -> Vec<ChatImage> {
+    let mut out = Vec::new();
+    let Some(arr) = content.and_then(Value::as_array) else {
+        return out;
+    };
+    for block in arr {
+        if block.get("type").and_then(Value::as_str) != Some("tool_result") {
+            continue;
+        }
+        let Some(inner) = block.get("content").and_then(Value::as_array) else {
+            continue;
+        };
+        for b in inner {
+            if b.get("type").and_then(Value::as_str) == Some("image")
+                && let Some(src) = b.get("source")
+                && src.get("type").and_then(Value::as_str) == Some("base64")
+                && let Some(data) = src.get("data").and_then(Value::as_str)
+            {
+                out.push(ChatImage {
+                    media_type: src
+                        .get("media_type")
+                        .and_then(Value::as_str)
+                        .unwrap_or("image/png")
+                        .to_string(),
+                    data: data.to_string(),
+                });
+            }
+        }
+    }
+    out
 }
 
 /// List all chats, most-recently-updated first. Combines CLI `.jsonl` sessions
@@ -223,6 +269,9 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
     // the *last* one — i.e. how large the conversation was on the most recent
     // API call, which only grows monotonically as the chat continues.
     let mut last_context_tokens = 0u64;
+    // Claude via the CLI defaults to 200k; Qwen Code stamps the real window on
+    // every assistant line (`contextWindowSize`, e.g. 1M) — track the last one.
+    let mut context_limit = 200_000u64;
 
     for line in content.lines() {
         let line = line.trim();
@@ -267,6 +316,8 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
                     .get("message")
                     .and_then(|m| m.get("model"))
                     .and_then(Value::as_str)
+                    // Qwen Code stamps the model at the line's top level instead.
+                    .or_else(|| v.get("model").and_then(Value::as_str))
                     && !mdl.is_empty()
                 {
                     model = mdl.to_string();
@@ -281,6 +332,18 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
                     last_context_tokens = get("input_tokens")
                         + get("cache_read_input_tokens")
                         + get("cache_creation_input_tokens");
+                } else if let Some(u) = v.get("usageMetadata") {
+                    // Qwen Code stores Gemini-style usage at the line's top level.
+                    let get = |k: &str| u.get(k).and_then(Value::as_u64).unwrap_or(0);
+                    tokens += get("candidatesTokenCount") + get("thoughtsTokenCount");
+                    input_tokens += get("promptTokenCount");
+                    cache_read += get("cachedContentTokenCount");
+                    last_context_tokens = get("totalTokenCount");
+                }
+                if let Some(cw) = v.get("contextWindowSize").and_then(Value::as_u64)
+                    && cw > 0
+                {
+                    context_limit = cw;
                 }
             }
             if title.is_none()
@@ -309,7 +372,7 @@ fn summarize_jsonl_file(path: &Path, id: String) -> Option<ChatSummary> {
         turns,
         duration_ms: 0,
         last_context_tokens,
-        context_limit: 200_000, // Claude via the CLI
+        context_limit,
         engine: "cli",
         model,
         models: Vec::new(),
@@ -398,7 +461,7 @@ fn load_jsonl_chat(path: &Path) -> Vec<ChatMessage> {
         Err(_) => return Vec::new(),
     };
 
-    let mut messages = Vec::new();
+    let mut messages: Vec<ChatMessage> = Vec::new();
     for line in content.lines() {
         let line = line.trim();
         if line.is_empty() {
@@ -415,7 +478,16 @@ fn load_jsonl_chat(path: &Path) -> Vec<ChatMessage> {
         };
         // Tool-result messages are stored with role "user" but are internal to
         // the assistant's turn — skip them so they don't break answer grouping.
+        // A tool may return an image, though: attach it to the assistant turn
+        // that ran the tool, so it survives a reload like the live stream showed.
         if has_tool_result(&v) {
+            let imgs = images_from_content(v.get("message").and_then(|m| m.get("content")));
+            if !imgs.is_empty()
+                && let Some(last) = messages.last_mut()
+                && last.role == "assistant"
+            {
+                last.images.extend(imgs);
+            }
             continue;
         }
         let text = extract_text(&v).unwrap_or_default();
@@ -432,6 +504,7 @@ fn load_jsonl_chat(path: &Path) -> Vec<ChatMessage> {
                 .and_then(Value::as_str)
                 .map(str::to_string),
             tools,
+            images: Vec::new(),
         });
     }
     messages
@@ -446,7 +519,7 @@ fn load_native_chat(path: &Path) -> Vec<ChatMessage> {
         None => return Vec::new(),
     };
 
-    let mut messages = Vec::new();
+    let mut messages: Vec<ChatMessage> = Vec::new();
     for m in stored.messages {
         let role = match m.get("role").and_then(Value::as_str) {
             Some("user") => "user",
@@ -454,6 +527,13 @@ fn load_native_chat(path: &Path) -> Vec<ChatMessage> {
             _ => continue,
         };
         if role == "user" && is_native_tool_result(&m) {
+            let imgs = images_from_content(m.get("content"));
+            if !imgs.is_empty()
+                && let Some(last) = messages.last_mut()
+                && last.role == "assistant"
+            {
+                last.images.extend(imgs);
+            }
             continue;
         }
         let text = extract_native_text(&m)
@@ -469,6 +549,7 @@ fn load_native_chat(path: &Path) -> Vec<ChatMessage> {
             text,
             timestamp: None,
             tools,
+            images: Vec::new(),
         });
     }
     messages
@@ -542,7 +623,18 @@ fn extract_native_tools(v: &Value) -> Vec<ToolCall> {
 /// `message.content` is either a plain string or an array of content blocks;
 /// we concatenate the `text` blocks and skip images/tool calls.
 fn extract_text(v: &Value) -> Option<String> {
-    let content = get_content(v)?;
+    let Some(content) = get_content(v) else {
+        // Qwen Code stores Gemini-style messages: text lives in
+        // `message.parts[].text` instead of `message.content`.
+        let parts = v.get("message")?.get("parts")?.as_array()?;
+        let mut out = String::new();
+        for part in parts {
+            if let Some(t) = part.get("text").and_then(Value::as_str) {
+                out.push_str(t);
+            }
+        }
+        return if out.is_empty() { None } else { Some(out) };
+    };
 
     if let Some(s) = content.as_str() {
         return Some(s.to_string());
@@ -621,8 +713,41 @@ fn truncate(s: &str, max: usize) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::{extract_text, extract_tools, has_tool_result, summarize_jsonl_file};
+    use super::{
+        extract_text, extract_tools, has_tool_result, load_jsonl_chat, summarize_jsonl_file,
+    };
     use serde_json::json;
+
+    #[test]
+    fn tool_result_image_is_attached_to_the_assistant_turn() {
+        let path = std::env::temp_dir().join(format!("cwi_hist_img_{}.jsonl", std::process::id()));
+        let lines = [
+            // Assistant ran a tool…
+            json!({"type":"assistant","message":{"content":[
+                {"type":"text","text":"showing you"},
+                {"type":"tool_use","name":"Read","input":{"file_path":"pic.png"}}
+            ]}}),
+            // …whose result carried an image (stored as a role-"user" tool_result).
+            json!({"type":"user","message":{"content":[
+                {"type":"tool_result","tool_use_id":"t","content":[
+                    {"type":"text","text":"read ok"},
+                    {"type":"image","source":{"type":"base64","media_type":"image/png","data":"AAAA"}}
+                ]}
+            ]}}),
+        ]
+        .map(|v| v.to_string())
+        .join("\n");
+        std::fs::write(&path, lines).unwrap();
+
+        let msgs = load_jsonl_chat(&path);
+        // The tool_result message is dropped, but its image rides the assistant turn.
+        assert_eq!(msgs.len(), 1);
+        assert_eq!(msgs[0].role, "assistant");
+        assert_eq!(msgs[0].images.len(), 1);
+        assert_eq!(msgs[0].images[0].media_type, "image/png");
+        assert_eq!(msgs[0].images[0].data, "AAAA");
+        let _ = std::fs::remove_file(&path);
+    }
 
     #[test]
     fn last_context_tokens_is_the_last_message_not_a_sum() {
@@ -702,6 +827,45 @@ mod tests {
             {"type":"tool_use","name":"X","input":{}}
         ]}});
         assert_eq!(extract_text(&v).as_deref(), Some("a"));
+    }
+
+    #[test]
+    fn parses_a_qwen_transcript_line_shape() {
+        // Qwen Code stores Gemini-style lines: usageMetadata + contextWindowSize
+        // + model at the top level, and message.parts instead of message.content.
+        let dir = std::env::temp_dir().join(format!("cwi_qwen_hist_{}", std::process::id()));
+        let _ = std::fs::create_dir_all(&dir);
+        let f = dir.join("q1.jsonl");
+        let lines = [
+            json!({"type":"user","timestamp":"2026-08-24T10:00:00Z",
+                   "message":{"role":"user","parts":[{"text":"привет qwen"}]}})
+            .to_string(),
+            json!({"type":"assistant","timestamp":"2026-08-24T10:00:05Z",
+                   "model":"qwen3.7-plus","contextWindowSize":1_000_000u64,
+                   "usageMetadata":{"promptTokenCount":34420,"candidatesTokenCount":166,
+                                     "thoughtsTokenCount":49,"totalTokenCount":34586,
+                                     "cachedContentTokenCount":0},
+                   "message":{"role":"model","parts":[{"text":"здравствуйте"}]}})
+            .to_string(),
+        ];
+        std::fs::write(
+            &f,
+            lines.join(
+                "
+",
+            ),
+        )
+        .unwrap();
+
+        let sum = summarize_jsonl_file(&f, "q1".into()).expect("summary");
+        assert_eq!(sum.title, "привет qwen"); // parts-based text extraction
+        assert_eq!(sum.tokens, 166 + 49); // output incl. thinking
+        assert_eq!(sum.input_tokens, 34420);
+        assert_eq!(sum.last_context_tokens, 34586);
+        assert_eq!(sum.context_limit, 1_000_000); // stamped per line, not 200k
+        assert_eq!(sum.model, "qwen3.7-plus"); // top-level model
+        assert_eq!(sum.turns, 1);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

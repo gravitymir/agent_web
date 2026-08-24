@@ -1,6 +1,6 @@
 import { state, el, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
-import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings, setChatActions, refreshComposerState, flushQueue } from './ui.js';
+import { hideBadge, showBadgeSoon, loadChatList, updateEarlierButton, settings, setSettings, setChatActions, setPartyPanel, refreshComposerState, flushQueue } from './ui.js';
 import { setFaviconState } from '../favicon.js';
 import { playCompletionChime } from '../sound.js';
 import { notifyTurnComplete } from '../notify.js';
@@ -35,6 +35,7 @@ export function renderMsgRange(msgs, from, to, target) {
       groupAnswer.appendChild(content);
     }
     (m.tools || []).forEach((t) => renderToolCard({ answerEl: groupAnswer }, t.name, t.input || {}));
+    appendImagesRow(groupAnswer, m.images); // tool-result images, persisted in history
   }
   closeGroup();
 }
@@ -303,6 +304,48 @@ export function toolMore(container, n) {
   note.className = "tool-more";
   note.textContent = `… ещё ${n} строк`;
   container.appendChild(note);
+}
+
+// Append a row of `{media_type, data}` images to a container, each zoomable via
+// the lightbox — shared by the live stream and the on-disk history render.
+export function appendImagesRow(container, images) {
+  if (!container || !images || !images.length) return;
+  const row = document.createElement("div");
+  row.className = "msg-images tool-images";
+  for (const im of images) {
+    if (!im || !im.data) continue;
+    const img = document.createElement("img");
+    img.className = "msg-image";
+    img.src = `data:${im.media_type || "image/png"};base64,${im.data}`;
+    img.alt = "изображение от инструмента";
+    img.addEventListener("click", () => openLightbox(img.src));
+    row.appendChild(img);
+  }
+  container.appendChild(row);
+}
+
+// Images returned by a tool (a screenshot, a `Read` on an image file, a chart a
+// script produced …) arrive in a `user` message's tool_result content. Render
+// them into the current turn so the agent can actually SHOW the user pictures.
+// This is how "the agent sends an image" works: it produces/reads an image and
+// the tool result carries it. (History persists them — see load_chat/ChatImage.)
+export function renderToolResultImages(evt) {
+  const cur = state.current;
+  if (!cur || !cur.answerEl) return;
+  const content = evt && evt.message && evt.message.content;
+  if (!Array.isArray(content)) return;
+  const imgs = [];
+  for (const block of content) {
+    if (block.type !== "tool_result" || !Array.isArray(block.content)) continue;
+    for (const b of block.content) {
+      if (b.type === "image" && b.source && b.source.type === "base64" && b.source.data) {
+        imgs.push({ media_type: b.source.media_type || "image/png", data: b.source.data });
+      }
+    }
+  }
+  if (!imgs.length) return;
+  appendImagesRow(cur.answerEl, imgs);
+  scrollToBottomIfPinned();
 }
 
 export function renderToolCard(cur, name, input) {
@@ -1176,6 +1219,7 @@ function engineLabel() {
     const p = state.providers.find((x) => x.id === settings.provider);
     return (p && p.name) || settings.provider || "native";
   }
+  if (state.cliFlavor === "qwen") return "Qwen";
   const g = state.usage;
   const plan = g && g.plan ? String(g.plan) : "";
   const nice = plan ? " " + plan.charAt(0).toUpperCase() + plan.slice(1).toLowerCase() : "";
@@ -1195,9 +1239,23 @@ function ubRow(k, v, cls, title) {
   );
 }
 
+// Chevron-down button pinned at the top of the expanded badge — click to collapse.
+const UB_COLLAPSE_BTN =
+  `<button type="button" class="ub-collapse" aria-label="Свернуть">` +
+  `<svg class="ub-chevron" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M6 9l6 6 6-6"/></svg>` +
+  `</button>`;
+
 export function updateUsageBadge() {
   const header = engineHeaderHtml();
   const open = !!state.sessionId;
+  // Collapsed → shrink to a button showing only the engine dot (click to expand).
+  if (header && state.usageCollapsed) {
+    el.usageBadge.classList.add("multi", "collapsed");
+    el.usageBadge.hidden = false;
+    el.usageBadge.innerHTML = `<span class="ub-dot"></span>`;
+    return;
+  }
+  el.usageBadge.classList.remove("collapsed");
   // No chat open → keep just the engine header visible (no per-chat stats yet).
   if (!open) {
     el.usageBadge.classList.toggle("multi", !!header);
@@ -1227,9 +1285,10 @@ export function updateUsageBadge() {
       : `Context fill (last turn): ${Math.round(ctxPct)}%`;
   // Subscription %s (5-hour session / weekly / Fable weekly) exist only in CLI
   // mode with a Claude subscription. Native has no /api/usage data → skip them.
-  const g = state.usage;
+  // 5h/week/Fable are Claude-subscription quotas — meaningless on Qwen.
+  const g = state.cliFlavor === "qwen" ? null : state.usage;
   const pct = (o) => (o && o.percent != null ? Math.round(o.percent) : 0) + "%";
-  let html = header;
+  let html = UB_COLLAPSE_BTN + header;
   if (g) {
     html += ubRow("5h", pct(g.session), "", "Session — 5-hour window");
     html += ubRow("week", pct(g.week), "", "Week — all models");
@@ -1590,6 +1649,7 @@ export function setUsage(open) {
   if (open) {
     setSettings(false); // only one right drawer at a time
     setChatActions(false);
+    setPartyPanel(false);
   }
   el.usagePanel.classList.toggle("open", open);
   el.usageOverlay.hidden = !open;
@@ -1598,6 +1658,7 @@ export function setUsage(open) {
   el.usageBadge.classList.toggle("usage-open", open);
   el.settingsBadge.classList.toggle("usage-open", open);
   el.chatActionsBadge.classList.toggle("usage-open", open);
+  el.partyBadge.classList.toggle("usage-open", open);
   if (open) { renderUsageDetail(); loadUsage(); }
 }
 
@@ -1612,7 +1673,10 @@ export function updateSendButton() {
   // Enabled even while streaming (unless empty/frozen): a send during a turn
   // queues the message instead of blocking (see submit/flushQueue). Stop shows
   // alongside so the user can still interrupt.
-  el.send.disabled = empty || chatFrozen(state.sessionId) || state.draining;
+  // Observers on a guest instance can't drive the agent (server enforces it too);
+  // the composer is disabled until they take the wheel.
+  const observer = state.gated && state.partyRole === "observer";
+  el.send.disabled = empty || chatFrozen(state.sessionId) || state.draining || observer;
   el.stop.hidden = !state.streaming;
 }
 
@@ -1783,3 +1847,30 @@ export function openLightbox(src) {
   lb.querySelector("img").src = src;
   lb.hidden = false;
 }
+
+// Markdown images (`![alt](src)`) are produced as an HTML string inside
+// renderMarkdown, so they can't get their own click listener the way the pasted
+// and tool images above do. One delegated listener on the transcript covers all
+// of them — live, streamed, or replayed from history.
+el.messages.addEventListener("click", (e) => {
+  const img = e.target && e.target.closest && e.target.closest(".msg-md-image");
+  if (img) openLightbox(img.src);
+});
+
+// A markdown image that fails to load leaves nothing on screen — the answer just
+// looks like it lost a paragraph, which is impossible to report usefully ("it
+// disappeared"). Swap it for a visible note carrying the URL instead. `error`
+// doesn't bubble, hence capture; and the CSP forbids inline `onerror`, so this
+// has to be a delegated listener rather than an attribute.
+el.messages.addEventListener(
+  "error",
+  (e) => {
+    const img = e.target;
+    if (!img || img.tagName !== "IMG" || !img.classList.contains("msg-md-image")) return;
+    const note = document.createElement("div");
+    note.className = "msg-md-image-error";
+    note.textContent = `Изображение не загрузилось: ${img.getAttribute("src") || "?"}`;
+    img.replaceWith(note);
+  },
+  true,
+);

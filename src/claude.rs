@@ -24,6 +24,22 @@ working directory, user accounts, or the operator's email address or identity �
 must never be revealed or referenced. If the user asks about the host, the operator, their email, \
 or where you are running, reply that you don't have that information and can act only within your sandbox.";
 
+/// Appended to every CLI session's system prompt: our web chat renders images
+/// that come back in tool results, so the model can actually *show* pictures.
+const IMAGE_NOTE: &str = "You are talking to the user through a web chat that DISPLAYS images returned in \
+your tool results — so you can show the user pictures, not only describe them. When something is easier to \
+see than to explain (a screenshot, a rendered diagram or chart, a photo, a UI state, a generated image file), \
+read or produce the image with a tool: reading an image file, or running a tool/command that outputs an image, \
+makes it appear inline in the user's chat, where they can click to zoom. Prefer showing over describing when a \
+visual genuinely helps.";
+
+/// Only on the owner host (never the headless sandbox VM): the agent can grab a
+/// live screenshot of the actual screen, so it can show GUI apps.
+const SCREENSHOT_NOTE: &str = "You can also capture a screenshot of THIS machine's live screen and show it — \
+useful for GUI apps (a CAD/PCB viewer, a browser, a design tool). Capture the screen to an image file via the \
+shell (on Windows: PowerShell with System.Drawing — Graphics.CopyFromScreen into a Bitmap saved as PNG; on \
+Linux with a display: a tool like `scrot` or ImageMagick's `import`), then read the file so it appears in the chat.";
+
 /// A freshly spawned Claude Code process: its handle, piped stdin/stdout, and
 /// the resolved session id.
 pub struct Spawned {
@@ -58,38 +74,88 @@ pub fn spawn_claude(
     // ("Session ID is already in use"). So: only `--resume` a chat that has a real
     // conversation, and for the start path delete a placeholder-only stub first so
     // `--session-id` gets a clean slate. A real transcript is never deleted.
-    let session_jsonl = config.session_dir().join(format!("{id}.jsonl"));
+    // Qwen keeps transcripts in its own store; check there for "can we
+    // resume", and never delete its files (the placeholder-stub dance below is
+    // a claude-store concern only).
+    let session_jsonl = if config.cli_qwen() {
+        config.qwen_session_dir().join(format!("{id}.jsonl"))
+    } else {
+        config.session_dir().join(format!("{id}.jsonl"))
+    };
     let has_conversation = jsonl_has_conversation(&session_jsonl);
     let resume = resume && has_conversation;
-    if !resume && !has_conversation && session_jsonl.exists() {
+    if !config.cli_qwen() && !resume && !has_conversation && session_jsonl.exists() {
         let _ = std::fs::remove_file(&session_jsonl);
     }
 
     let mut cmd = base_command(&config.claude_bin);
     cmd.current_dir(config.workspace_abs());
 
-    cmd.arg("--print")
-        .arg("--output-format")
+    // Flavor: Qwen Code (a Claude Code-workalike CLI) speaks the same stream-json
+    // protocol and honors --session-id/--resume/--append-system-prompt/--model,
+    // but not --print/--verbose or the permission flags — it uses --approval-mode
+    // instead. Detected from the binary name (CWI_CLAUDE_BIN=qwen…).
+    let qwen = config.cli_qwen();
+
+    cmd.arg("--output-format")
         .arg("stream-json")
         .arg("--input-format")
         .arg("stream-json")
-        .arg("--include-partial-messages")
-        .arg("--verbose")
-        .arg("--permission-mode")
-        // Sandbox sessions bypass permission prompts: the disposable guest IS the
-        // safety boundary, and `--tools` below removes every host-touching tool.
-        .arg(if config.sandbox {
-            "bypassPermissions"
-        } else {
-            config.permission_mode.as_str()
-        })
-        // Without this, any tool needing a decision beyond `permission_mode`'s
-        // own auto-approvals (Bash, WebFetch, AskUserQuestion, ...) silently
-        // auto-denies in headless `--print` mode. This routes those decisions
-        // to us instead, as `control_request`/`control_response` lines over
-        // the same stdout/stdin — see `run_actor` in session.rs.
-        .arg("--permission-prompt-tool")
-        .arg("stdio");
+        .arg("--include-partial-messages");
+    if qwen {
+        // Approvals: our caps panel is hard-wired all-allowed, so yolo matches
+        // the claude-side behavior; suppress its headless warning line (it would
+        // land before the first JSON event).
+        cmd.arg("--approval-mode").arg("yolo");
+        cmd.env("QWEN_CODE_SUPPRESS_YOLO_WARNING", "1");
+        // Alibaba ModelStudio Token Plan, configured from OUR .env: the plan key
+        // (BAILIAN_TOKEN_PLAN_API_KEY — qwen's own env-key name for this plan)
+        // is mapped onto the generic openai auth type headlessly, so no `/auth`
+        // TUI setup is needed. The plan's dedicated endpoint + a plan model are
+        // the defaults; CWI_QWEN_BASE_URL / CWI_QWEN_MODEL override.
+        if let Ok(key) = std::env::var("BAILIAN_TOKEN_PLAN_API_KEY")
+            && !key.trim().is_empty()
+        {
+            cmd.env("OPENAI_API_KEY", key.trim());
+            cmd.env(
+                "OPENAI_BASE_URL",
+                std::env::var("CWI_QWEN_BASE_URL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| {
+                        "https://token-plan.ap-southeast-1.maas.aliyuncs.com/compatible-mode/v1"
+                            .into()
+                    }),
+            );
+            cmd.env(
+                "OPENAI_MODEL",
+                std::env::var("CWI_QWEN_MODEL")
+                    .ok()
+                    .filter(|s| !s.trim().is_empty())
+                    .unwrap_or_else(|| "qwen3.7-plus".into()),
+            );
+            cmd.arg("--auth-type").arg("openai");
+        }
+    } else {
+        cmd.arg("--print")
+            .arg("--verbose")
+            .arg("--permission-mode")
+            // Sandbox sessions bypass permission prompts: the disposable guest IS
+            // the safety boundary, and `--tools` below removes every
+            // host-touching tool.
+            .arg(if config.sandbox {
+                "bypassPermissions"
+            } else {
+                config.permission_mode.as_str()
+            })
+            // Without this, any tool needing a decision beyond `permission_mode`'s
+            // own auto-approvals (Bash, WebFetch, AskUserQuestion, ...) silently
+            // auto-denies in headless `--print` mode. This routes those decisions
+            // to us instead, as `control_request`/`control_response` lines over
+            // the same stdout/stdin — see `run_actor` in session.rs.
+            .arg("--permission-prompt-tool")
+            .arg("stdio");
+    }
 
     // Sandbox mode: restrict the model to our `mcp__guest__*` tools so every
     // file/shell action runs inside the disposable executor VM over SSH — never
@@ -107,12 +173,6 @@ pub fn spawn_claude(
                 id
             ),
         );
-        // The host CLI injects host context (cwd, OS, and the subscription
-        // account's email) into the model — no flag removes it. Instruct the
-        // guest model to keep it private. Defense-in-depth, not a hard guarantee:
-        // the facts remain in context, so a neutral cwd (run-guest.ps1) does the
-        // real work of not exposing the owner's identity in the first place.
-        cmd.arg("--append-system-prompt").arg(GUEST_PRIVACY_NOTE);
         if let Some(cfg) = sandbox_mcp_config() {
             cmd.arg("--mcp-config").arg(cfg).arg("--strict-mcp-config");
         }
@@ -123,6 +183,18 @@ pub fn spawn_claude(
         ]);
     }
 
+    // System-prompt additions, appended in one flag. The image note applies to
+    // every session; on a sandbox the host-privacy note (host cwd/OS/email are
+    // injected by the host CLI and no flag strips them) is prepended — see
+    // GUEST_PRIVACY_NOTE. Defense-in-depth: the neutral guest cwd (run-guest.ps1)
+    // does the real work of keeping the owner's identity out of the path.
+    let sys_note = if config.sandbox {
+        format!("{GUEST_PRIVACY_NOTE}\n\n{IMAGE_NOTE}")
+    } else {
+        format!("{IMAGE_NOTE}\n\n{SCREENSHOT_NOTE}")
+    };
+    cmd.arg("--append-system-prompt").arg(&sys_note);
+
     if resume {
         cmd.arg("--resume").arg(&id);
     } else {
@@ -131,6 +203,9 @@ pub fn spawn_claude(
 
     if let Some(model) = model
         && !model.is_empty()
+        // Qwen: only pass a model that is actually a qwen model — the UI's
+        // claude aliases (opus/sonnet/haiku) would 404 there; empty → its default.
+        && (!qwen || model.to_ascii_lowercase().contains("qwen"))
     {
         cmd.arg("--model").arg(model);
     }
