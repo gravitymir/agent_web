@@ -1,7 +1,7 @@
 import { state, el, ICONS, escapeHtml, renderMarkdown, chatFrozen } from './state.js';
 import { iIcon } from './ios-icons.js';
 import { connect, sendWs, markSentPending } from './ws.js';
-import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage } from './render.js';
+import { renderToolCard, addFoldIfLong, makeMessage, addUserMessage, showSystem, resetMessages, renderMsgRange, scrollToBottom, scrollToBottomIfPinned, updateScrollbar, updateScrollToBottomButton, setStreamingUI, updateUsageBadge, setUsage, updateSendButton, renderAttachPreview, loadUsage, estimateTokens } from './render.js';
 import { setFaviconState } from '../favicon.js';
 import { ensureNotifyPermission } from '../notify.js';
 import { playDictationStart, playDictationStop } from '../sound.js';
@@ -47,7 +47,7 @@ export function autoGrow() {
   updateSendButton();
 }
 
-export function submit() {
+export async function submit() {
   const typed = el.input.value.trim();
   const images = state.pendingImages;
   const files = state.pendingFiles;
@@ -69,6 +69,30 @@ export function submit() {
   // the model sees their contents (works for CLI and native engines alike).
   const text = filesToPrompt(files) + typed;
   const imgs = images.map((i) => ({ media_type: i.media_type, data: i.data }));
+
+  // Context-budget guard: attached files are inlined into `text`, so a huge
+  // attachment (or a chat whose resumed history is already near the model's
+  // window) would only bounce off the API ("Context is too large…", seen on
+  // Qwen: 1.3M prompt vs its 977k hard cap). Estimate BEFORE sending and let
+  // the user decide. The limit comes from the chat's own stats (Qwen stamps
+  // 1M per line; Claude defaults to 200k); 0.9 leaves room for the reply and
+  // for the estimator's roughness (~4 chars/token undercounts Cyrillic).
+  {
+    const u = state.chatUsage[state.sessionId] || {};
+    const limit = u.contextLimit || (state.cliFlavor === "qwen" ? 1_000_000 : 200_000);
+    const used = u.contextTokens || 0;
+    const est = estimateTokens(text) + imgs.length * 1500;
+    if (used + est > limit * 0.9) {
+      const fmt = (n) => (n >= 1e6 ? (n / 1e6).toFixed(1) + "M" : Math.round(n / 1000) + "k");
+      const ok = await confirmChatAction({
+        title: "Не влезет в контекст модели",
+        message: `Новое сообщение ~${fmt(est)} токенов + уже в контексте ~${fmt(used)}, а окно модели ~${fmt(limit)}. Скорее всего API откажет («Context is too large»). Уменьшите файлы или начните новый чат.`,
+        confirmLabel: "Отправить всё равно",
+        danger: true,
+      });
+      if (!ok) return; // composer untouched — trim the files or start fresh
+    }
+  }
 
   // A turn is already streaming → queue this message instead of blocking. The
   // user keeps typing; the queue drains one message per turn (`flushQueue` on
