@@ -40,6 +40,19 @@ useful for GUI apps (a CAD/PCB viewer, a browser, a design tool). Capture the sc
 shell (on Windows: PowerShell with System.Drawing — Graphics.CopyFromScreen into a Bitmap saved as PNG; on \
 Linux with a display: a tool like `scrot` or ImageMagick's `import`), then read the file so it appears in the chat.";
 
+/// Qwen Code sends every image its Read tool opens straight to Alibaba's vision
+/// endpoint, which rejects many of them ("The image format is illegal and
+/// cannot be opened") and kills the whole turn with a 400 — unlike Claude Code,
+/// where reading an image is harmless. So for Qwen we do NOT invite the model to
+/// read or fabricate images; we tell it the opposite. (This traffic goes
+/// straight to Alibaba, not through our broker, so we can't sanitize it — the
+/// only lever is not provoking it.)
+const QWEN_IMAGE_NOTE: &str = "Do NOT open image files (.png/.jpg/.jpeg/.gif/.webp/.bmp) with your Read \
+tool, and do not create image files and read them back: your vision pipeline rejects most images and a \
+rejected image aborts the entire turn with an error. If the user attaches an image it is delivered to you \
+directly and safely — but never read an image file from disk yourself. When a picture would help, describe \
+it in words or write the data to a file for the user to open; do not try to display it by reading it.";
+
 /// A freshly spawned Claude Code process: its handle, piped stdin/stdout, and
 /// the resolved session id.
 pub struct Spawned {
@@ -188,7 +201,15 @@ pub fn spawn_claude(
     // injected by the host CLI and no flag strips them) is prepended — see
     // GUEST_PRIVACY_NOTE. Defense-in-depth: the neutral guest cwd (run-guest.ps1)
     // does the real work of keeping the owner's identity out of the path.
-    let sys_note = if config.sandbox {
+    let sys_note = if qwen {
+        // Qwen's vision endpoint (Alibaba, reached directly) 400s on many images
+        // and takes the turn down with it — steer it away from reading images.
+        if config.sandbox {
+            format!("{GUEST_PRIVACY_NOTE}\n\n{QWEN_IMAGE_NOTE}")
+        } else {
+            QWEN_IMAGE_NOTE.to_string()
+        }
+    } else if config.sandbox {
         format!("{GUEST_PRIVACY_NOTE}\n\n{IMAGE_NOTE}")
     } else {
         format!("{IMAGE_NOTE}\n\n{SCREENSHOT_NOTE}")
