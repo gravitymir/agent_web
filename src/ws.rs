@@ -633,6 +633,12 @@ async fn send_executor_status(ws_tx: &mut WsSink) {
     } else {
         "stopped"
     };
+    // Public reachability, end-to-end. The VM + SSH can be perfectly healthy
+    // while guests still hit a 502 Bad Gateway — the guest web instance (:8790)
+    // or the Cloudflare tunnel in front of it can be down, and the VM status
+    // alone never reveals it (the "Работает, но Bad Gateway" trap). Probe the
+    // real public URL so the panel can warn instead of falsely reporting OK.
+    let public = probe_public_guest().await;
     let _ = send_control(
         ws_tx,
         json!({
@@ -640,9 +646,32 @@ async fn send_executor_status(ws_tx: &mut WsSink) {
             "state": state_str,
             "vm": { "exists": exists, "running": running, "ssh_ready": ssh, "clean_snapshot": snap },
             "active_turns": active,
+            "public": public.map(|(url, ok)| json!({ "url": url, "reachable": ok })),
         }),
     )
     .await;
+}
+
+/// GET `{CWI_GUEST_URL}/api/health` through Cloudflare to tell whether guests can
+/// actually reach the sandbox right now — a single end-to-end signal that catches
+/// both a dead tunnel and a dead `:8790` origin. Returns `None` when no guest URL
+/// is configured (nothing to check), else `Some((base_url, reachable))`. The
+/// timeout is short and any failure (502, DNS, TLS, timeout) is a definite
+/// "not reachable", not an error to surface.
+async fn probe_public_guest() -> Option<(String, bool)> {
+    let base = std::env::var("CWI_GUEST_URL")
+        .ok()
+        .map(|s| s.trim().trim_end_matches('/').to_string())
+        .filter(|s| !s.is_empty())?;
+    let client = reqwest::Client::builder()
+        .timeout(std::time::Duration::from_secs(6))
+        .build()
+        .ok()?;
+    let ok = matches!(
+        client.get(format!("{base}/api/health")).send().await,
+        Ok(r) if r.status().is_success()
+    );
+    Some((base, ok))
 }
 
 async fn handle_executor(action: &str, state: &Arc<AppState>, ws_tx: &mut WsSink) {

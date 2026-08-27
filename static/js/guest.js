@@ -57,7 +57,19 @@ function handleExecutorEvent(evt) {
       if (evt.vm.running && evt.vm.ssh_ready) parts.push("SSH готов");
       if (!evt.vm.clean_snapshot) parts.push("нет снапшота clean");
     }
+    // End-to-end public reachability (through Cloudflare). VM/SSH can be green
+    // while guests still get Bad Gateway if :8790 or the tunnel is down.
+    if (evt.public) {
+      parts.push(
+        evt.public.reachable
+          ? "публичный доступ ✓"
+          : "публичный доступ ✗ — Bad Gateway (гость :8790 или туннель Cloudflare не отвечает; запустите run-guest.bat)",
+      );
+    }
     meta.textContent = parts.join(" · ");
+    // Colour the whole meta line red when the public URL is unreachable — the
+    // one condition an admin most needs to notice at a glance.
+    meta.style.color = evt.public && !evt.public.reachable ? "var(--danger, #c0392b)" : "";
   }
 
   // Transient states keep buttons disabled; settled states re-enable per state.
