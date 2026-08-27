@@ -1454,12 +1454,13 @@ body.drag-over::after {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-dim) 30%, transparent);
 }
 /* Message time (server timestamp, HH:MM) — quiet, pushed to the end of the name line. */
-/* Time sits right next to the name (not shoved to the far edge of the row). The
-   name row hugs its content so the timestamp reads as "Lolik 19:32", tight. */
+/* One header order everywhere — flag, name, time — regardless of which side the
+   bubble sits on. Only the row's alignment flips (mine hugs the right), never
+   the order, so incoming and outgoing read identically. Time sits tight next to
+   the name (the row hugs its content). */
 .party-msg-from { align-self: flex-start; }
+.party-msg.mine .party-msg-from { align-self: flex-end; }
 .party-msg-time { padding-left: 8px; font-weight: 500; font-size: 0.68rem; color: color-mix(in srgb, var(--text-dim) 75%, transparent); }
-.party-msg.mine .party-msg-from { flex-direction: row-reverse; align-self: flex-end; }
-.party-msg.mine .party-msg-time { padding-left: 0; padding-right: 8px; }
 
 /* Chat badge nudge: a message arrived while the panel is closed. Inverts the
    badge's colours a couple of times so activity is unmissable. */
