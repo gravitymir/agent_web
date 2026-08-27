@@ -641,9 +641,11 @@ export const settings = {
   // Chime when a turn finishes. On by default; absent key ("" from
   // localStorage.getItem returning null → not "0") reads as enabled.
   sound: localStorage.getItem("cwi_sound") !== "0",
-  // Desktop notification when a turn finishes in a hidden tab. Off by default —
-  // unlike sound, this needs an explicit OS permission grant.
-  notify: localStorage.getItem("cwi_notify") === "1",
+  // Desktop notification when a turn finishes in a hidden tab. On by default
+  // (absent key reads as enabled), but unlike sound it needs an OS permission
+  // grant — requested on the first user gesture (see the bootstrap below), since
+  // the prompt can't fire on page load.
+  notify: localStorage.getItem("cwi_notify") !== "0",
   // Context management (direct-API / Gemini engine only). Master on by default,
   // but auto-compaction off — so out of the box it only hints/offers, never acts.
   // Thresholds are bounded so nonsense values (100% context, 1% nudge) can't be set.
@@ -695,25 +697,40 @@ el.sound.addEventListener("change", () => {
   localStorage.setItem("cwi_sound", settings.sound ? "1" : "0");
 });
 
-el.notify.addEventListener("change", () => {
-  settings.notify = el.notify.checked;
-  localStorage.setItem("cwi_notify", settings.notify ? "1" : "0");
-  if (!settings.notify) return;
-  // The permission prompt requires a user gesture — this click is one. If the
-  // browser didn't actually grant it (blocked earlier, or the prompt got
-  // dismissed without a choice), silently leaving the checkbox "on" would be
-  // misleading — notifications would never fire and nothing would say why.
+// Turn notifications on "for real": request the OS permission (needs a user
+// gesture) and, if it isn't granted, fall back to off so the checkbox never
+// sits "on for nothing". `explain` shows the reason — wanted for a deliberate
+// toggle, but kept silent for the default-on bootstrap (the user didn't ask).
+function ensureNotifyOrRevert(explain) {
   ensureNotifyPermission().then((permission) => {
     if (permission === "granted") return;
     settings.notify = false;
     el.notify.checked = false;
     localStorage.setItem("cwi_notify", "0");
+    if (!explain) return;
     const why = permission === "denied"
       ? "уведомления заблокированы в настройках сайта в браузере — разрешите их там и включите ещё раз."
       : "браузер не подтвердил разрешение (диалог закрыли без ответа).";
     showSystem(`Не удалось включить уведомления: ${why}`);
   });
+}
+
+el.notify.addEventListener("change", () => {
+  settings.notify = el.notify.checked;
+  localStorage.setItem("cwi_notify", settings.notify ? "1" : "0");
+  if (settings.notify) ensureNotifyOrRevert(true); // this click is the gesture
 });
+
+// Notifications default to ON, but the permission prompt can't run on page load
+// — it needs a user gesture. On the first interaction, if it's still on and the
+// browser hasn't decided yet, ask once, quietly falling back to off if refused.
+function bootstrapNotify() {
+  if (settings.notify && "Notification" in window && Notification.permission === "default") {
+    ensureNotifyOrRevert(false);
+  }
+}
+window.addEventListener("pointerdown", bootstrapNotify, { once: true });
+window.addEventListener("keydown", bootstrapNotify, { once: true });
 
 // --- Context management controls (direct-API / Gemini engine) --------------
 el.ctxMgmt.addEventListener("change", () => {
