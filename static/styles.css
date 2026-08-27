@@ -1383,16 +1383,6 @@ body.drag-over::after {
 /* Body is a column: control block (fixed) · human chat log (grows, scrolls) ·
    note · composer (pinned). Overrides settings-body's own overflow. */
 .party-body { flex: 1; display: flex; flex-direction: column; padding: 10px; gap: 10px; overflow: hidden; }
-/* Online-count pill by the close button: how many people are in the room right
-   now (you + observers). A green dot + the number. */
-.party-online {
-  flex: none; display: inline-flex; align-items: center; gap: 5px;
-  font-size: 0.8rem; font-weight: 600; color: var(--text-dim);
-  padding: 3px 9px; border: 1px solid var(--border); border-radius: 999px;
-  background: var(--bg-elev); white-space: nowrap;
-}
-.party-online[hidden] { display: none; }
-.party-online .dot { width: 7px; height: 7px; border-radius: 50%; background: #3ba55d; flex: none; }
 /* Right cluster of the chat header (driver + name button), pinned to the edge so
    the headcount and title stay by the close button. */
 .party-header { position: relative; }

@@ -79,7 +79,6 @@ export const el = {
   partyPanel: document.getElementById("party-panel"),
   partyOverlay: document.getElementById("party-overlay"),
   partyDriver: document.getElementById("party-driver"),
-  partyOnline: document.getElementById("party-online"),
   partyBadge: document.getElementById("party-badge"),
   partyBadgeCount: document.getElementById("party-badge-count"),
   partyNameBtn: document.getElementById("party-name-btn"),

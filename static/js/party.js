@@ -88,19 +88,8 @@ function updateOnlineCount(n) {
   // count drops (someone left) don't blink.
   if (prevOnline !== null && n > prevOnline) flashPartyBadge();
   prevOnline = n;
-  // Header pill (inside the open drawer).
-  const c = el.partyOnline;
-  if (c) {
-    if (n > 0) {
-      c.innerHTML = `<span class="dot"></span>${n}`;
-      c.title = `Людей онлайн: ${n}`;
-      c.hidden = false;
-    } else {
-      c.hidden = true;
-    }
-  }
-  // Collapsed badge (visible even while the drawer is closed): grow it into a
-  // pill with the count beside the icon, so viewers are visible at a glance.
+  // The collapsed badge is the only headcount readout (visible with the drawer
+  // open OR closed): grow it into a pill with the count beside the icon.
   if (el.partyBadge && el.partyBadgeCount) {
     if (n > 0) {
       el.partyBadgeCount.textContent = String(n);
