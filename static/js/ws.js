@@ -246,6 +246,9 @@ export function handleEvent(evt) {
       case "roster":
         window.dispatchEvent(new CustomEvent("cwi-roster", { detail: evt }));
         break;
+      case "party_online":
+        window.dispatchEvent(new CustomEvent("cwi-party-online", { detail: evt }));
+        break;
       case "party_chat":
         window.dispatchEvent(new CustomEvent("cwi-party-chat", { detail: evt }));
         break;

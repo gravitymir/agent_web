@@ -78,10 +78,11 @@ function applyRole() {
 // reconnect that re-sends the same roster — doesn't blink.
 let prevOnline = null;
 
-// Live headcount in the chat header: everyone currently in the room (you +
-// observers), straight from the roster length. Hidden until there's a room.
-function updateOnlineCount(members) {
-  const n = (members || []).length;
+// Live headcount: everyone connected to the party right now (you + viewers),
+// GLOBAL across the instance — the server counts live connections, not the
+// per-session room, so two devices on different sessions still total correctly.
+function updateOnlineCount(n) {
+  n = Number(n) || 0;
   // A participant appeared — nudge the badge the same way a new message does, so
   // an arriving viewer is noticeable even with the chat closed. Baseline and
   // count drops (someone left) don't blink.
@@ -338,8 +339,12 @@ window.addEventListener("cwi-role", (e) => {
 });
 window.addEventListener("cwi-roster", (e) => {
   const d = e.detail || {};
-  updateDriverHead(d.members || []);
-  updateOnlineCount(d.members || []);
+  updateDriverHead(d.members || []); // who drives THIS agent (per-session)
+});
+// Global party headcount (everyone on the instance), separate from the session
+// roster — drives the count pill + badge + the join blink.
+window.addEventListener("cwi-party-online", (e) => {
+  updateOnlineCount((e.detail || {}).count);
 });
 // Our own connection id — messages carrying it are ours (right-aligned).
 window.addEventListener("cwi-me", (e) => {

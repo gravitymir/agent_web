@@ -155,6 +155,20 @@ impl PartyHub {
     pub fn history(&self) -> Vec<String> {
         self.log.lock().unwrap().iter().cloned().collect()
     }
+
+    /// How many devices are connected to the party right now — the live
+    /// subscriber count, so it reflects everyone currently "on the page"
+    /// (across the whole instance, any session), regardless of whether they've
+    /// picked a name yet. The basis for the room headcount.
+    pub fn online(&self) -> usize {
+        self.events.receiver_count()
+    }
+
+    /// Fan a control line to everyone WITHOUT storing it in the replay log — for
+    /// presence/status frames that must not reappear as chat history on reload.
+    pub fn broadcast(&self, line: String) {
+        let _ = self.events.send(line);
+    }
 }
 
 /// A participant's role in a session room.

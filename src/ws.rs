@@ -123,6 +123,16 @@ fn broadcast_roster(k: &SessionKeeper) {
     );
 }
 
+/// Fan the current party headcount to everyone. A GLOBAL presence signal (the
+/// whole instance's chat), unlike `broadcast_roster`, which is per agent session
+/// — so two devices attached to different sessions still count toward one total.
+fn broadcast_party_online(state: &AppState) {
+    let n = state.party.online();
+    state
+        .party
+        .broadcast(json!({ "cwi": "party_online", "count": n }).to_string());
+}
+
 /// Sliding-window rate limiter for a single connection. Generous enough never to
 /// bite normal use (the composer already locks during a turn), but caps a client
 /// that floods `send`/`interrupt` frames.
@@ -255,6 +265,9 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>, country: Opt
         )
         .await;
     }
+    // Tell everyone (including this fresh device) the new headcount now that it's
+    // subscribed — so the badge/count reflects the join immediately.
+    broadcast_party_online(&state);
 
     loop {
         // The session-events receiver exists only once attached; the party
@@ -319,6 +332,10 @@ pub async fn handle_socket(socket: WebSocket, state: Arc<AppState>, country: Opt
         broadcast_roster(k);
     }
     state.party.release_name(conn.id); // free "Антон" for the next Антон
+    // Drop our party receiver BEFORE recounting, so the headcount excludes us,
+    // then tell the rest of the room we've left.
+    drop(party_rx);
+    broadcast_party_online(&state);
     drop(guard);
 }
 
