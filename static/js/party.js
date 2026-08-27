@@ -271,17 +271,53 @@ function updateJoinHint() {
   }
 }
 
+// Persist a chosen name and push it to the server (empty → server auto-names
+// "Гость N"). Returns false when a typed name is too short, so the caller can
+// keep the box open and show the hint. Shared by the join screen and the
+// in-header "change my name" popover.
+function commitName(raw) {
+  const v = sanitizeName(raw);
+  if (v && [...v].length < 5) return false; // 5–10 chars when non-empty
+  storeName(v);
+  sendIdentity();
+  return true;
+}
+
 function submitJoin() {
-  const v = sanitizeName(el.partyJoinName.value);
-  // Empty is allowed (server auto-names); a typed name must be 5–10 characters.
-  if (v && [...v].length < 5) {
+  if (!commitName(el.partyJoinName.value)) {
     updateJoinHint();
     el.partyJoinName.focus();
     return;
   }
-  storeName(v);
   el.partyJoinOverlay.hidden = true;
-  sendIdentity();
+}
+
+// --- Change-my-name popover (header person button) ---------------------------
+// Lets anyone revisit and rename themselves later — you might join with a
+// throwaway name, then set a proper one once the room turns serious.
+function updateNameHint() {
+  const v = el.partyNameInput.value;
+  if (!v) el.partyNameHint.textContent = "Пусто — станешь «Гость N».";
+  else if ([...v].length < 5) el.partyNameHint.textContent = "Минимум 5 символов.";
+  else el.partyNameHint.textContent = `Ок — «${v}».`;
+}
+function openNamePop() {
+  el.partyNameInput.value = state.partyName || storedName() || "";
+  updateNameHint();
+  el.partyNamePop.hidden = false;
+  el.partyNameInput.focus();
+  el.partyNameInput.select();
+}
+function closeNamePop() {
+  el.partyNamePop.hidden = true;
+}
+function setName() {
+  if (!commitName(el.partyNameInput.value)) {
+    updateNameHint();
+    el.partyNameInput.focus();
+    return;
+  }
+  closeNamePop();
 }
 
 function maybeShowJoin() {
@@ -317,8 +353,40 @@ el.partyJoinName.addEventListener("keydown", (e) => {
 });
 el.partyJoinGo.addEventListener("click", submitJoin);
 
+// Change-my-name popover wiring.
+el.partyNameBtn?.addEventListener("click", (e) => {
+  e.stopPropagation(); // don't let the document click-away handler re-close it
+  el.partyNamePop.hidden ? openNamePop() : closeNamePop();
+});
+el.partyNameInput?.addEventListener("input", () => {
+  el.partyNameInput.value = sanitizeName(el.partyNameInput.value);
+  updateNameHint();
+});
+el.partyNameInput?.addEventListener("keydown", (e) => {
+  if (e.key === "Enter") {
+    e.preventDefault();
+    setName();
+  }
+});
+el.partyNameSet?.addEventListener("click", setName);
+// Click outside the popover closes it.
+document.addEventListener("click", (e) => {
+  if (
+    !el.partyNamePop.hidden &&
+    !el.partyNamePop.contains(e.target) &&
+    !el.partyNameBtn.contains(e.target)
+  ) {
+    closeNamePop();
+  }
+});
+
 document.addEventListener("keydown", (e) => {
-  if (e.key === "Escape" && el.partyPanel.classList.contains("open")) setPartyPanel(false);
+  if (e.key !== "Escape") return;
+  if (!el.partyNamePop.hidden) {
+    closeNamePop(); // Escape closes the name popover first
+    return;
+  }
+  if (el.partyPanel.classList.contains("open")) setPartyPanel(false);
 });
 
 window.addEventListener("cwi-party-open", () => {
@@ -352,7 +420,10 @@ window.addEventListener("cwi-me", (e) => {
   if (d.cid != null) state.partyCid = d.cid;
   // The server may have numbered our name to keep it unique ("Антон" → "Антон 2")
   // — adopt what it actually assigned so our own messages are recognised.
-  if (d.name) state.partyName = d.name;
+  if (d.name) {
+    state.partyName = d.name;
+    if (el.partyNameBtn) el.partyNameBtn.title = `Имя: ${d.name}`;
+  }
 });
 window.addEventListener("cwi-party-chat", (e) => {
   const d = e.detail || {};

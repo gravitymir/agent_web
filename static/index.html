@@ -195,13 +195,25 @@
   </button>
   <div id="party-overlay" class="settings-overlay" hidden></div>
   <aside id="party-panel" class="settings-panel party-panel" aria-label="Чат">
-    <div class="settings-header">
+    <div class="settings-header party-header">
       <button type="button" class="drawer-close" data-close="party" aria-label="Свернуть"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M9 6l6 6-6 6"/></svg></button>
       <!-- Live headcount for the room: you + observers currently connected. -->
       <span class="party-online" id="party-online" title="Людей онлайн" hidden></span>
       <h2>Чат</h2>
-      <!-- Who currently drives the agent (flag + name); shown only in a session. -->
-      <span class="party-driver" id="party-driver" hidden></span>
+      <span class="party-head-right">
+        <!-- Who currently drives the agent (flag + name); shown only in a session. -->
+        <span class="party-driver" id="party-driver" hidden></span>
+        <!-- Change your own display name any time (not just at join). -->
+        <button type="button" class="party-name-btn" id="party-name-btn" title="Моё имя" aria-label="Изменить имя">
+          <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.8" stroke-linecap="round" stroke-linejoin="round"><path d="M20 21v-2a4 4 0 0 0-4-4H8a4 4 0 0 0-4 4v2"/><circle cx="12" cy="7" r="4"/></svg>
+        </button>
+      </span>
+      <div class="party-name-pop" id="party-name-pop" role="dialog" aria-label="Изменить имя" hidden>
+        <label class="field-label" for="party-name-input">Твоё имя в чате</label>
+        <input id="party-name-input" class="modal-input" type="text" inputmode="text" maxlength="10" placeholder="напр. Барсук" autocomplete="off" aria-describedby="party-name-hint" />
+        <p class="party-name-hint" id="party-name-hint">5–10 символов — буквы, цифры.</p>
+        <button id="party-name-set" class="btn-primary" type="button">Установить имя</button>
+      </div>
     </div>
     <div class="settings-body party-body">
       <!-- Human side-chat: participants talk to each other here (never sent to the

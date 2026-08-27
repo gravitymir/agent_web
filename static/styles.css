@@ -1393,14 +1393,34 @@ body.drag-over::after {
 }
 .party-online[hidden] { display: none; }
 .party-online .dot { width: 7px; height: 7px; border-radius: 50%; background: #3ba55d; flex: none; }
-/* Driver indicator in the chat header: "[flag] name", accent-tinted, pinned to
-   the right edge so the headcount and title stay by the close button. */
+/* Right cluster of the chat header (driver + name button), pinned to the edge so
+   the headcount and title stay by the close button. */
+.party-header { position: relative; }
+.party-head-right { margin-left: auto; display: inline-flex; align-items: center; gap: 8px; min-width: 0; }
+/* Driver indicator in the chat header: "[flag] name", accent-tinted. */
 .party-driver {
-  margin-left: auto;
   font-size: 0.82rem; font-weight: 600; color: var(--accent);
   white-space: nowrap; overflow: hidden; text-overflow: ellipsis; min-width: 0;
 }
 .party-driver[hidden] { display: none; }
+/* "Change my name" button — one person icon, opens the name popover below it. */
+.party-name-btn {
+  flex: none; width: 32px; height: 32px; padding: 0;
+  display: inline-flex; align-items: center; justify-content: center;
+  border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
+  color: var(--text-dim); cursor: pointer; transition: color .15s, border-color .15s;
+}
+.party-name-btn:hover { color: var(--accent); border-color: var(--accent); }
+.party-name-btn svg { width: 18px; height: 18px; }
+/* Popover anchored under the name button — see/edit your display name any time. */
+.party-name-pop {
+  position: absolute; top: calc(100% - 4px); right: 14px; z-index: 6; width: 240px;
+  background: var(--bg-elev); border: 1px solid var(--border); border-radius: 10px;
+  box-shadow: 0 8px 24px rgba(0, 0, 0, 0.16); padding: 12px;
+  display: flex; flex-direction: column; gap: 8px;
+}
+.party-name-pop[hidden] { display: none; }
+.party-name-hint { margin: 0; font-size: 0.78rem; color: var(--text-dim); }
 .party-join-hint { margin: 8px 2px 0; font-size: 0.8rem; color: var(--text-dim); }
 /* Roomier gap so consecutive messages read as separate turns. */
 /* Scrolls like the main message view: native scrollbars hidden (both axes),
