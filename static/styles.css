@@ -609,17 +609,6 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
 }
 .empty-state { text-align: center; color: var(--text-dim); margin-top: 15vh; }
 .empty-state h1 { color: var(--text); font-weight: 600; }
-/* Quick-prompt template chips in a new chat's empty state. */
-.quick-prompts { display: flex; flex-wrap: wrap; gap: 8px; justify-content: center; margin-top: 18px; }
-.quick-prompt {
-  background: var(--bg-elev); color: var(--text);
-  border: 1px solid var(--border); border-radius: 999px;
-  padding: 8px 14px; font-size: 0.88rem; cursor: pointer;
-  transition: background .12s ease, border-color .12s ease, color .12s ease;
-  display: inline-flex; align-items: center; gap: 6px;
-}
-.quick-prompt svg { width: 1.1em; height: 1.1em; }
-.quick-prompt:hover { background: var(--bg); border-color: var(--accent); color: var(--accent); }
 
 /* Message block ~80% of the page width, centered. */
 .msg { max-width: 80%; margin: 0 auto 22px; padding: 0 20px; }

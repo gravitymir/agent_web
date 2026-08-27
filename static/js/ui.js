@@ -413,38 +413,6 @@ export function endDictationUI(ok) {
 }
 
 // ---------------------------------------------------------------------------
-// Quick-prompt templates (shown in a new chat's empty state).
-// ---------------------------------------------------------------------------
-export const QUICK_PROMPTS = [
-  { icon: "book", label: "Объясни код", text: "Объясни, что делает этот код и как он устроен:\n\n" },
-  { icon: "bug", label: "Найди баги", text: "Просмотри код на предмет багов и потенциальных проблем." },
-  { icon: "recycle", label: "Рефакторинг", text: "Предложи рефакторинг этого кода, сохранив поведение:\n\n" },
-  { icon: "flask", label: "Напиши тесты", text: "Напиши тесты для этого кода." },
-];
-
-export function buildQuickPrompts() {
-  const wrap = document.createElement("div");
-  wrap.className = "quick-prompts";
-  for (const q of QUICK_PROMPTS) {
-    const btn = document.createElement("button");
-    btn.type = "button";
-    btn.className = "quick-prompt";
-    btn.innerHTML = `${iIcon(q.icon, 16, 'inline')} ${q.label}`;
-    btn.addEventListener("click", () => insertPrompt(q.text));
-    wrap.appendChild(btn);
-  }
-  return wrap;
-}
-
-export function insertPrompt(text) {
-  el.input.value = text;
-  autoGrow();
-  el.input.focus();
-  // Place the caret at the end so the user types right where the template leaves off.
-  el.input.selectionStart = el.input.selectionEnd = el.input.value.length;
-}
-
-// ---------------------------------------------------------------------------
 // Current-chat actions (export MD / JSON, archive, delete). They used to sit in
 // a floating chip over the bottom-right of the chat; now they live in a right
 // drawer opened by the download badge, so nothing overlaps the transcript.
@@ -636,10 +604,9 @@ export async function createChat() {
   const h = document.createElement("h1");
   h.innerHTML = (modalIcon ? iIcon(modalIcon, 24, "inline") + " " : "") + escapeHtml(title);
   const p = document.createElement("p");
-  p.textContent = "Новый чат создан. Напишите первое сообщение или начните с шаблона:";
+  p.textContent = "Введите первое сообщение — голосом или текстом.";
   empty.appendChild(h);
   empty.appendChild(p);
-  empty.appendChild(buildQuickPrompts());
   el.messages.appendChild(empty);
   document.querySelectorAll(".chat-item.active").forEach((n) => n.classList.remove("active"));
 
