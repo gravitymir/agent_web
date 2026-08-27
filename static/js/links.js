@@ -4,6 +4,71 @@
 // are validated on the disposable executor; the host pushes them there on mint.
 const $ = (id) => document.getElementById(id);
 
+// TTL hours stepper. Minimum 1 hour (we never mint a shorter link); the input is
+// three digits, so up to 999 hours. Buttons step by ±1 and ±24; both clamp to
+// [TTL_MIN, TTL_MAX] and gray out at the ends.
+const TTL_MIN = 1;
+const TTL_MAX = 999;
+
+function clampHours(n) {
+  if (!Number.isFinite(n)) return TTL_MIN;
+  return Math.min(TTL_MAX, Math.max(TTL_MIN, Math.trunc(n)));
+}
+
+// Current value WITHOUT clamping empty→min, so mid-typing an empty field doesn't
+// snap to 1 under the user's cursor. Returns null when the field is blank.
+function ttlRaw() {
+  const v = $("link-ttl").value.replace(/\D/g, "");
+  return v === "" ? null : parseInt(v, 10);
+}
+
+// Reflect min/max on the four step buttons for the given value (blank counts as
+// the minimum, so both minus buttons disable).
+function updateTtlButtons(val) {
+  const v = val == null ? TTL_MIN : val;
+  const atMin = v <= TTL_MIN;
+  const atMax = v >= TTL_MAX;
+  $("link-ttl-mm").disabled = atMin;
+  $("link-ttl-m").disabled = atMin;
+  $("link-ttl-p").disabled = atMax;
+  $("link-ttl-pp").disabled = atMax;
+}
+
+// Apply a delta from a button and write the clamped result back.
+function stepTtl(delta) {
+  const base = ttlRaw();
+  const next = clampHours((base == null ? TTL_MIN : base) + delta);
+  $("link-ttl").value = String(next);
+  updateTtlButtons(next);
+}
+
+function initTtlStepper() {
+  const input = $("link-ttl");
+  if (!input) return;
+  $("link-ttl-mm")?.addEventListener("click", () => stepTtl(-24));
+  $("link-ttl-m")?.addEventListener("click", () => stepTtl(-1));
+  $("link-ttl-p")?.addEventListener("click", () => stepTtl(1));
+  $("link-ttl-pp")?.addEventListener("click", () => stepTtl(24));
+  // Keep it digits-only and ≤3 chars while typing; don't clamp yet (let the user
+  // clear it to retype). Buttons reflect the raw value live.
+  input.addEventListener("input", () => {
+    const cleaned = input.value.replace(/\D/g, "").slice(0, 3);
+    if (cleaned !== input.value) input.value = cleaned;
+    updateTtlButtons(ttlRaw());
+  });
+  // On blur (or Enter) settle to a valid clamped number so we never mint <1h.
+  const settle = () => {
+    const v = ttlRaw();
+    input.value = String(v == null ? TTL_MIN : clampHours(v));
+    updateTtlButtons(parseInt(input.value, 10));
+  };
+  input.addEventListener("blur", settle);
+  input.addEventListener("keydown", (e) => {
+    if (e.key === "Enter") { settle(); create(); }
+  });
+  updateTtlButtons(clampHours(ttlRaw()));
+}
+
 function humanTtl(s) {
   if (s >= 86400) return `${Math.floor(s / 86400)}д`;
   if (s >= 3600) return `${Math.floor(s / 3600)}ч`;
@@ -128,7 +193,7 @@ async function create() {
     labelEl.focus();
     return;
   }
-  const ttl = $("link-ttl").value;
+  const ttl = `${clampHours(ttlRaw())}h`; // hours → backend TTL (e.g. "24h")
   const btn = $("link-create");
   btn.disabled = true;
   try {
@@ -166,6 +231,7 @@ async function init() {
   $("link-label")?.addEventListener("keydown", (e) => {
     if (e.key === "Enter") create();
   });
+  initTtlStepper();
   // Reload the list each time the admin drawer opens (dispatched by ui.js).
   window.addEventListener("cwi-admin-open", loadList);
 }

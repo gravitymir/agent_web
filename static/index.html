@@ -273,12 +273,14 @@
           <p class="links-hint">Создайте ссылку для гостя. Она ведёт на изолированный executor и действует ограниченное время.</p>
           <div class="links-form">
             <input id="link-label" class="links-input" type="text" placeholder="метка (напр. alice)" autocomplete="off" />
-            <select id="link-ttl" class="links-input">
-              <option value="24h">24 часа</option>
-              <option value="7d">7 дней</option>
-              <option value="30d">30 дней</option>
-              <option value="1h">1 час</option>
-            </select>
+            <div class="ttl-stepper" role="group" aria-label="Срок действия, часов">
+              <button type="button" id="link-ttl-mm" class="ttl-btn" title="минус 24 часа" aria-label="минус 24 часа">−24</button>
+              <button type="button" id="link-ttl-m" class="ttl-btn" title="минус 1 час" aria-label="минус 1 час">−1</button>
+              <input id="link-ttl" class="ttl-num" type="text" inputmode="numeric" maxlength="3" value="24" aria-label="часов действия ссылки" />
+              <button type="button" id="link-ttl-p" class="ttl-btn" title="плюс 1 час" aria-label="плюс 1 час">+1</button>
+              <button type="button" id="link-ttl-pp" class="ttl-btn" title="плюс 24 часа" aria-label="плюс 24 часа">+24</button>
+              <span class="ttl-unit">ч</span>
+            </div>
             <button id="link-create" class="btn-primary guest-btn">Создать ссылку</button>
           </div>
           <div id="link-result" class="link-result" hidden></div>

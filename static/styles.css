@@ -238,6 +238,24 @@ body.booted #chat-title { opacity: 1; transition: opacity .3s ease; }
   background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
 }
 .links-input:focus { outline: none; border-color: var(--accent); }
+/* Hours stepper: [−24][−1][ input ][+1][+24] ч — min 1h, up to 3 digits (999h). */
+.ttl-stepper { display: flex; align-items: stretch; gap: 6px; }
+.ttl-btn {
+  flex: none; min-width: 42px; padding: 0 8px; border-radius: 8px;
+  font-size: 0.9rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+  cursor: pointer; user-select: none;
+}
+.ttl-btn:hover:not(:disabled) { border-color: var(--accent); color: var(--accent); }
+.ttl-btn:active:not(:disabled) { background: color-mix(in srgb, var(--accent) 12%, var(--bg-elev)); }
+.ttl-btn:disabled { opacity: 0.4; cursor: not-allowed; }
+.ttl-num {
+  flex: 1 1 auto; min-width: 0; width: 100%; padding: 9px 6px; border-radius: 8px;
+  text-align: center; font-size: 0.95rem; font-weight: 600; font-variant-numeric: tabular-nums;
+  background: var(--bg-elev); border: 1px solid var(--border); color: var(--text);
+}
+.ttl-num:focus { outline: none; border-color: var(--accent); }
+.ttl-unit { flex: none; align-self: center; font-size: 0.85rem; color: var(--text-dim); }
 .link-result {
   display: flex; flex-direction: column; gap: 8px;
   background: var(--bg-elev); border: 1px solid var(--border); border-radius: 8px; padding: 10px;
