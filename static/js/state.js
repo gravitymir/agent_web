@@ -13,7 +13,9 @@ export const state = {
   pendingFiles: [],  // attached text files awaiting send: {name, text, truncated}
   queue: [],         // messages queued while a turn streams: {text, imgs, label}
   draining: false,   // server is in graceful Drain-Stop → refuse new turns/queueing
-  usageCollapsed: (() => { try { return localStorage.getItem("cwi_usage_collapsed") === "1"; } catch { return false; } })(),
+  // Collapsed to the dot by default (absent key reads as collapsed); expanded
+  // only if the user explicitly opened it ("0").
+  usageCollapsed: (() => { try { return localStorage.getItem("cwi_usage_collapsed") !== "0"; } catch { return true; } })(),
   cliFlavor: "claude", // which CLI binary the cli engine runs: "claude" | "qwen"
   gated: false,      // guest instance (behind a magic link) — party/roles apply
   partyRole: "driver", // this connection's room role: "driver" | "observer"
