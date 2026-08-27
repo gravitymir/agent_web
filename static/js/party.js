@@ -73,6 +73,37 @@ function applyRole() {
   updateSendButton();
 }
 
+// Live headcount in the chat header: everyone currently in the room (you +
+// observers), straight from the roster length. Hidden until there's a room.
+function updateOnlineCount(members) {
+  const n = (members || []).length;
+  // Header pill (inside the open drawer).
+  const c = el.partyOnline;
+  if (c) {
+    if (n > 0) {
+      c.innerHTML = `<span class="dot"></span>${n}`;
+      c.title = `Людей онлайн: ${n}`;
+      c.hidden = false;
+    } else {
+      c.hidden = true;
+    }
+  }
+  // Collapsed badge (visible even while the drawer is closed): grow it into a
+  // pill with the count beside the icon, so viewers are visible at a glance.
+  if (el.partyBadge && el.partyBadgeCount) {
+    if (n > 0) {
+      el.partyBadgeCount.textContent = String(n);
+      el.partyBadgeCount.hidden = false;
+      el.partyBadge.classList.add("has-count");
+      el.partyBadge.title = `Чат · ${n} онлайн`;
+    } else {
+      el.partyBadgeCount.hidden = true;
+      el.partyBadge.classList.remove("has-count");
+      el.partyBadge.title = "Чат";
+    }
+  }
+}
+
 // Show who currently drives the agent in the chat header (flag + name), from the
 // roster. Hidden when there's no driver / no session.
 function updateDriverHead(members) {
@@ -298,6 +329,7 @@ window.addEventListener("cwi-role", (e) => {
 window.addEventListener("cwi-roster", (e) => {
   const d = e.detail || {};
   updateDriverHead(d.members || []);
+  updateOnlineCount(d.members || []);
 });
 // Our own connection id — messages carrying it are ours (right-aligned).
 window.addEventListener("cwi-me", (e) => {
