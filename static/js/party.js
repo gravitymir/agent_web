@@ -73,10 +73,20 @@ function applyRole() {
   updateSendButton();
 }
 
+// Last known headcount, to notice when someone NEW joins (count grows). `null`
+// until the first roster establishes the baseline, so joining yourself — or a
+// reconnect that re-sends the same roster — doesn't blink.
+let prevOnline = null;
+
 // Live headcount in the chat header: everyone currently in the room (you +
 // observers), straight from the roster length. Hidden until there's a room.
 function updateOnlineCount(members) {
   const n = (members || []).length;
+  // A participant appeared — nudge the badge the same way a new message does, so
+  // an arriving viewer is noticeable even with the chat closed. Baseline and
+  // count drops (someone left) don't blink.
+  if (prevOnline !== null && n > prevOnline) flashPartyBadge();
+  prevOnline = n;
   // Header pill (inside the open drawer).
   const c = el.partyOnline;
   if (c) {
