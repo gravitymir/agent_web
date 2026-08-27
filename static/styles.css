@@ -1408,7 +1408,7 @@ body.drag-over::after {
   flex: none; width: 32px; height: 32px; padding: 0;
   display: inline-flex; align-items: center; justify-content: center;
   border: 1px solid var(--border); border-radius: 8px; background: var(--bg-elev);
-  color: var(--text-dim); cursor: pointer; transition: color .15s, border-color .15s;
+  color: var(--text); cursor: pointer; transition: color .15s, border-color .15s;
 }
 .party-name-btn:hover { color: var(--accent); border-color: var(--accent); }
 .party-name-btn svg { width: 18px; height: 18px; }
@@ -1454,9 +1454,12 @@ body.drag-over::after {
   box-shadow: 0 0 0 1px color-mix(in srgb, var(--text-dim) 30%, transparent);
 }
 /* Message time (server timestamp, HH:MM) — quiet, pushed to the end of the name line. */
-.party-msg-time { margin-left: auto; padding-left: 10px; font-weight: 500; font-size: 0.68rem; color: color-mix(in srgb, var(--text-dim) 75%, transparent); }
-.party-msg.mine .party-msg-from { flex-direction: row-reverse; }
-.party-msg.mine .party-msg-time { margin-left: 0; margin-right: auto; padding-left: 0; padding-right: 10px; }
+/* Time sits right next to the name (not shoved to the far edge of the row). The
+   name row hugs its content so the timestamp reads as "Lolik 19:32", tight. */
+.party-msg-from { align-self: flex-start; }
+.party-msg-time { padding-left: 8px; font-weight: 500; font-size: 0.68rem; color: color-mix(in srgb, var(--text-dim) 75%, transparent); }
+.party-msg.mine .party-msg-from { flex-direction: row-reverse; align-self: flex-end; }
+.party-msg.mine .party-msg-time { padding-left: 0; padding-right: 8px; }
 
 /* Chat badge nudge: a message arrived while the panel is closed. Inverts the
    badge's colours a couple of times so activity is unmissable. */
