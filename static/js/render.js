@@ -1248,15 +1248,18 @@ const UB_COLLAPSE_BTN =
 export function updateUsageBadge() {
   const header = engineHeaderHtml();
   const open = !!state.sessionId;
-  // Collapsed → shrink to a button showing only the engine dot (click to expand).
-  if (header && state.usageCollapsed) {
+  // Shrink to the engine dot when collapsed by choice OR when no chat is selected
+  // — with no chat there are no per-chat stats to show, and a lone "Cloud Max"
+  // header looked half-open (neither collapsed nor expanded). Click expands only
+  // once a chat is open and there's something to reveal.
+  if (header && (state.usageCollapsed || !open)) {
     el.usageBadge.classList.add("multi", "collapsed");
     el.usageBadge.hidden = false;
     el.usageBadge.innerHTML = `<span class="ub-dot"></span>`;
     return;
   }
   el.usageBadge.classList.remove("collapsed");
-  // No chat open → keep just the engine header visible (no per-chat stats yet).
+  // No chat open with no engine header (native, no plan) → nothing to show.
   if (!open) {
     el.usageBadge.classList.toggle("multi", !!header);
     el.usageBadge.hidden = !header;
