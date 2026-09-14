@@ -277,73 +277,56 @@ export function currentCaps() {
 // and drop the recognized text into the input; the user reviews and sends.
 // ---------------------------------------------------------------------------
 export const SpeechRec = window.SpeechRecognition || window.webkitSpeechRecognition;
-// `finalText` is every finalized word of the current dictation, concatenated —
-// see takeFinalDelta for why we track it instead of trusting `resultIndex`.
-export const dictation = { rec: null, active: false, interim: "", finalText: "" };
+// Dictation rebuilds the field from a fixed anchor on every recognition event
+// instead of appending deltas — so an engine that re-fires already-final results
+// (Chrome on Android does, with the result index reset after a pause) can never
+// pile them up: the value is recomputed, not accumulated. `prefix`/`suffix` are
+// the text around the caret when dictation began; `committed` holds finalized
+// speech carried across result-list resets; `lastFinal` is the previous event's
+// finals, used to notice such a reset.
+export const dictation = {
+  rec: null,
+  active: false,
+  prefix: "",
+  suffix: "",
+  committed: "",
+  lastFinal: "",
+};
 
-// Return only the newly finalized text in this event, and remember the total.
-//
-// Why not `e.resultIndex`: per spec `results` accumulates every result of the
-// session and `resultIndex` marks the first changed one, so iterating from it
-// should yield only new words. Chrome on Android with `continuous: true` breaks
-// that — it re-delivers already-final results with the index back near 0, so
-// iterating from `resultIndex` re-inserted the whole phrase on every event.
-// That is the "смотри / смотри ещё / смотри ещё какие-то …" pile-up: each event
-// appended everything said so far, again.
-//
-// So: compare against what we actually committed. The accumulated list is a
-// growing prefix, so the delta is the tail. If the new text is NOT a
-// continuation (an engine that restarts its result list after a pause), treat
-// all of it as new instead of silently dropping it.
-export function takeFinalDelta(results) {
-  let all = "";
+// Concatenate the final (wantFinal=true) or interim (false) transcripts of a
+// results list, trimmed.
+export function joinResults(results, wantFinal) {
+  let out = "";
   for (const r of results) {
-    if (r.isFinal) all += r[0].transcript;
+    if (!!r.isFinal === wantFinal) out += r[0].transcript;
   }
-  const delta = all.startsWith(dictation.finalText)
-    ? all.slice(dictation.finalText.length)
-    : all;
-  dictation.finalText = all;
-  return delta;
+  return out.trim();
 }
 
-/** The current non-final tail (what the engine is still refining). */
-export function interimText(results) {
-  let interim = "";
-  for (const r of results) {
-    if (!r.isFinal) interim += r[0].transcript;
-  }
-  return interim;
+// One spoken string: committed finals + this list's finals + the interim tail,
+// whitespace collapsed so gluing is clean.
+export function spokenText(sessionFinal, interim) {
+  return [dictation.committed, sessionFinal, interim]
+    .filter(Boolean)
+    .join(" ")
+    .replace(/\s+/g, " ")
+    .trim();
 }
 
-// Insert text at the current caret (replacing any selection), gluing on a space
-// if it would butt against a word. Returns exactly what was inserted.
-export function dictInsert(text) {
-  if (!text) return "";
-  const v = el.input.value;
-  const s = el.input.selectionStart, e = el.input.selectionEnd;
-  const needSpace = s > 0 && !/\s$/.test(v.slice(0, s)) && !/^\s/.test(text);
-  const ins = (needSpace ? " " : "") + text;
-  el.input.value = v.slice(0, s) + ins + v.slice(e);
-  const caret = s + ins.length;
-  el.input.selectionStart = el.input.selectionEnd = caret;
-  return ins;
-}
-
-// Pull the last interim string back out — but only if it still sits untouched
-// right before the caret. If the user edited or moved away, we leave their text
-// alone (and just forget the stale interim), so nothing is ever "restored".
-export function removeInterim() {
-  const s = dictation.interim;
-  if (!s) return;
-  const v = el.input.value;
-  const caret = el.input.selectionStart;
-  const start = caret - s.length;
-  if (start >= 0 && v.slice(start, caret) === s) {
-    el.input.value = v.slice(0, start) + v.slice(caret);
-    el.input.selectionStart = el.input.selectionEnd = start;
-  }
-  dictation.interim = "";
+// Rewrite the field: anchor prefix + everything spoken so far + anchor suffix,
+// caret parked at the end of the spoken text. Idempotent — safe to call on every
+// event with zero risk of duplication (the whole value is recomputed).
+export function rebuildDictation(sessionFinal, interim) {
+  const spoken = spokenText(sessionFinal, interim);
+  const pre = dictation.prefix;
+  const suf = dictation.suffix;
+  const preGlue = pre && !/\s$/.test(pre) && spoken ? " " : "";
+  // Space before a word-suffix too, so mid-text dictation reads "привет мир конец"
+  // rather than "мирконец". Caret stays at the end of the spoken text.
+  const sufGlue = suf && spoken && !/^\s/.test(suf) && !/\s$/.test(spoken) ? " " : "";
+  const head = pre + preGlue + spoken;
+  el.input.value = head + sufGlue + suf;
+  el.input.selectionStart = el.input.selectionEnd = head.length;
 }
 
 if (SpeechRec) {
@@ -360,19 +343,27 @@ export function startDictation() {
   rec.interimResults = true;
   rec.continuous = true;
 
-  dictation.interim = "";
-  dictation.finalText = "";
-  el.input.focus(); // make the caret live so inserts land where it sits
+  // Anchor: split the field at the caret NOW, so recognized text lands where the
+  // user started dictating and everything after it is preserved.
+  dictation.prefix = el.input.value.slice(0, el.input.selectionStart);
+  dictation.suffix = el.input.value.slice(el.input.selectionEnd);
+  dictation.committed = "";
+  dictation.lastFinal = "";
+  el.input.focus();
 
   rec.onresult = (e) => {
-    // Take out the previously shown interim, then re-insert this event's words
-    // at the *current* caret: final words commit permanently, interim is the
-    // replaceable tail we'll remove next time.
-    removeInterim();
-    const finalChunk = takeFinalDelta(e.results);
-    const interim = interimText(e.results);
-    if (finalChunk) dictInsert(finalChunk);
-    if (interim) dictation.interim = dictInsert(interim);
+    const sessionFinal = joinResults(e.results, true);
+    const interim = joinResults(e.results, false);
+    // If the new list no longer extends the previous one, the engine reset its
+    // result list (common on mobile after a pause) — fold the finished finals
+    // into `committed` so they survive, then continue with the fresh list.
+    if (dictation.lastFinal && !sessionFinal.startsWith(dictation.lastFinal)) {
+      dictation.committed = [dictation.committed, dictation.lastFinal]
+        .filter(Boolean)
+        .join(" ");
+    }
+    dictation.lastFinal = sessionFinal;
+    rebuildDictation(sessionFinal, interim);
     autoGrow();
   };
   rec.onend = () => endDictationUI(true);
@@ -397,8 +388,10 @@ export function stopDictation() {
 export function endDictationUI(ok) {
   dictation.active = false;
   dictation.rec = null;
-  dictation.interim = ""; // any tail left in the field stays as real text
-  dictation.finalText = ""; // next dictation starts its own accumulation
+  // Whatever is in the field stays as real text; the next dictation re-anchors
+  // and starts its own accumulation.
+  dictation.committed = "";
+  dictation.lastFinal = "";
   el.mic.classList.remove("recording");
   el.mic.title = "Диктовка (голосовой ввод)";
   playDictationStop(); // short falling cue: voice input has stopped
